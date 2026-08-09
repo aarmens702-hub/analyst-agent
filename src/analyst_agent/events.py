@@ -1,0 +1,87 @@
+"""Typed events between the turn loop and its drivers (P0 spec section 1).
+
+The hand-written turn loop (loop.py, which implements SessionLike) yields these
+events from its run_turn generator; drivers render them and answer via
+gen.send(). GateRequest is answered with a GateDecision; every other event is
+answered with None; CardReady is terminal for the turn.
+"""
+
+from collections.abc import Generator
+from dataclasses import dataclass
+from typing import Protocol
+
+
+@dataclass(frozen=True)
+class GateRequest:
+    """A model-authored cell awaiting the user's gate decision (R4).
+
+    The driver must answer via gen.send(GateDecision(...)).
+    """
+
+    code: str
+    iteration: int
+
+
+@dataclass(frozen=True)
+class StreamText:
+    """Live stream output from the executing cell; render as it arrives."""
+
+    name: str
+    text: str
+
+
+@dataclass(frozen=True)
+class ArtifactSaved:
+    """A display artifact (e.g. chart PNG) was written under workspace/."""
+
+    path: str
+
+
+@dataclass(frozen=True)
+class Notice:
+    """Loop status line: nudge, cap, kernel_died, restart_offer."""
+
+    kind: str
+    text: str
+
+
+@dataclass(frozen=True)
+class CardReady:
+    """Terminal event of a turn, carrying the finished answer card."""
+
+    card: "CardLike"
+
+
+@dataclass(frozen=True)
+class GateDecision:
+    """Driver's answer to a GateRequest."""
+
+    action: str
+    note: str = ""
+
+    def __post_init__(self) -> None:
+        if self.action not in ("run", "reject"):
+            raise ValueError(
+                f'GateDecision.action must be "run" or "reject", got {self.action!r}'
+            )
+
+
+type Event = GateRequest | StreamText | ArtifactSaved | Notice | CardReady
+
+
+class CardLike(Protocol):
+    """What drivers need from an answer card (card.py, hand-written)."""
+
+    def to_markdown(self) -> str: ...
+
+
+class SessionLike(Protocol):
+    """What drivers consume. loop.py (hand-written) implements this."""
+
+    def load(self, path: str, name: str | None = None) -> None: ...
+
+    def run_turn(
+        self, question: str
+    ) -> Generator[Event, GateDecision | None, None]: ...
+
+    def close(self) -> None: ...
