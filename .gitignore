@@ -9,6 +9,7 @@ dist/
 
 # project
 data/
+workspace/
 .env
 .env.*
 
