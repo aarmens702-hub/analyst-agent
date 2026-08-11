@@ -12,6 +12,7 @@ scoring habit, per the brief.
 """
 
 import argparse
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -23,11 +24,19 @@ RAHA_ROOT = Path(__file__).resolve().parents[1] / "data" / "raha"
 _MISSING = "\x00NA\x00"
 
 
+# A plain number, so "12.0" and "12" score as the same value. Leading zeros are
+# excluded on purpose: losing them is disease 22, so "02115" must not equal 2115.
+_PLAIN_NUMBER = re.compile(r"^[-+]?(0|[1-9]\d*)(\.\d+)?$")
+
+
 def _norm(value: object) -> str:
-    """Stripped-string view of one cell; missing and empty collapse to a sentinel."""
+    """Stripped-string view of one cell; missing and empty collapse to a sentinel,
+    and numbers to a canonical form so formatting never masks value equality."""
     if pd.isna(value):
         return _MISSING
     s = str(value).strip()
+    if _PLAIN_NUMBER.match(s):
+        return f"{float(s):.12g}"
     return s or _MISSING
 
 

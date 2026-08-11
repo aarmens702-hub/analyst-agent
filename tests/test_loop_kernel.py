@@ -39,8 +39,10 @@ def test_kernel_sigkill_recovers_and_replays_loads(tmp_path, monkeypatch):
         "generate",
         scripted_generate(
             [
-                "<execute>import os, signal\n"
-                "os.kill(os.getpid(), signal.SIGKILL)</execute>",
+                (
+                    "<execute>import os, signal\n"
+                    "os.kill(os.getpid(), signal.SIGKILL)</execute>"
+                ),
                 "<answer>the kernel died and came back</answer>",
             ]
         ),

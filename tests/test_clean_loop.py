@@ -3,6 +3,7 @@ decisions, stubbed generate(), fake kernel. Covers fixed / skipped /
 rejected-then-fixed / verify-fail-revert / fail-at-cap / indicators."""
 
 import json
+from typing import ClassVar
 
 import pytest
 
@@ -25,8 +26,8 @@ FIX_B = FIX_A.replace("-999", "-998")
 
 
 class FakeClient:
-    script: list = []
-    executed: list = []
+    script: ClassVar[list] = []
+    executed: ClassVar[list] = []
 
     def __init__(self, workspace_dir, transport_argv=None, data_dir=None):
         self.workspace_dir = workspace_dir

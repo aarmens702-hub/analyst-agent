@@ -99,6 +99,27 @@ def test_dtype_and_whitespace_do_not_mask_equality() -> None:
     assert s["precision"] == 1.0
 
 
+def test_float_parse_of_an_integer_truth_is_a_correct_fix() -> None:
+    """to_numeric turns "12.0 oz" into 12.0; the truth CSV says "12". Same value,
+    and scoring formatting instead of values would report a perfect fix as wrong."""
+    dirty = pd.DataFrame({"oz": ["12.0 oz", "16.0 oz."], "ibu": ["N/A", "60"]})
+    truth = pd.DataFrame({"oz": ["12", "16"], "ibu": ["", "60"]})
+    cleaned = pd.DataFrame({"oz": [12.0, 16.0], "ibu": [float("nan"), 60.0]})
+    s = score(dirty, cleaned, truth)
+    assert s["changed"] == s["should_change"] == s["correct_changes"] == 3
+    assert s["precision"] == 1.0
+    assert s["recall"] == 1.0
+
+
+def test_leading_zeros_still_count_as_a_difference() -> None:
+    """Disease 22 is exactly the loss of leading zeros, so "02115" and 2115 must
+    not be folded together by the numeric comparison."""
+    dirty = pd.DataFrame({"zip": [2115, 90210]})
+    truth = pd.DataFrame({"zip": ["02115", "90210"]})
+    assert score(dirty, dirty.copy(), truth)["should_change"] == 1
+    assert score(dirty, truth.copy(), truth)["correct_changes"] == 1
+
+
 @needs_raha
 def test_raha_identity_checks() -> None:
     dirty = read_table(RAHA / "beers" / "dirty.csv")
