@@ -5,13 +5,16 @@ them and answer GateRequest via gen.send(GateDecision). Repair is not a
 mechanism here — a traceback is an ordinary observation and the loop continues.
 """
 
+import ast
 import hashlib
+import json
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
-from analyst_agent import llm, prompts
+from analyst_agent import llm, prompts, verify
 from analyst_agent.card import AnswerCard, lift_checks
 from analyst_agent.events import (
     ArtifactSaved,
@@ -22,9 +25,11 @@ from analyst_agent.events import (
     StreamText,
 )
 from analyst_agent.kernel.client import DisplayItem, KernelClient, StreamOut
+from analyst_agent.report import CleanReport
 from analyst_agent.transcript import Transcript
 
 MAX_ITERS = 6
+CLEAN_MAX_ATTEMPTS = 3
 EXEC_TIMEOUT_S = 120
 OBS_CLIP = 2000
 VALUE_PREVIEW = 300
@@ -109,6 +114,7 @@ class Session:
         self._registry: list[dict] = []
         self._registry_prev: dict[str, tuple] = {}
         self.card_seq = 0
+        self.report_seq = 0
 
     # -- SessionLike ---------------------------------------------------------
 
@@ -319,34 +325,312 @@ class Session:
         card.save(self.session_dir / "cards")
         yield CardReady(card)
 
+    def clean(self, var: str):
+        """P1 CLEAN flow (spec R5): host drives the checklist, model fixes."""
+        if var not in self._registry_prev:
+            yield Notice("error", f"unknown variable {var!r} — /load it first")
+            return
+        start_ev = self.transcript.append("user", text=f"/clean {var}")
+
+        code = (
+            "from analyst_agent.detect import detect_all\n"
+            "import json\n"
+            f"print(json.dumps(detect_all({var}, {var!r})))"
+        )
+        result, stream, _, diag_ev = yield from self._exec_events(code, quiet=True)
+        if result.status != "ok":
+            err = (result.error or {}).get("evalue", result.status)
+            yield Notice("error", f"diagnosis failed: {err}")
+            return
+        diagnosis = json.loads(stream.strip().splitlines()[-1])
+        fixable = [f for f in diagnosis["findings"] if not f["indicator"]]
+        indicators = [f for f in diagnosis["findings"] if f["indicator"]]
+        clear = diagnosis["clear"]
+        yield StreamText(
+            "stdout", self._diagnosis_text(var, fixable, indicators, clear)
+        )
+
+        baseline_cols = yield from self._snapshot_baseline(var)
+        records: list[dict] = []
+        evs_chain = [start_ev, diag_ev]
+        for i, finding in enumerate(fixable, 1):
+            rec = yield from self._fix_mini_turn(
+                var, finding, i, len(fixable), baseline_cols
+            )
+            records.append(rec)
+            evs_chain.extend(rec["transcript_evs"])
+            if rec["status"] == "fixed":
+                baseline_cols = yield from self._snapshot_baseline(var)
+
+        outputs: dict = {}
+        stats: dict = {}
+        if any(r["status"] == "fixed" for r in records):
+            outputs, stats, out_ev = yield from self._write_cleaned(var, records)
+            evs_chain.append(out_ev)
+
+        self.report_seq += 1
+        report_id = f"{self.session_id}-r{self.report_seq:03d}"
+        source = next(
+            (d for d in self.datasets if d["variable"] == var),
+            {"path": None, "sha256": None},
+        )
+        rep_ev = self.transcript.append(
+            "card", report_id=report_id, variable=var, kind_note="clean_report"
+        )
+        report = CleanReport(
+            report_id=report_id,
+            session=self.session_id,
+            variable=var,
+            source={"path": source.get("path"), "sha256": source.get("sha256")},
+            fixes=records,
+            indicators=indicators,
+            clear=clear,
+            outputs=outputs,
+            stats=stats,
+            event_chain=[*evs_chain, rep_ev],
+            created=datetime.now().astimezone().isoformat(timespec="seconds"),
+        )
+        report.save(self.session_dir / "clean_reports")
+        yield StreamText("stdout", "\n" + report.to_markdown() + "\n")
+
     def close(self) -> None:
         try:
             self.transcript.append("session_meta", event="close")
         finally:
             self.client.close()
 
+    # -- CLEAN internals -----------------------------------------------------
+
+    def _snapshot_baseline(self, var: str):
+        result, _, _, _ev = yield from self._exec_events(
+            verify.baseline_cell(var), quiet=True
+        )
+        return json.loads(ast.literal_eval(result.value))
+
+    def _fix_mini_turn(
+        self, var: str, finding: dict, i: int, n: int, baseline_cols: list[str]
+    ):
+        t0 = time.monotonic()
+        title = (
+            f"fix {i}/{n} · {finding['slug']} · {finding['grade']} · "
+            f"conf {finding['confidence']:.2f} · {finding['evidence'][:70]}"
+        )
+        msgs = [
+            {"role": "system", "content": prompts.CLEAN_PROMPT},
+            {"role": "user", "content": self._finding_context(var, finding)},
+        ]
+        evs: list[int] = []
+        attempts, nudged = 0, False
+        status, fix_source, verify_info = "failed", None, {}
+
+        while attempts < CLEAN_MAX_ATTEMPTS:
+            try:
+                resp = yield from self._generate_scoped(msgs)
+            except Exception as exc:  # noqa: BLE001 — surface, fail the finding
+                yield Notice("llm_error", f"{type(exc).__name__}: {exc}")
+                break
+            evs.append(self.transcript.append("model", text=resp))
+            msgs.append({"role": "assistant", "content": resp})
+            kind, body = parse_tags(resp)
+
+            if kind != "execute" or "def fix_" not in body:
+                if not nudged:
+                    nudged = True  # first malformed reply is free, like QUERY
+                else:
+                    attempts += 1
+                msgs.append({"role": "user", "content": prompts.CLEAN_NUDGE_PROMPT})
+                continue
+
+            attempts += 1
+            decision = yield GateRequest(body, attempts, title=title)
+            if not isinstance(decision, GateDecision):
+                decision = GateDecision("run")
+            evs.append(
+                self.transcript.append(
+                    "gate", action=decision.action, note=decision.note
+                )
+            )
+            if decision.action == "skip":
+                status = "skipped"
+                break
+            if decision.action == "reject":
+                msgs.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "<observation>user rejected the fix: "
+                            f"{decision.note}</observation>"
+                        ),
+                    }
+                )
+                continue
+
+            result, stream, paths, ev_id = yield from self._exec_events(body)
+            evs.append(ev_id)
+            self._stamp_registry(result.registry, ev_id)
+            if result.status != "ok":
+                _, _, _, rev_ev = yield from self._exec_events(
+                    verify.revert_cell(var), quiet=True
+                )
+                evs.append(rev_ev)
+                msgs.append(
+                    {
+                        "role": "user",
+                        "content": self._observation(ev_id, result, stream, paths, []),
+                    }
+                )
+                continue
+
+            fix_source = body
+            vres, _, _, v_ev = yield from self._exec_events(
+                verify.verify_cell(var, finding, baseline_cols), quiet=True
+            )
+            evs.append(v_ev)
+            if vres.status == "ok":
+                status = "fixed"
+                verify_info = {"layer1": "pass"}
+                break
+            _, _, _, rev_ev = yield from self._exec_events(
+                verify.revert_cell(var), quiet=True
+            )
+            evs.append(rev_ev)
+            verr = (vres.error or {}).get("evalue", vres.status)
+            verify_info = {"layer1": "fail", "error": verr}
+            msgs.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"<observation>verification failed: {verr} — the "
+                        "dataframe was reverted; revise the fix</observation>"
+                    ),
+                }
+            )
+
+        yield Notice("fix", f"{finding['slug']}: {status} ({attempts} attempts)")
+        return {
+            "finding": finding,
+            "status": status,
+            "attempts": attempts,
+            "fix_source": fix_source,
+            "verify": verify_info,
+            "transcript_evs": evs,
+            "elapsed_s": round(time.monotonic() - t0, 1),
+        }
+
+    def _diagnosis_text(
+        self, var: str, fixable: list, indicators: list, clear: list
+    ) -> str:
+        header = (
+            f"\ndiagnosis of {var}: {len(fixable)} fixable finding(s), "
+            f"{len(indicators)} indicator(s), {len(clear)} signal(s) clear\n"
+        )
+        lines = [header]
+        for i, f in enumerate(fixable, 1):
+            cols = ", ".join(f["columns"]) or "table"
+            lines.append(
+                f"  {i}. d{f['disease']:02d} {f['slug']} [{cols}] "
+                f"{f['grade']} conf {f['confidence']:.2f} — {f['evidence']}\n"
+            )
+        for f in indicators:
+            lines.append(
+                f"  ⚠ d{f['disease']:02d} {f['slug']} (indicator, not fixed) "
+                f"— {f['evidence']}\n"
+            )
+        return "".join(lines)
+
+    def _finding_context(self, var: str, finding: dict) -> str:
+        profile = ""
+        for ds in self.datasets:
+            if ds["variable"] == var:
+                for msg in self.history:
+                    content = str(msg.get("content", ""))
+                    if f"<dataset variable={var!r}>" in content:
+                        profile = content
+                        break
+        return (
+            f"Variable: {var}\n\nFinding to fix:\n{json.dumps(finding, indent=2)}"
+            + (f"\n\n{profile}" if profile else "")
+        )
+
+    def _write_cleaned(self, var: str, records: list[dict]):
+        cleaned_dir = self.session_dir / "cleaned"
+        cleaned_dir.mkdir(parents=True, exist_ok=True)
+        if self.docker:
+            kernel_path = f"/workspace/cleaned/{var}.parquet"
+        else:
+            kernel_path = str(cleaned_dir / f"{var}.parquet")
+        code = (
+            "from pathlib import Path\n"
+            f"Path({json.dumps(kernel_path)}).parent.mkdir("
+            "parents=True, exist_ok=True)\n"
+            f"{var}.to_parquet({json.dumps(kernel_path)})\n"
+            f'f"saved {{len({var})}} rows x {{len({var}.columns)}} cols"'
+        )
+        result, _, _, ev_id = yield from self._exec_events(code, quiet=True)
+        entry = next((e for e in self._registry if e["name"] == var), {})
+        stats = {"shape": entry.get("shape"), "saved": result.status == "ok"}
+        lineage_path = cleaned_dir / f"{var}.lineage.json"
+        source = next((d for d in self.datasets if d["variable"] == var), {})
+        lineage_path.write_text(
+            json.dumps(
+                {
+                    "source": source,
+                    "session": self.session_id,
+                    "fixes": records,
+                    "stats": stats,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        outputs = {
+            "parquet": str(cleaned_dir / f"{var}.parquet"),
+            "lineage": str(lineage_path),
+        }
+        return outputs, stats, ev_id
+
     # -- internals -----------------------------------------------------------
 
     def _generate_streaming(self):
+        return (
+            yield from self._generate_scoped(
+                [
+                    {"role": "system", "content": prompts.SYSTEM_PROMPT},
+                    *self.history,
+                ]
+            )
+        )
+
+    def _generate_scoped(self, msgs: list[dict]):
+        """Stream a completion for an explicit message list + fresh registry."""
         parts: list[str] = []
-        for chunk in llm.generate(self._context()):
+        context = [*msgs, {"role": "user", "content": self._registry_block()}]
+        for chunk in llm.generate(context):
             parts.append(chunk)
             yield StreamText("model", chunk)
         yield StreamText("model", "\n")
         return "".join(parts)
 
-    def _execute_cell(self, code: str):
+    def _exec_events(self, code: str, quiet: bool = False):
+        """Execute a cell; yield render events unless quiet; log the exec.
+
+        Returns (result, stream_text, display_paths, ev_id).
+        """
         stream_parts: list[str] = []
         display_paths: list[str] = []
         result = None
         for ev in self.client.execute(code, timeout_s=EXEC_TIMEOUT_S):
             if isinstance(ev, StreamOut):
                 stream_parts.append(ev.text)
-                yield StreamText(ev.name, ev.text)
+                if not quiet:
+                    yield StreamText(ev.name, ev.text)
             elif isinstance(ev, DisplayItem):
                 if ev.mime == "image/png" and not ev.dropped:
                     display_paths.append(ev.payload)
-                    yield ArtifactSaved(ev.payload)
+                    if not quiet:
+                        yield ArtifactSaved(ev.payload)
                 else:
                     stream_parts.append(f"[display] {ev.payload}")
             else:
@@ -362,12 +646,16 @@ class Session:
             artifacts=display_paths,
             truncated=result.truncated,
         )
+        return result, "".join(stream_parts), display_paths, ev_id
+
+    def _execute_cell(self, code: str):
+        result, stream_text, display_paths, ev_id = yield from self._exec_events(code)
         delta = self._stamp_registry(result.registry, ev_id)
         self.history.append(
             {
                 "role": "user",
                 "content": self._observation(
-                    ev_id, result, "".join(stream_parts), display_paths, delta
+                    ev_id, result, stream_text, display_paths, delta
                 ),
             }
         )

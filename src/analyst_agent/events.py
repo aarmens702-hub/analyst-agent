@@ -15,11 +15,13 @@ from typing import Protocol
 class GateRequest:
     """A model-authored cell awaiting the user's gate decision (R4).
 
-    The driver must answer via gen.send(GateDecision(...)).
+    The driver must answer via gen.send(GateDecision(...)). `title` is empty
+    for QUERY turns; CLEAN fix turns carry the finding header (P1 R8).
     """
 
     code: str
     iteration: int
+    title: str = ""
 
 
 @dataclass(frozen=True)
@@ -60,9 +62,10 @@ class GateDecision:
     note: str = ""
 
     def __post_init__(self) -> None:
-        if self.action not in ("run", "reject"):
+        if self.action not in ("run", "reject", "skip"):
             raise ValueError(
-                f'GateDecision.action must be "run" or "reject", got {self.action!r}'
+                'GateDecision.action must be "run", "reject", or "skip", '
+                f"got {self.action!r}"
             )
 
 
@@ -83,5 +86,7 @@ class SessionLike(Protocol):
     def run_turn(
         self, question: str
     ) -> Generator[Event, GateDecision | None, None]: ...
+
+    def clean(self, var: str) -> Generator[Event, GateDecision | None, None]: ...
 
     def close(self) -> None: ...
