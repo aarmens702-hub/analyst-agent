@@ -24,13 +24,14 @@ from analyst_agent.repl import GATE_PROMPT, PROMPT, run_repl
 
 
 class FakeSession:
-    """SessionLike test double; run_turn is a real generator scripted per test."""
+    """SessionLike test double; run_turn/clean are real generators scripted per test."""
 
     def __init__(self, script: list[Event] | None = None) -> None:
         self.script = script or []
         self.sent: list[GateDecision | None] = []  # every gen.send() value received
         self.loads: list[tuple[str, str | None]] = []
         self.questions: list[str] = []
+        self.cleans: list[str] = []
         self.closed = False
 
     def load(self, path: str, name: str | None = None) -> None:
@@ -38,6 +39,11 @@ class FakeSession:
 
     def run_turn(self, question: str) -> Generator[Event, GateDecision | None, None]:
         self.questions.append(question)
+        for event in self.script:
+            self.sent.append((yield event))
+
+    def clean(self, var: str) -> Generator[Event, GateDecision | None, None]:
+        self.cleans.append(var)
         for event in self.script:
             self.sent.append((yield event))
 
@@ -201,7 +207,7 @@ def test_full_turn_renders_box_stream_artifact_and_card() -> None:
     assert '│ out = df["v"].median()' in printer.output
     assert "│ print(out)" in printer.output
     assert "┌" in printer.output and "└" in printer.output
-    assert "[r]un / [j]eject: " in input_fn.prompts
+    assert "[r]un / [j]eject / [s]kip: " in input_fn.prompts
     assert fake.decisions == [GateDecision("run")]
 
     # stream chunks render live, without added newlines, in order
@@ -255,6 +261,90 @@ def test_gate_default_answer_runs() -> None:
     )
 
     assert fake.decisions == [GateDecision("run")]
+
+
+# --- P1 CLEAN extensions: /clean dispatch, gate titles, [s]kip (R8, R11) ---
+
+
+def test_gate_prompt_offers_run_reject_skip() -> None:
+    assert GATE_PROMPT == "[r]un / [j]eject / [s]kip: "
+
+
+def test_skip_at_gate_sends_skip_decision() -> None:
+    fake = FakeSession(script=[GateRequest("df.mean()", 1), CardReady(FakeCard())])
+    input_fn = scripted_input("q", "s", "/quit")
+
+    run_repl(fake, input_fn=input_fn, print_fn=RecordingPrint())
+
+    assert fake.decisions == [GateDecision("skip")]
+    assert "note: " not in input_fn.prompts, "skip must not prompt for a note"
+
+
+def test_clean_dispatches_var_and_drives_to_card() -> None:
+    title = "fix 1/2 · sentinel-missing · AUTO · conf 0.97 · 143 cells are '-999'"
+    fake = FakeSession(
+        script=[
+            GateRequest("df = fix_sentinel_missing(df)", 1, title=title),
+            CardReady(FakeCard("# clean report")),
+        ]
+    )
+    printer = RecordingPrint()
+    input_fn = scripted_input("/clean df", "r", "/quit")
+
+    run_repl(fake, input_fn=input_fn, print_fn=printer)
+
+    assert fake.cleans == ["df"]
+    assert fake.questions == [], "/clean must not be dispatched as a question"
+    assert fake.decisions == [GateDecision("run")]
+    assert "# clean report" in printer.output
+    assert fake.closed
+
+
+def test_clean_generator_may_end_without_card() -> None:
+    fake = FakeSession(script=[Notice("diagnosis", "no findings")])
+    input_fn = scripted_input("/clean df", "/quit")
+
+    run_repl(fake, input_fn=input_fn, print_fn=RecordingPrint())
+
+    assert fake.cleans == ["df"]
+    assert fake.sent == [None], "StopIteration returns the REPL to its prompt"
+    assert fake.closed
+
+
+def test_clean_without_var_prints_usage() -> None:
+    fake = FakeSession()
+    printer = RecordingPrint()
+
+    run_repl(fake, input_fn=scripted_input("/clean", "/quit"), print_fn=printer)
+
+    assert fake.cleans == []
+    assert fake.questions == []
+    assert "usage: /clean <variable>" in printer.output
+
+
+def test_titled_gate_renders_header_line_above_code_box() -> None:
+    title = "fix 4/12 · sentinel-missing · AUTO · conf 0.97 · 143 cells are '-999'"
+    fake = FakeSession(
+        script=[GateRequest("df = fix(df)", 1, title=title), CardReady(FakeCard())]
+    )
+    printer = RecordingPrint()
+
+    run_repl(fake, input_fn=scripted_input("/clean df", "r", "/quit"), print_fn=printer)
+
+    header_at = printer.calls.index((f"── {title} ──", "\n"))
+    box_top_at = next(
+        i for i, (text, _) in enumerate(printer.calls) if text.startswith("┌")
+    )
+    assert header_at == box_top_at - 1, "title renders directly above the code box"
+
+
+def test_untitled_gate_renders_no_header_line() -> None:
+    fake = FakeSession(script=[GateRequest("df.mean()", 1), CardReady(FakeCard())])
+    printer = RecordingPrint()
+
+    run_repl(fake, input_fn=scripted_input("q", "r", "/quit"), print_fn=printer)
+
+    assert not any(text.startswith("──") for text, _ in printer.calls)
 
 
 def test_repl_import_hygiene() -> None:

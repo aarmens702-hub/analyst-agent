@@ -1,7 +1,8 @@
-"""Terminal REPL driver for the turn loop: rendering and gate input only (R5).
+"""Terminal REPL driver: rendering and gate input only (P0 R5, P1 R11).
 
 Deliberately dumb. No model logic, no kernel logic; it renders events yielded
-by the hand-written turn loop and feeds gate decisions back in.
+by the hand-written session generators (run_turn for questions, clean for
+/clean) and feeds gate decisions back in.
 """
 
 from analyst_agent.events import (
@@ -13,9 +14,9 @@ from analyst_agent.events import (
     StreamText,
 )
 
-BANNER = "analyst-agent — /load <path> [name] · ask a question · /quit"
+BANNER = "analyst-agent — /load <path> [name] · /clean <var> · ask a question · /quit"
 PROMPT = "❯ "
-GATE_PROMPT = "[r]un / [j]eject: "
+GATE_PROMPT = "[r]un / [j]eject / [s]kip: "
 
 
 def run_repl(session, auto_run: bool = False, input_fn=input, print_fn=print) -> None:
@@ -31,20 +32,24 @@ def run_repl(session, auto_run: bool = False, input_fn=input, print_fn=print) ->
             if line.split()[:1] == ["/load"]:
                 _load(session, line, print_fn)
                 continue
-            _drive_turn(session, line, auto_run, input_fn, print_fn)
+            if line.split()[:1] == ["/clean"]:
+                _clean(session, line, auto_run, input_fn, print_fn)
+                continue
+            _drive(session.run_turn(line), auto_run, input_fn, print_fn)
     except (EOFError, KeyboardInterrupt):
         pass
     session.close()
 
 
-def _drive_turn(session, question: str, auto_run: bool, input_fn, print_fn) -> None:
-    """Drive one run_turn generator: render events, answer via gen.send()."""
-    gen = session.run_turn(question)
+def _drive(gen, auto_run: bool, input_fn, print_fn) -> None:
+    """Drive one event generator (run_turn or clean): render, answer via send()."""
     try:
         event = next(gen)
         while True:
             answer = None
             if isinstance(event, GateRequest):
+                if event.title:
+                    print_fn(f"── {event.title} ──")
                 _print_code_box(event.code, event.iteration, print_fn)
                 answer = GateDecision("run") if auto_run else _gate_decision(input_fn)
             elif isinstance(event, StreamText):
@@ -62,8 +67,11 @@ def _drive_turn(session, question: str, auto_run: bool, input_fn, print_fn) -> N
 
 
 def _gate_decision(input_fn) -> GateDecision:
-    if input_fn(GATE_PROMPT).strip().lower() == "j":
+    choice = input_fn(GATE_PROMPT).strip().lower()
+    if choice == "j":
         return GateDecision("reject", input_fn("note: ").strip())
+    if choice == "s":
+        return GateDecision("skip")
     return GateDecision("run")
 
 
@@ -84,3 +92,11 @@ def _load(session, line: str, print_fn) -> None:
         return
     name = parts[2] if len(parts) > 2 else None
     session.load(parts[1], name)
+
+
+def _clean(session, line: str, auto_run: bool, input_fn, print_fn) -> None:
+    parts = line.split()
+    if len(parts) < 2:
+        print_fn("usage: /clean <variable>")
+        return
+    _drive(session.clean(parts[1]), auto_run, input_fn, print_fn)
