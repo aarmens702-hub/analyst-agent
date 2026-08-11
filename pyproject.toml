@@ -37,3 +37,6 @@ tdd_guard_project_root = "/Users/aarmensidhu/Desktop/analyst-agent"
 
 [tool.ruff]
 target-version = "py312"
+# ruff formats fenced code in markdown, and the specs' pseudocode is written for
+# reading, not for running. Keep `ruff format .` off the design docs.
+extend-exclude = ["specs", "docs"]
