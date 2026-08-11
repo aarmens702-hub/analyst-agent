@@ -269,20 +269,24 @@ def test_repl_import_hygiene() -> None:
         assert name not in src, f"repl.py must not touch {name}"
 
 
-def test_main_without_core_exits_1_pointing_at_spec() -> None:
-    """python -m analyst_agent runs before loop.py exists: friendly exit, not a crash."""
+def test_main_without_api_key_exits_1(tmp_path) -> None:
+    """python -m analyst_agent without a key: friendly exit, not a traceback."""
+    import os
     import subprocess
     import sys
 
+    env = dict(os.environ)
+    env["DEEPSEEK_API_KEY"] = ""  # empty beats .env: load_dotenv never overrides
     proc = subprocess.run(
         [sys.executable, "-m", "analyst_agent"],
         capture_output=True,
         text=True,
         check=False,
+        env=env,
+        cwd=tmp_path,
     )
     assert proc.returncode == 1
-    assert "loop.py" in proc.stdout
-    assert "specs/2026-08-09-p0-core-design.md" in proc.stdout
+    assert "DEEPSEEK_API_KEY" in proc.stdout
 
     from analyst_agent import main
 

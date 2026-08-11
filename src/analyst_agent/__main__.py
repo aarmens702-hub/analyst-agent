@@ -1,14 +1,14 @@
-"""Entry point: wires the hand-written core (loop.Session) to the REPL driver.
-
-Runs before the core exists: exits 1 with a pointer at the spec instead of a
-traceback, so `uv run python -m analyst_agent` is honest at every stage of P0.
-"""
+"""Entry point: wires the hand-written core (loop.Session) to the REPL driver."""
 
 import argparse
+import os
 import sys
+
+from dotenv import load_dotenv
 
 
 def main() -> int:
+    load_dotenv()
     parser = argparse.ArgumentParser(prog="analyst-agent")
     parser.add_argument(
         "--auto-run", action="store_true", help="skip the accept/run gate (dev only)"
@@ -16,7 +16,19 @@ def main() -> int:
     parser.add_argument(
         "--workspace", default="workspace", help="session workspace directory"
     )
+    parser.add_argument(
+        "--data-dir", default="data", help="directory of immutable source datasets"
+    )
+    parser.add_argument(
+        "--docker",
+        action="store_true",
+        help="run the kernel in the net-none container (default: subprocess)",
+    )
     args = parser.parse_args()
+
+    if not os.environ.get("DEEPSEEK_API_KEY"):
+        print("DEEPSEEK_API_KEY is not set — put it in .env or export it.")
+        return 1
 
     try:
         from analyst_agent.loop import Session
@@ -33,7 +45,9 @@ def main() -> int:
 
     from analyst_agent.repl import run_repl
 
-    session = Session(workspace=args.workspace)
+    session = Session(
+        workspace=args.workspace, data_dir=args.data_dir, docker=args.docker
+    )
     run_repl(session, auto_run=args.auto_run)
     return 0
 
