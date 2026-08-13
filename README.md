@@ -2,9 +2,9 @@
 
 An analyst agent that remembers. It cleans messy real-world data in a
 persistent, sandboxed IPython kernel; answers questions over it; and ships
-every answer with the code that produced it, the checks that actually ran,
-and the lineage from raw file to claim. Cleaning fixes are verified, recorded,
-and (from P2) compound as governed, tested, reusable skills.
+every answer with the code that produced it, the checks that actually ran, and
+the lineage from raw file to claim. Verified cleaning fixes become governed,
+test-gated skills that replay on data they were never written for.
 
 ## Quickstart
 
@@ -21,6 +21,9 @@ In the REPL:
 /load data/raha/beers/dirty.csv beers        load a CSV as a kernel variable
 which brewery has the most beers?            ask anything — code is gated, then runs
 /clean beers                                 diagnose 22 diseases, fix one by one
+/clean-family "data/vancouver/*.csv" tax     harmonize a family, then clean each slice
+/skills                                      the library: what it holds, what it earned
+/why                                         where an answer came from, and if it holds
 /quit
 ```
 
@@ -29,21 +32,61 @@ sends a steering note back, `[s]kip` (clean mode) leaves a finding unfixed.
 `--auto-run` skips gates for development. `--docker` runs the kernel inside a
 no-network container instead of a subprocess.
 
-Answers arrive as **cards** (answer + code + passed asserts + sha256 lineage)
-under `workspace/<session>/cards/`. Cleaning runs produce **clean reports**,
-a dtype-preserving parquet copy, and a lineage sidecar under the session
-directory — originals in `data/` are never modified.
+There is also a browser UI over the same session:
+
+```bash
+uv run streamlit run src/analyst_agent/app.py
+```
 
 ## How it works
 
 The LLM never sees your data. It sees a schema/stats profile and a live
 variable registry, and writes small code cells against data that stays loaded
-in a persistent kernel (subprocess in dev, `--network none` Docker in
-sandbox mode), reached over an NDJSON stdio protocol. Tracebacks come back as
-observations, so repair is just the next iteration. A check mark can only come
-from an assert that executed; a cleaning fix counts as verified only when the
-detection signal that found the disease re-runs clean, row and untouched-column
-invariants hold, and the model's own asserts pass.
+in a persistent kernel (subprocess in dev, `--network none` Docker in sandbox
+mode), reached over an NDJSON stdio protocol. Tracebacks come back as
+observations, so repair is just the next iteration.
+
+Three things have to hold before a claim counts:
+
+- **A check mark comes only from an assert that executed.** Nothing is marked
+  verified on the model's say-so.
+- **A cleaning fix counts as verified** only when the detection signal that
+  found the disease re-runs clean, row and untouched-column invariants hold,
+  and the model's own asserts pass. Otherwise it reverts.
+- **An answer is trusted** only if it is reachable from raw bytes with passing
+  checks on every step between. `/why` prints that chain, and says which of the
+  two ways it failed when it fails.
+
+An intent check runs before each answer ships: one narrow call that reads the
+executed code back, states what it actually computed, and diffs that against
+the question. It catches correct code answering the wrong question — the
+failure assertions structurally cannot see.
+
+## Skills
+
+A verified fix does not die with the session. After a clean run, each
+model-authored fix is rewritten as a column-general `fix(df, columns)` and has
+to earn its place:
+
+1. Re-run against the **frozen original case**: it must still trip the detector
+   there, must clear it, and must leave never-broken rows alone.
+2. Its own shipped test must pass.
+3. A human says yes.
+
+Both executions happen inside the sandbox. No LLM judges admission.
+
+Admitted skills start on **probation** — retrieved and applied, but always
+gated. Three successes across **two different datasets** promote a skill to
+**proven**, and a proven skill on an AUTO-grade finding fixes it with no model
+call and no gate. Verification still runs. Two consecutive verification
+failures retire it to `skills/retired/`, and the active library is capped.
+
+Skills are [Agent Skills](https://agentskills.io) `SKILL.md` folders, so the
+library is portable to any tool that speaks the standard:
+
+```bash
+uv run python scripts/export_skills.py --out dist/skills
+```
 
 ## Development
 
@@ -52,8 +95,13 @@ uv run pytest                    # full suite (kernel protocol runs containerles
 uv run pytest -m docker          # container end-to-end (needs Docker running)
 uv run ruff check --fix . && uv run ruff format .
 uv run python scripts/score_fixes.py <cleaned.parquet> beers   # fix P/R vs truth
+uv run python scripts/ablate_governance.py                     # governed vs not
 ```
 
-Specs live in `specs/` (P0 core, P1 clean mode). Research and positioning:
+Tests are guarded by [tdd-guard](https://github.com/nizos/tdd-guard): one new
+test at a time, red before green.
+
+Specs live in `specs/` — P0 core, P1 clean mode, P2 skill harness, P2.5 family
+mode. Research and positioning:
 `../mailo/coop-project/analyst-agent-brief.md` and
 `analyst-agent-build-research.md`.
