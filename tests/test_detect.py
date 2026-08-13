@@ -599,3 +599,26 @@ def test_d04_evidence_quotes_the_tokens_as_they_actually_appear() -> None:
     (f,) = _of(detect_all(dirty), 4)
     assert "N/A" in f["evidence"]
     assert f["stats"]["tokens"] == ["N/A"]
+
+
+VANCOUVER = Path(__file__).resolve().parent.parent / "data" / "vancouver"
+needs_vancouver = pytest.mark.skipif(
+    len(list(VANCOUVER.glob("property-tax-*.csv"))) < 2,
+    reason="fewer than two Vancouver slices — run scripts/fetch_vancouver.py",
+)
+
+
+@needs_vancouver
+def test_detect_family_finds_the_real_vancouver_era_drift() -> None:
+    """The compounding demo rests on this being true of real files: the
+    2006-2010 era has no `note` column and types drift across eras."""
+    frames = {
+        p.stem: pd.read_csv(p, sep=";", encoding="utf-8-sig", nrows=500)
+        for p in sorted(VANCOUVER.glob("property-tax-*.csv"))[:2]
+    }
+    (finding,) = detect_family(frames)
+
+    assert finding["disease"] == 20
+    assert finding["grade"] == "GATE"
+    drifted = set(finding["stats"]["only_in_a"]) | set(finding["stats"]["only_in_b"])
+    assert "note" in drifted, "the era boundary the harmonizer exists to bridge"
