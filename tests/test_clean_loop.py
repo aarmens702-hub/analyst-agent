@@ -373,6 +373,147 @@ def test_a_skill_applied_fix_never_spawns_another_skill(stocked, monkeypatch):
     assert report_of(stocked)["skills_admitted"] == []
 
 
+@pytest.fixture
+def stocked_two(session, tmp_path):
+    """A session whose library holds two skills for disease 4, on disk —
+    for proving retrieval tries the ranking, not just the top hit."""
+    root = tmp_path / "skills"
+    skills.save(
+        skills.Skill(
+            name="fix-sentinel-missing",
+            description="Replace sentinel tokens with NaN when a column holds 'N/A'.",
+            fix_source="def fix(df, columns):\n    return df.copy()\n",
+            test_source="def test_fix():\n    assert True\n",
+            metadata={"disease": "4"},
+        ),
+        root,
+    )
+    skills.save(
+        skills.Skill(
+            name="fix-sentinel-missing-alt",
+            description="Replace an alternate sentinel token with NaN.",
+            fix_source="def fix(df, columns):\n    return df.copy()\n",
+            test_source="def test_fix():\n    assert True\n",
+            metadata={"disease": "4"},
+        ),
+        root,
+    )
+    session.skills_dir = root
+    session.library = library.Library(root=root)
+    return session
+
+
+def test_second_candidate_rescues_when_the_first_fails_verification(
+    stocked_two, monkeypatch
+):
+    """R11: a failed skill must not waste the library's other candidates."""
+    gen_stub = counting_generate([])
+    monkeypatch.setattr(llm, "generate", gen_stub)
+    stocked_two.library.register("fix-sentinel-missing", disease=4)
+    stocked_two.library.register("fix-sentinel-missing-alt", disease=4)
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # first skill applies
+        [err("signal still fires")],  # ... but fails verification
+        [ok(value="'reverted'")],  # reverted before the next candidate is tried
+        [ok()],  # second skill applies
+        [ok()],  # second skill verifies
+        baseline(),  # refresh after fixed
+        saved(),
+    ]
+    events = drive(
+        stocked_two.clean("df"),
+        decisions=[GateDecision("run"), GateDecision("run")],
+    )
+
+    assert gen_stub.calls == [], "a rescue by the library must not consult the model"
+    assert [e for e in events if isinstance(e, GateRequest)]
+    rep = report_of(stocked_two)
+    assert rep["fixes"][0]["status"] == "fixed"
+    assert rep["fixes"][0]["origin"] == "skill:fix-sentinel-missing-alt"
+    assert stocked_two.library.entries["fix-sentinel-missing"]["failures"] == 1
+    assert stocked_two.library.entries["fix-sentinel-missing-alt"]["successes"] == 1
+
+
+def test_when_every_candidate_fails_the_model_gets_the_finding(
+    stocked_two, monkeypatch
+):
+    """Both candidates take a scored failure before the model is asked."""
+    monkeypatch.setattr(llm, "generate", gen([FIX_A]))
+    stocked_two.library.register("fix-sentinel-missing", disease=4)
+    stocked_two.library.register("fix-sentinel-missing-alt", disease=4)
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # first skill applies
+        [err("signal still fires")],  # ... fails verification
+        [ok(value="'reverted'")],
+        [ok()],  # second skill applies
+        [err("still there too")],  # ... also fails verification
+        [ok(value="'reverted'")],
+        [ok()],  # the model's fix
+        [ok()],  # verifies
+        case(),
+        baseline(),
+        saved(),
+    ]
+    drive(
+        stocked_two.clean("df"),
+        decisions=[GateDecision("run"), GateDecision("run")],
+    )
+
+    rep = report_of(stocked_two)
+    assert rep["fixes"][0]["status"] == "fixed"
+    assert rep["fixes"][0]["origin"] == "model"
+    assert stocked_two.library.entries["fix-sentinel-missing"]["failures"] == 1
+    assert stocked_two.library.entries["fix-sentinel-missing-alt"]["failures"] == 1
+
+
+def test_the_cap_bounds_how_many_candidates_are_tried(stocked_two, monkeypatch):
+    """A large library must not turn one finding into a long chain of cells."""
+    monkeypatch.setattr("analyst_agent.loop.SKILL_ATTEMPT_CAP", 1)
+    monkeypatch.setattr(llm, "generate", gen([FIX_A]))
+    stocked_two.library.register("fix-sentinel-missing", disease=4)
+    stocked_two.library.register("fix-sentinel-missing-alt", disease=4)
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # the one candidate the cap allows
+        [err("signal still fires")],
+        [ok(value="'reverted'")],
+        [ok()],  # the model's fix, since the cap stops before a second try
+        [ok()],
+        case(),
+        baseline(),
+        saved(),
+    ]
+    drive(stocked_two.clean("df"), decisions=[GateDecision("run")])
+
+    rep = report_of(stocked_two)
+    assert rep["fixes"][0]["origin"] == "model"
+    assert stocked_two.library.entries["fix-sentinel-missing"]["failures"] == 1
+    assert stocked_two.library.entries["fix-sentinel-missing-alt"]["uses"] == 0
+
+
+def test_a_human_skip_ends_the_whole_chain(stocked_two, monkeypatch):
+    """A skip means leave this finding alone, not try the next candidate."""
+    monkeypatch.setattr(llm, "generate", counting_generate([]))
+    stocked_two.library.register("fix-sentinel-missing", disease=4)
+    stocked_two.library.register("fix-sentinel-missing-alt", disease=4)
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+    ]
+    drive(stocked_two.clean("df"), decisions=[GateDecision("skip")])
+
+    rep = report_of(stocked_two)
+    assert rep["fixes"][0]["status"] == "skipped"
+    assert rep["fixes"][0]["origin"] == "skill:fix-sentinel-missing"
+    assert stocked_two.library.entries["fix-sentinel-missing"]["uses"] == 0
+    assert stocked_two.library.entries["fix-sentinel-missing-alt"]["uses"] == 0
+
+
 # --- P2.5: family mode -------------------------------------------------------
 
 

@@ -33,6 +33,9 @@ MAX_ITERS = 6
 CLEAN_MAX_ATTEMPTS = 3
 HEARTBEAT_EVERY = 20  # reasoning chunks per progress tick
 SKILL_MAX_ATTEMPTS = 2  # one proposal, one revision (R6)
+# Ranked candidates tried per finding (R11) before falling through to the
+# model — bounds a large library to a few failing cells, not a long chain.
+SKILL_ATTEMPT_CAP = 3
 EXEC_TIMEOUT_S = 120
 OBS_CLIP = 2000
 VALUE_PREVIEW = 300
@@ -882,99 +885,104 @@ class Session:
     ):
         """Try the library before paying a model call (R11/R12).
 
-        Returns a fix record when the skill worked, or None to hand the finding
-        to the model — including when a skill was tried and failed, since a
-        failure must not cost the run its fix.
+        Walks ranked candidates best-first. A candidate that fails is reverted
+        and scored before the next one is tried, so it never taints the next
+        attempt and never escapes without taking its hit (R13). Returns a fix
+        record when some candidate worked, or None to hand the finding to the
+        model — including when every candidate was tried and failed.
         """
-        candidates = self.library.candidates(finding["disease"])
-        if not candidates:
-            return None
-        entry = candidates[0]
-        try:
-            skill = skills.load(self.skills_dir / entry["name"])
-        except (OSError, ValueError) as exc:
-            yield Notice("skill", f"{entry['name']} is unreadable ({exc}) — skipping")
-            return None
-
+        candidates = self.library.candidates(finding["disease"])[:SKILL_ATTEMPT_CAP]
+        sha = self._source_sha(var)
         t0 = time.monotonic()
         evs: list[int] = []
-        sha = self._source_sha(var)
-        code = verify.skill_apply_cell(var, skill.fix_source, finding["columns"])
-        silent = unattended(entry, finding["grade"])
-        title = (
-            f"skill {i}/{n} · {entry['name']} · {entry['state']} · "
-            f"{finding['grade']} · {finding['evidence'][:60]}"
-        )
 
-        if not silent:
-            decision = yield GateRequest(code, 1, title=title)
-            if not isinstance(decision, GateDecision):
-                decision = GateDecision("run")
-            evs.append(
-                self.transcript.append(
-                    "gate", action=decision.action, note=decision.note
-                )
-            )
-            if decision.action == "skip":
-                return {
-                    "finding": finding,
-                    "status": "skipped",
-                    "attempts": 0,
-                    "fix_source": skill.fix_source,
-                    "verify": {},
-                    "transcript_evs": evs,
-                    "elapsed_s": round(time.monotonic() - t0, 1),
-                    "origin": f"skill:{entry['name']}",
-                    "case": {},
-                }
-            if decision.action == "reject":
-                self.library.record(
-                    entry["name"], success=False, dataset=sha, events=evs
-                )
-                return None
-
-        result, _, _, ev_id = yield from self._exec_events(code, quiet=True)
-        evs.append(ev_id)
-        if result.status == "ok":
-            self._stamp_registry(result.registry, ev_id)
-            vres, _, _, v_ev = yield from self._exec_events(
-                verify.verify_cell(var, finding, baseline_cols), quiet=True
-            )
-            evs.append(v_ev)
-            if vres.status == "ok":
-                self.library.record(
-                    entry["name"], success=True, dataset=sha, events=evs
-                )
-                self.library.save()
+        for entry in candidates:
+            try:
+                skill = skills.load(self.skills_dir / entry["name"])
+            except (OSError, ValueError) as exc:
                 yield Notice(
-                    "skill",
-                    f"{entry['name']} fixed {finding['slug']} with no model call"
-                    + (" (unattended)" if silent else ""),
+                    "skill", f"{entry['name']} is unreadable ({exc}) — skipping"
                 )
-                return {
-                    "finding": finding,
-                    "status": "fixed",
-                    "attempts": 0,
-                    "fix_source": skill.fix_source,
-                    "verify": {"layer1": "pass", "by": entry["name"]},
-                    "transcript_evs": evs,
-                    "elapsed_s": round(time.monotonic() - t0, 1),
-                    "origin": f"skill:{entry['name']}",
-                    "case": {},
-                }
+                continue
 
-        _, _, _, rev_ev = yield from self._exec_events(
-            verify.revert_cell(var), quiet=True
-        )
-        evs.append(rev_ev)
-        self.library.record(entry["name"], success=False, dataset=sha, events=evs)
-        self.library.save()
-        state = self.library.entries[entry["name"]]["state"]
-        yield Notice(
-            "skill",
-            f"{entry['name']} failed verification — reverted, handing to the model"
-            + (" (and retired)" if state == "retired" else ""),
-        )
+            code = verify.skill_apply_cell(var, skill.fix_source, finding["columns"])
+            silent = unattended(entry, finding["grade"])
+            title = (
+                f"skill {i}/{n} · {entry['name']} · {entry['state']} · "
+                f"{finding['grade']} · {finding['evidence'][:60]}"
+            )
+
+            if not silent:
+                decision = yield GateRequest(code, 1, title=title)
+                if not isinstance(decision, GateDecision):
+                    decision = GateDecision("run")
+                evs.append(
+                    self.transcript.append(
+                        "gate", action=decision.action, note=decision.note
+                    )
+                )
+                if decision.action == "skip":
+                    return {
+                        "finding": finding,
+                        "status": "skipped",
+                        "attempts": 0,
+                        "fix_source": skill.fix_source,
+                        "verify": {},
+                        "transcript_evs": evs,
+                        "elapsed_s": round(time.monotonic() - t0, 1),
+                        "origin": f"skill:{entry['name']}",
+                        "case": {},
+                    }
+                if decision.action == "reject":
+                    self.library.record(
+                        entry["name"], success=False, dataset=sha, events=evs
+                    )
+                    self.library.save()
+                    continue
+
+            result, _, _, ev_id = yield from self._exec_events(code, quiet=True)
+            evs.append(ev_id)
+            if result.status == "ok":
+                self._stamp_registry(result.registry, ev_id)
+                vres, _, _, v_ev = yield from self._exec_events(
+                    verify.verify_cell(var, finding, baseline_cols), quiet=True
+                )
+                evs.append(v_ev)
+                if vres.status == "ok":
+                    self.library.record(
+                        entry["name"], success=True, dataset=sha, events=evs
+                    )
+                    self.library.save()
+                    yield Notice(
+                        "skill",
+                        f"{entry['name']} fixed {finding['slug']} with no model call"
+                        + (" (unattended)" if silent else ""),
+                    )
+                    return {
+                        "finding": finding,
+                        "status": "fixed",
+                        "attempts": 0,
+                        "fix_source": skill.fix_source,
+                        "verify": {"layer1": "pass", "by": entry["name"]},
+                        "transcript_evs": evs,
+                        "elapsed_s": round(time.monotonic() - t0, 1),
+                        "origin": f"skill:{entry['name']}",
+                        "case": {},
+                    }
+
+            _, _, _, rev_ev = yield from self._exec_events(
+                verify.revert_cell(var), quiet=True
+            )
+            evs.append(rev_ev)
+            self.library.record(entry["name"], success=False, dataset=sha, events=evs)
+            self.library.save()
+            state = self.library.entries[entry["name"]]["state"]
+            yield Notice(
+                "skill",
+                f"{entry['name']} failed verification — reverted"
+                + (" (and retired)" if state == "retired" else ""),
+            )
+
         return None
 
     def _skill_pass(self, var: str, records: list[dict]):
