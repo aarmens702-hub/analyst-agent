@@ -16,3 +16,10 @@ workspace/
 # claude / tdd-guard runtime state
 .claude/tdd-guard/
 .claude/settings.local.json
+
+# the skill library: skill folders are authored artifacts and belong in git —
+# a PR showing a new skill is the human admission gate leaving a paper trail.
+# The ledger is not: it rewrites on every application, so committing it turns
+# each run into a diff of incrementing counters.
+skills/ledger.json
+skills/retired/
