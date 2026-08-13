@@ -67,6 +67,12 @@ class CleanReport:
                 "**skills admitted**",
                 *[f"- 🌱 {name} (on probation)" for name in self.skills_admitted],
             ]
+        if self.stats.get("persisted") is False:
+            lines += [
+                "",
+                "> ⚠ **not saved** — the kernel died before the cleaned copy was "
+                "written, so any fix marked ✓ above lived only in that kernel.",
+            ]
         if self.outputs:
             lines += [
                 "",

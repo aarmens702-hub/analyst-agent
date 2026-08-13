@@ -322,12 +322,27 @@ def _tidy(values, fold: bool = False):
 # against it reports unrelated trademark signs as whitespace damage. Map only
 # NBSP and the zero-width family to an ordinary space; everything else is
 # left alone.
-_WS_DAMAGE = {ord(c): " " for c in ZERO_WIDTH + ("\xa0",)}
+# Every Unicode space separator, mapped to an ordinary space. Built from the
+# category rather than a hand-list because the hand-list was NBSP only, and
+# pandas cannot close the gap: on Arrow-backed strings .str.replace uses RE2,
+# whose \s is ASCII-only, so U+202F and U+2007 — exactly what Canadian
+# government exports use for digit grouping — were neither normalised nor seen.
+_UNICODE_SPACES = {c for c in range(0x110000) if unicodedata.category(chr(c)) == "Zs"}
+# Invisible and meaningless: delete rather than space, so repairing
+# 'Bud<ZWSP>weiser' yields 'Budweiser' and not a split word.
+_ZERO_WIDTH_NOISE = {0x200B, 0xFEFF}
+# ZWJ and ZWNJ are deliberately absent from both sets. They carry meaning —
+# they build emoji sequences and Indic conjuncts — so touching them would both
+# report 'woman technologist' as whitespace damage and split it while
+# "repairing" it.
+_WS_DAMAGE = {c: " " for c in _UNICODE_SPACES} | {c: None for c in _ZERO_WIDTH_NOISE}
 
 
 def _ws_tidy(values):
-    """Whitespace-only normalisation: NBSP/zero-width chars become a space,
-    whitespace runs collapse to one, ends trim. Unlike _tidy, no NFKC."""
+    """Whitespace-only normalisation: Unicode spaces become an ordinary space,
+    zero-width noise is removed, runs collapse, ends trim. Unlike _tidy, no
+    NFKC — that expanded compatibility characters like the trademark sign and
+    reported them as whitespace."""
     mapped = values.str.translate(_WS_DAMAGE)
     return mapped.str.replace(r"\s+", " ", regex=True).str.strip()
 
@@ -607,9 +622,9 @@ def _d06(df, cols) -> list:
         count = len(dirty)
         if count == 0:
             continue
-        exotic = int(
-            values.str.contains("|".join(ZERO_WIDTH + ("\xa0",)), regex=True).sum()
-        )
+        # counted from the same table the repair uses, so the number in the
+        # evidence cannot drift from what the fix would actually touch
+        exotic = int(values.map(lambda v: any(ord(c) in _WS_DAMAGE for c in v)).sum())
         out.append(
             _finding(
                 6,
@@ -1451,10 +1466,15 @@ def detect_one(df, disease: int, columns) -> dict | None:
         return None
     wanted = [str(c) for c in (columns or [])]
     scoped = _indices(df, columns) or None
+    # No except here, deliberately. This is verification layer 1 — verify.py
+    # asserts `detect_one(...) is None` to mean the fix worked, so swallowing a
+    # crash would turn every fix for this disease into a silent pass. A raise
+    # fails the verify cell, which reverts the fix, which is the honest answer:
+    # we could not check, therefore it is not verified. detect_all keeps its
+    # per-detector catch because there a crash hides a disease rather than
+    # manufacturing proof, and it reports what broke.
     try:
         findings = REGISTRY[disease](df, scoped)
-    except Exception:  # noqa: BLE001 - a failed probe verifies nothing; say so
-        return None
     finally:
         _VIEWS.clear()  # the frame is mutating between fixes; never reuse a view
     for finding in findings:

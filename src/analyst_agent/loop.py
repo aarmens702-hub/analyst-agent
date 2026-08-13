@@ -379,6 +379,13 @@ class Session:
         baseline_cols = yield from self._snapshot_baseline(var)
         records: list[dict] = []
         evs_chain = [start_ev, diag_ev]
+        admitted: list = []
+        outputs: dict = {}
+        stats: dict = {}
+        # Everything that can touch the kernel lives in here, and the report is
+        # written after it either way. A death between the last fix and the
+        # write used to unwind past the report entirely, so a gate-approved,
+        # verified fix mutated the frame and left no record at all.
         try:
             for i, finding in enumerate(fixable, 1):
                 # the library first: a proven skill costs no model call at all
@@ -393,22 +400,18 @@ class Session:
                 evs_chain.extend(rec["transcript_evs"])
                 if rec["status"] == "fixed":
                     baseline_cols = yield from self._snapshot_baseline(var)
+
+            admitted = yield from self._skill_pass(var, records)
+            if any(r["status"] == "fixed" for r in records):
+                outputs, stats, out_ev = yield from self._write_cleaned(var, records)
+                evs_chain.append(out_ev)
         except KernelLost as lost:
             yield Notice("kernel_died", str(lost))
             done = {id(r["finding"]) for r in records}
             records += [self._aborted(f) for f in fixable if id(f) not in done]
-            yield from self._save_report(
-                var, records, indicators, clear, evs_chain, {}, {}, []
-            )
-            return
-
-        admitted = yield from self._skill_pass(var, records)
-
-        outputs: dict = {}
-        stats: dict = {}
-        if any(r["status"] == "fixed" for r in records):
-            outputs, stats, out_ev = yield from self._write_cleaned(var, records)
-            evs_chain.append(out_ev)
+            # a verified fix that never reached disk is not a durable result,
+            # and the report must not imply one
+            stats["persisted"] = False
 
         yield from self._save_report(
             var, records, indicators, clear, evs_chain, outputs, stats, admitted

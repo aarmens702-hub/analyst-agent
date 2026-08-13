@@ -15,6 +15,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from analyst_agent import detect
 from analyst_agent.detect import (
     BC_LAT_MAX,
     BC_LAT_MIN,
@@ -691,3 +692,57 @@ def test_detect_family_finds_the_real_vancouver_era_drift() -> None:
     assert finding["grade"] == "GATE"
     drifted = set(finding["stats"]["only_in_a"]) | set(finding["stats"]["only_in_b"])
     assert "note" in drifted, "the era boundary the harmonizer exists to bridge"
+
+
+def test_detect_one_refuses_to_call_a_crash_a_clean_signal(monkeypatch) -> None:
+    """detect_one IS verification layer 1: verify.py asserts `_v is None` to
+    mean the fix worked. Swallowing a detector crash and returning None turns
+    every fix for that disease into a silent pass — it manufactures proof
+    rather than merely hiding a disease, which is what detect_all's `broken`
+    key handles."""
+    df = pd.DataFrame({"city": ["  Vancouver", "Burnaby"] * 10})
+    assert detect_one(df, 6, ["city"]) is not None
+
+    def explode(frame, cols):
+        raise ValueError("boom")
+
+    monkeypatch.setitem(detect.REGISTRY, 6, explode)
+    with pytest.raises(ValueError, match="boom"):
+        detect_one(df, 6, ["city"])
+
+
+def test_d06_knows_which_invisible_characters_are_damage() -> None:
+    """Zero-width is not one category. ZWJ and ZWNJ carry meaning — they build
+    emoji and Indic conjuncts — so mapping them to a space both misreports them
+    as whitespace damage and splits the word the fix claims to repair. Real
+    Unicode spaces are the opposite problem: dropping NFKC made every one but
+    NBSP invisible, and the run then asserts the signal ran and found nothing."""
+
+    def fires(values):
+        res = detect_all(pd.DataFrame({"c": values * 6 + ["ops team"] * 10}))
+        return any(f["disease"] == 6 for f in res["findings"]), res
+
+    # meaning-bearing: must be left entirely alone
+    for label, value in [
+        ("emoji ZWJ", "\U0001f469‍\U0001f4bb team"),
+        ("Devanagari ZWJ", "क्‍ष team"),
+        ("ZWNJ", "‌ team"),
+    ]:
+        hit, _ = fires([value])
+        assert not hit, f"{label} is not whitespace damage"
+
+    # genuine damage: every Unicode space, not just NBSP
+    for label, ch in [
+        ("NBSP", "\xa0"),
+        ("NARROW NBSP", " "),
+        ("FIGURE", " "),
+        ("IDEOGRAPHIC", "　"),
+    ]:
+        hit, res = fires([f"North{ch}Vancouver"])
+        assert hit, f"{label} went undetected"
+        assert 6 not in res["clear"], f"{label} was undetected AND claimed clear"
+
+    # a zero-width space is damage, and repairing it must not split the word
+    hit, _ = fires(["Bud\u200bweiser"])
+    assert hit
+    assert detect._ws_tidy(pd.Series(["Bud\u200bweiser"])).iloc[0] == "Budweiser"

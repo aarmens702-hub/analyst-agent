@@ -726,3 +726,29 @@ def test_a_dead_kernel_is_reported_as_such_not_as_failed_fixes(session, monkeypa
     assert all(f["attempts"] == 0 for f in rep["fixes"]), (
         "a dead kernel must not burn the attempt budget"
     )
+
+
+def test_a_kernel_death_after_the_fix_loop_still_writes_a_report(session, monkeypatch):
+    """Regression from the kernel-death fix itself. A death during the write
+    step unwound past _save_report, so a gate-approved, verified fix mutated
+    the frame and left NO record anywhere — a worse silence than the
+    misreporting the fix was written to stop. The report must also not claim a
+    durable result for state that died with the kernel."""
+    monkeypatch.setattr(llm, "generate", gen([FIX_A] * 6))
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # fix
+        [ok()],  # verifies
+        case(),
+        baseline(),  # refresh — the loop now completes
+        *[dead_kernel()] * 10,  # ... and the kernel dies during the write
+    ]
+    events = drive(session.clean("df"))
+
+    rep = report_of(session)
+    assert rep["fixes"][0]["status"] == "fixed"
+    assert not rep["outputs"], "nothing was persisted, so claim nothing"
+    assert any(isinstance(e, Notice) and "kernel" in e.text.lower() for e in events)
+    md = (session.session_dir / "clean_reports" / "r001.md").read_text()
+    assert "not saved" in md, "the report must say the fixes were never written out"
