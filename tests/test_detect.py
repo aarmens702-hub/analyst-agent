@@ -746,3 +746,15 @@ def test_d06_knows_which_invisible_characters_are_damage() -> None:
     hit, _ = fires(["Bud\u200bweiser"])
     assert hit
     assert detect._ws_tidy(pd.Series(["Bud\u200bweiser"])).iloc[0] == "Budweiser"
+
+
+def test_evidence_stays_one_line_for_every_line_breaker() -> None:
+    """The narrowed sanitiser is weaker than the str.split() it replaced: only
+    \\r\\n\\t are handled, so every other line-breaking character survives. Column
+    names reach the evidence uninterpolated (_d11, _d12, _d20), and a header
+    carrying a form feed or U+2028 — mainframe, PDF- and web-derived exports —
+    then splits a diagnosis line or a report bullet across two records."""
+    for ch in ("\x0b", "\x0c", "\x85", " ", " ", "\r\n", "\t"):
+        finding = detect._finding(6, ["c"], f"before{ch}after", {}, "AUTO", 0.9)
+        assert len(finding["evidence"].splitlines()) == 1, repr(ch)
+        assert "before" in finding["evidence"] and "after" in finding["evidence"]

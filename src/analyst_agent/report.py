@@ -19,6 +19,7 @@ class CleanReport:
     fixes: list = field(default_factory=list)  # fix records, spec R12
     indicators: list = field(default_factory=list)  # findings flagged, not fixed
     clear: list = field(default_factory=list)  # disease ids that ran clean
+    broken: dict = field(default_factory=dict)  # ids that could not run, and why
     outputs: dict = field(default_factory=dict)  # {parquet, lineage} paths
     skills_admitted: list = field(default_factory=list)  # skills born here (P2)
     stats: dict = field(default_factory=dict)  # before/after shape + nulls
@@ -55,6 +56,11 @@ class CleanReport:
                 f"({rec['attempts']} attempt{'s' if rec['attempts'] != 1 else ''}) "
                 f"· ev {', '.join(str(e) for e in rec['transcript_evs'])}"
             )
+        if self.broken:
+            lines += ["", "**signals that did not run**"]
+            lines += [
+                f"- ✗ d{int(d):02d}: {why}" for d, why in sorted(self.broken.items())
+            ]
         if self.indicators:
             lines += ["", "**flagged, not fixed (indicators)**"]
             lines += [

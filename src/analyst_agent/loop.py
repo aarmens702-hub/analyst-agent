@@ -373,8 +373,9 @@ class Session:
         fixable = [f for f in diagnosis["findings"] if not f["indicator"]]
         indicators = [f for f in diagnosis["findings"] if f["indicator"]]
         clear = diagnosis["clear"]
+        broken = diagnosis.get("broken", {})
         yield StreamText(
-            "stdout", self._diagnosis_text(var, fixable, indicators, clear)
+            "stdout", self._diagnosis_text(var, fixable, indicators, clear, broken)
         )
 
         baseline_cols = yield from self._snapshot_baseline(var)
@@ -415,7 +416,15 @@ class Session:
             stats["persisted"] = False
 
         yield from self._save_report(
-            var, records, indicators, clear, evs_chain, outputs, stats, admitted
+            var,
+            records,
+            indicators,
+            clear,
+            evs_chain,
+            outputs,
+            stats,
+            admitted,
+            broken,
         )
 
     def _recover(self, lost: "KernelLost") -> None:
@@ -449,7 +458,16 @@ class Session:
         }
 
     def _save_report(
-        self, var, records, indicators, clear, evs_chain, outputs, stats, admitted
+        self,
+        var,
+        records,
+        indicators,
+        clear,
+        evs_chain,
+        outputs,
+        stats,
+        admitted,
+        broken=None,
     ):
         self.report_seq += 1
         report_id = f"{self.session_id}-r{self.report_seq:03d}"
@@ -468,6 +486,7 @@ class Session:
             fixes=records,
             indicators=indicators,
             clear=clear,
+            broken=broken or {},
             outputs=outputs,
             stats=stats,
             skills_admitted=admitted,
@@ -1203,7 +1222,7 @@ class Session:
         return ""
 
     def _diagnosis_text(
-        self, var: str, fixable: list, indicators: list, clear: list
+        self, var: str, fixable: list, indicators: list, clear: list, broken=None
     ) -> str:
         header = (
             f"\ndiagnosis of {var}: {len(fixable)} fixable finding(s), "
@@ -1221,6 +1240,10 @@ class Session:
                 f"  ⚠ d{f['disease']:02d} {f['slug']} (indicator, not fixed) "
                 f"— {f['evidence']}\n"
             )
+        # a signal that crashed is not a signal that found nothing, and saying
+        # so is the whole point of `clear` being a claim rather than a silence
+        for disease, why in sorted((broken or {}).items()):
+            lines.append(f"  ✗ d{int(disease):02d} did not run — {why}\n")
         return "".join(lines)
 
     def _finding_context(self, var: str, finding: dict) -> str:

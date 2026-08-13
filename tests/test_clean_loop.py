@@ -723,9 +723,11 @@ def test_a_dead_kernel_is_reported_as_such_not_as_failed_fixes(session, monkeypa
     )
     rep = report_of(session)
     assert [f["status"] for f in rep["fixes"]] == ["aborted", "aborted"]
-    assert all(f["attempts"] == 0 for f in rep["fixes"]), (
-        "a dead kernel must not burn the attempt budget"
-    )
+    # Measured, not read back: `attempts` is a constant _aborted() hardcodes,
+    # so asserting it is 0 passes for any implementation — including one that
+    # burned the whole budget. What must be true is that the model was never
+    # asked again after the kernel died.
+    assert len(FakeClient.executed) <= 3, FakeClient.executed
 
 
 def test_a_kernel_death_after_the_fix_loop_still_writes_a_report(session, monkeypatch):
@@ -817,3 +819,26 @@ def test_a_dead_kernel_is_restarted_so_the_next_clean_can_run(session, monkeypat
     drive(session.clean("df"))
 
     assert restarts, "a dead kernel must be restarted, not left latched"
+
+
+def test_a_broken_detector_reaches_the_operator(session, monkeypatch):
+    """detect_all reports crashed detectors in `broken`, but nothing read it —
+    so the commit that added it changed nothing an operator can see. A
+    systematically broken signal still reads as a slightly shorter clear list,
+    which is the silence the key was added to break."""
+    monkeypatch.setattr(llm, "generate", gen([]))
+    payload = json.dumps(
+        {
+            "findings": [],
+            "clear": [1, 2],
+            "broken": {"7": "ValueError: cannot reindex on a duplicate axis"},
+        }
+    )
+    FakeClient.script = [[StreamOut("stdout", payload + "\n"), ok()], baseline()]
+    events = drive(session.clean("df"))
+
+    shown = "".join(e.text for e in events if isinstance(e, StreamText))
+    assert "d07" in shown and "did not run" in shown, shown
+    assert report_of(session)["broken"] == {
+        "7": "ValueError: cannot reindex on a duplicate axis"
+    }

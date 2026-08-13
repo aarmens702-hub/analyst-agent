@@ -103,7 +103,13 @@ ZERO_WIDTH = ("\u200b", "‌", "‍", "﻿")
 # meaningful evidence — disease 6 reports a double space by showing one — so
 # only the characters that actually break single-line text are touched;
 # ordinary spaces inside the message survive untouched.
-EVIDENCE_LINEBREAKS = re.compile(r"[\r\n\t]+")
+# Every character str.splitlines() breaks on, which is what the old
+# " ".join(evidence.split()) implicitly covered. Narrowing this to \r\n\t was
+# weaker than the code it replaced: form feed, NEL and the Unicode line and
+# paragraph separators all survived, and column names reach the evidence
+# uninterpolated (_d11, _d12, _d20), so a header carrying one of them split a
+# report bullet in half.
+EVIDENCE_LINEBREAKS = re.compile("[\r\n\t\v\f\x1c\x1d\x1e\x85\u2028\u2029]+")
 # Patterns handed to Series.str.match must carry no re flags: pandas rejects a
 # compiled pattern whose flags differ from the call's. Character classes stand
 # in for re.DOTALL, and values are case-folded before matching instead of re.I.

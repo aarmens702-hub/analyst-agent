@@ -45,3 +45,43 @@ def test_column_change_answers_what_will_this_do_to_my_data() -> None:
     assert "N/A" in block and "NaN" in block
     assert "3 columns untouched" in block
     assert block.count("N/A") <= 3, "samples are truncated, never a data dump"
+
+
+def test_counts_are_right_for_a_one_shot_iterable() -> None:
+    """zip(before_col, after_col) is the natural caller shape, and it can only
+    be walked once. Re-iterating it to count the remainder read an exhausted
+    iterator: a generator printed one sample and no '… N more' at all, so a
+    preview of 5,000 changes claimed to have shown everything."""
+    pairs = (("N/A", "NaN") for _ in range(5000))
+    block = diff.column_change("ibu", changed=5000, total=5000, samples=pairs)
+
+    assert "4,99" in block, f"the remainder must be reported:\n{block}"
+    assert block.count("N/A") <= diff.SAMPLE_LIMIT
+
+
+def test_a_long_repeated_value_still_marks_only_what_moved() -> None:
+    """difflib's autojunk treats any token appearing in >1% of a sequence as
+    junk once the sequence passes 200 elements — so packed and delimited cells,
+    exactly what a gate preview must render, degraded to a whole-value replace:
+    the very output this module says it exists to prevent."""
+    before = ", ".join(["Vancouver BC"] * 80)
+    after = before.replace("Vancouver BC", "Vancouver B.C.", 1)
+
+    marked = sum(len(t) for op, t in diff.word_segments(before, after) if op != "equal")
+    assert marked < 20, f"{marked} characters marked as moved; expected a handful"
+
+
+def test_a_preview_stays_a_preview() -> None:
+    """CLAUDE.md: 'Never put raw dataset rows in a prompt — schema, stats, and
+    truncated samples only.' Only the sample COUNT was bounded, so a free-text
+    column dumped whole cells into the render. A newline in a value was worse:
+    it split the sample across lines and pushed the trailing summary lines into
+    the wrong place."""
+    long_block = diff.column_change("notes", 2, 2, [("x" * 4000, "y" * 4000)])
+    assert len(long_block) < 400, f"{len(long_block)} chars for one sample"
+    assert "…" in long_block
+
+    multiline = diff.column_change(
+        "notes", 2, 2, [("a\nb", "a\nc")], untouched=["id", "name"]
+    )
+    assert multiline.splitlines()[-1].strip().startswith("2 columns untouched")

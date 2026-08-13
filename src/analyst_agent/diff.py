@@ -30,7 +30,14 @@ def word_segments(before: str, after: str) -> list[tuple[str, str]]:
     """
     old, new = _tokens(str(before)), _tokens(str(after))
     segments: list[tuple[str, str]] = []
-    for op, i1, i2, j1, j2 in SequenceMatcher(None, old, new).get_opcodes():
+    # autojunk=False deliberately: difflib's default calls any token appearing
+    # in >1% of a sequence "junk" once the sequence passes 200 elements, which
+    # for a packed or delimited cell — the values a preview most needs to
+    # render — collapses the whole thing into one replace. That is precisely
+    # the two-whole-values output this module exists to avoid. Values are
+    # length-capped before they reach here, which bounds the quadratic cost.
+    matcher = SequenceMatcher(None, old, new, autojunk=False)
+    for op, i1, i2, j1, j2 in matcher.get_opcodes():
         if op == "equal":
             segments.append(("equal", "".join(old[i1:i2])))
         else:  # replace shows as a delete followed by an insert
@@ -70,6 +77,15 @@ def inline(before: str, after: str) -> str:
 
 
 SAMPLE_LIMIT = 3
+VALUE_CHARS = 60  # per value, matching detect._samples' truncation discipline
+
+
+def _clip(value) -> str:
+    """One line, bounded. A preview renders samples, never cell contents — and
+    a newline inside a value would otherwise split the sample and push the
+    trailing summary lines into the wrong place."""
+    text = " ".join(str(value).splitlines())
+    return text if len(text) <= VALUE_CHARS else text[: VALUE_CHARS - 1] + "…"
 
 
 def column_change(
@@ -92,15 +108,21 @@ def column_change(
     """
     lines = [f"{name}: {changed:,} of {total:,} cells change"]
     seen: list[str] = []
+    shown = 0
     for before, after in samples:
-        rendered = f"  {inline(str(before), str(after))}"
+        # bound the work, not the distinct output: a column of 2.4M identical
+        # changes must not run 2.4M matcher passes to render one line
+        shown += 1
+        rendered = f"  {inline(_clip(before), _clip(after))}"
         if rendered not in seen:
             seen.append(rendered)
-        if len(seen) == limit:
+        if shown >= limit:
             break
     lines += seen
-    extra = len(list(samples)) - len(seen)
-    if extra > 0:
+    # derived from the count we were given, never by walking `samples` again —
+    # the caller's zip() is one-shot, and re-reading it reported nothing left
+    extra = max(changed - shown, 0)
+    if extra:
         lines.append(f"  … {extra:,} more")
     if untouched:
         lines.append(f"  {len(untouched)} columns untouched")
