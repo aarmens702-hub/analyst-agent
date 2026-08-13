@@ -131,6 +131,23 @@ shows the rules behave as designed on a plausible input shape; it is not a
 measurement of real skills on real data, and the script says so in its own
 output.
 
+### Compounding, observed
+
+Two slices from different real sources, both carrying disease 4 but with
+different sentinel tokens — hospital's scores use `empty`, the beers slice uses
+`unknown`:
+
+| run | library | model calls |
+|---|---|---|
+| hospital_scores | empty | **2** (author the fix, then generalise it) |
+| beers_ibu | holds the new skill | **0** |
+
+The second finding was fixed with no model consulted at all, and P1's
+verification still ran. The skill was born on `empty` and applied to `unknown`,
+so the generalisation generalised rather than memorising its case. It stayed on
+probation — one application on one source, where promotion needs three
+successes across two.
+
 ## What it does not do
 
 - It does not fix everything. Two of the twenty-two diseases — cross-field
