@@ -89,6 +89,27 @@ against the question. It catches correct code answering the wrong question —
 the failure assertions structurally cannot see, because assertions are about
 the code that ran, not the question that was asked.
 
+### What governance is worth, simulated
+
+`scripts/ablate_governance.py` runs a synthetic skill population — including
+skills that start good and rot when the data they assumed changes — under this
+project's rules and under the EvoDS-style rule (admit after N uses, never
+retire, no cap). Across seeds:
+
+| | governed | ungoverned |
+|---|---|---|
+| rounds a rotted skill keeps being used | **1.1 – 1.9** | **27.5** |
+| applications served by a bad skill | 1.6 – 2.5% | 9.7% |
+| final library size | 13 – 17 | 80 (everything it ever saw) |
+
+The retirement rule is doing the work: it is the difference between noticing a
+skill has stopped holding in about two uses and noticing in about thirty.
+
+This is a simulation with assumed rates on a synthetic arrival schedule. It
+shows the rules behave as designed on a plausible input shape; it is not a
+measurement of real skills on real data, and the script says so in its own
+output.
+
 ## What it does not do
 
 - It does not fix everything. Two of the twenty-two diseases — cross-field
