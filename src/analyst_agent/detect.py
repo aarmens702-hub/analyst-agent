@@ -98,6 +98,12 @@ LEADING_NUMBER = re.compile(
 SUPPRESSION_TOKEN = re.compile(r"^[<>]=?\s?\d+$|^[a-zA-Z*.]{1,3}$")
 MOJIBAKE_MARKERS = ("Ã", "Â", "â€", "Ð", "Ñ", "�")
 ZERO_WIDTH = ("\u200b", "‌", "‍", "﻿")
+# _finding's evidence must never carry a literal newline (single-line display
+# downstream). Collapsing every whitespace run to guarantee that also erases
+# meaningful evidence — disease 6 reports a double space by showing one — so
+# only the characters that actually break single-line text are touched;
+# ordinary spaces inside the message survive untouched.
+EVIDENCE_LINEBREAKS = re.compile(r"[\r\n\t]+")
 # Patterns handed to Series.str.match must carry no re flags: pandas rejects a
 # compiled pattern whose flags differ from the call's. Character classes stand
 # in for re.DOTALL, and values are case-folded before matching instead of re.I.
@@ -202,7 +208,7 @@ def _finding(disease, columns, evidence, stats, grade, confidence) -> dict:
         "disease": int(disease),
         "slug": SLUGS[disease],
         "columns": [str(c) for c in columns],
-        "evidence": " ".join(str(evidence).split()),
+        "evidence": EVIDENCE_LINEBREAKS.sub(" ", str(evidence)).strip(),
         "stats": _jsonable(stats),
         "grade": grade,
         "confidence": round(float(confidence), 3),
@@ -308,6 +314,22 @@ def _tidy(values, fold: bool = False):
     seconds on a 150k-row frame."""
     out = values.str.normalize("NFKC").str.replace(r"\s+", " ", regex=True).str.strip()
     return out.str.casefold() if fold else out
+
+
+# disease 6 is whitespace/NBSP/zero-width damage (build-research PART 2, row
+# 6) — not general Unicode compatibility folding. NFKC (what _tidy applies)
+# expands characters like (TM) into multi-character forms, so comparing
+# against it reports unrelated trademark signs as whitespace damage. Map only
+# NBSP and the zero-width family to an ordinary space; everything else is
+# left alone.
+_WS_DAMAGE = {ord(c): " " for c in ZERO_WIDTH + ("\xa0",)}
+
+
+def _ws_tidy(values):
+    """Whitespace-only normalisation: NBSP/zero-width chars become a space,
+    whitespace runs collapse to one, ends trim. Unlike _tidy, no NFKC."""
+    mapped = values.str.translate(_WS_DAMAGE)
+    return mapped.str.replace(r"\s+", " ", regex=True).str.strip()
 
 
 def _probe(values, limit: int = SHAPE_SAMPLE):
@@ -578,15 +600,15 @@ def _d06(df, cols) -> list:
         if values is None or len(values) < 5:
             continue
         probe = _probe(values)
-        if not bool((probe != _tidy(probe)).any()):
+        if not bool((probe != _ws_tidy(probe)).any()):
             continue
-        cleaned = _tidy(values)
+        cleaned = _ws_tidy(values)
         dirty = values[values != cleaned]
         count = len(dirty)
         if count == 0:
             continue
         exotic = int(
-            values.str.contains("|".join(ZERO_WIDTH + (" ",)), regex=True).sum()
+            values.str.contains("|".join(ZERO_WIDTH + ("\xa0",)), regex=True).sum()
         )
         out.append(
             _finding(
@@ -669,7 +691,13 @@ def _d07(df, cols) -> list:
             continue  # free text, not a category column: fuzzy clustering is noise
         pairs = _fuzzy_pairs(normalised.value_counts())
         if pairs:
-            shown = "; ".join(f"{a!r}~{b!r}" for _, a, b in pairs[:2])
+            # _fuzzy_pairs clusters on folded text; report the value as it
+            # really appears, or a model matching on the folded pair finds
+            # nothing to fix — the same lesson as disease 4's quoting.
+            original = values.groupby(normalised).first()
+            shown = "; ".join(
+                f"{original[a]!r}~{original[b]!r}" for _, a, b in pairs[:2]
+            )
             out.append(
                 _finding(
                     7,
@@ -679,7 +707,9 @@ def _d07(df, cols) -> list:
                     {
                         "fuzzy_pairs": len(pairs),
                         "distinct": int(normalised.nunique()),
-                        "examples": [[a, b] for _, a, b in pairs[:5]],
+                        "examples": [
+                            [original[a], original[b]] for _, a, b in pairs[:5]
+                        ],
                     },
                     "HUMAN",  # a canonical mapping is a judgement call
                     float(min(0.9, pairs[0][0])),
@@ -1384,16 +1414,20 @@ def _d22(df, cols) -> list:
 
 def detect_all(df, name: str = "df") -> dict:
     """Run every single-frame signal. Returns findings plus the ids that ran
-    and found nothing — absence is a checked claim, not a silence (R1)."""
+    and found nothing — absence is a checked claim, not a silence (R1) — plus
+    the ids that could not run at all. A crashed detector must never look
+    like a clean one: silently dropping it from both findings and clear would
+    make a systematically broken signal invisible forever."""
     if df is None or len(df) == 0 or df.shape[1] == 0:
-        return {"findings": [], "clear": list(SINGLE_FRAME)}
-    findings, broke = [], set()
+        return {"findings": [], "clear": list(SINGLE_FRAME), "broken": {}}
+    findings, broke, broken = [], set(), {}
     try:
         for disease in SINGLE_FRAME:
             try:
                 findings.extend(REGISTRY[disease](df, None))
-            except Exception:  # noqa: BLE001 - one brittle signal must never sink the run
+            except Exception as exc:  # noqa: BLE001 - one brittle signal must never sink the run
                 broke.add(disease)
+                broken[str(disease)] = f"{type(exc).__name__}: {exc}"
     finally:
         _VIEWS.clear()
     findings.sort(key=lambda f: (f["disease"], f["columns"]))
@@ -1401,6 +1435,7 @@ def detect_all(df, name: str = "df") -> dict:
     return {
         "findings": findings,
         "clear": [d for d in SINGLE_FRAME if d not in found and d not in broke],
+        "broken": broken,
     }
 
 

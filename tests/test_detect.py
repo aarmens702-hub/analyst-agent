@@ -186,6 +186,23 @@ def test_d07_fuzzy_variants_human() -> None:
     assert 7 not in _diseases(detect_all(clean))
 
 
+def test_d07_fuzzy_evidence_quotes_original_case_not_folded_text() -> None:
+    """_fuzzy_pairs clusters case/whitespace-folded values (it has to, to find
+    the near-duplicates), but the evidence must quote the value as it really
+    appears in the column — the same D04 mistake in a different detector: a
+    model matching on the folded text would find nothing to fix."""
+    dirty = pd.DataFrame(
+        {
+            "material": ["Weathered Granite Bedrock"] * 15
+            + ["Weathered Granite Bedrok"] * 5
+            + ["Silty Clay Loam"] * 20
+        }
+    )
+    (f,) = [x for x in _of(detect_all(dirty), 7) if x["grade"] == "HUMAN"]
+    assert "Weathered Granite Bedrock" in f["evidence"]
+    assert "weathered granite bedrock" not in f["evidence"]
+
+
 def test_d08_mojibake() -> None:
     dirty = pd.DataFrame(
         {"notes": ["cafÃ© rÃ©sumÃ©"] * 5 + ["naÃ¯ve entry"] * 3 + ["plain text"] * 10}
@@ -537,6 +554,26 @@ def test_pathological_frames_do_not_raise() -> None:
     detect_all(weird)  # unhashable + mixed object cells must not error
 
 
+def test_detect_all_reports_a_broken_detector_instead_of_hiding_it(monkeypatch) -> None:
+    """clear makes absence a checked claim: 'this signal ran and found
+    nothing.' A detector that raises must not quietly vanish from both
+    findings and clear as if it had simply run clean — that makes a
+    systematically broken signal invisible forever."""
+    from analyst_agent.detect import REGISTRY
+
+    def boom(df, cols):
+        raise ValueError("synthetic failure")
+
+    monkeypatch.setitem(REGISTRY, 6, boom)
+    df = pd.DataFrame({"city": ["  Vancouver", "Burnaby ", "Victoria", "Surrey"] * 5})
+    res = detect_all(df)
+    assert 6 not in _diseases(res)
+    assert 6 not in res["clear"]
+    assert "ValueError" in res["broken"]["6"]
+    assert "synthetic failure" in res["broken"]["6"]
+    json.dumps(res)  # still serialisable with the new key populated
+
+
 # --- Raha integration (AC1) -------------------------------------------------
 
 
@@ -599,6 +636,35 @@ def test_d04_evidence_quotes_the_tokens_as_they_actually_appear() -> None:
     (f,) = _of(detect_all(dirty), 4)
     assert "N/A" in f["evidence"]
     assert f["stats"]["tokens"] == ["N/A"]
+
+
+def test_d06_evidence_preserves_the_double_space_it_reports() -> None:
+    """The evidence sanitiser used to collapse every whitespace run down to
+    one space, which erased the exact anomaly disease 6 exists to report —
+    the model was told a value carries stray whitespace while being shown a
+    value that looks perfectly clean. Observed live: three failed attempts."""
+    dirty = pd.DataFrame(
+        {"beer_name": ["Yeti  Imperial Stout"] * 3 + ["Clean Name"] * 10}
+    )
+    (f,) = _of(detect_all(dirty), 6)
+    assert "Yeti  Imperial Stout" in f["evidence"]  # the real double space survives
+    assert "\n" not in f["evidence"]  # the no-newline contract still holds
+
+
+def test_d06_compatibility_characters_are_not_reported_as_whitespace_damage() -> None:
+    """_d06 used to compare values against a full-NFKC normalisation, and NFKC
+    expands compatibility characters like (TM) into multi-character forms
+    ('TM'); the difference got reported as stray whitespace. It is not
+    whitespace — three of the four real beers findings were this false
+    positive."""
+    dirty = pd.DataFrame(
+        {
+            "beer_name": ["The CROWLER™"] * 3
+            + ["GreyBeard™ IPA"] * 3
+            + ["Clean Name"] * 10
+        }
+    )
+    assert 6 not in _diseases(detect_all(dirty))
 
 
 VANCOUVER = Path(__file__).resolve().parent.parent / "data" / "vancouver"
