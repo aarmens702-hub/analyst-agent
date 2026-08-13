@@ -105,6 +105,27 @@ retire, no cap). Across seeds:
 The retirement rule is doing the work: it is the difference between noticing a
 skill has stopped holding in about two uses and noticing in about thirty.
 
+**And it is not a free win.** Breaking the same run down by how good a skill
+actually was, governance keeps only:
+
+| skills whose true rate is | throughput kept vs ungoverned |
+|---|---|
+| ~0.95 (reliable) | 74% |
+| ~0.60 (mediocre but net-positive) | **8%** |
+| rotted to ~0.20 | 29% |
+
+The middle row is the cost. "Two consecutive failures" is a harsh rule at a 60%
+success rate — such a skill hits two in a row roughly one pair of uses in six —
+so governance discards a lot of work that would have been right more often than
+wrong. Some reliable throughput goes too, to cap eviction, because ties there
+favour dropping the newest and least-proven.
+
+For cleaning specifically I think that trade is correct: a wrong fix corrupts
+data that later answers are computed from, and a discarded skill only costs a
+model call. But it is a deliberate bias toward false negatives, not a
+strictly-better ruleset, and the thresholds are placeholders until real usage
+can tune them.
+
 This is a simulation with assumed rates on a synthetic arrival schedule. It
 shows the rules behave as designed on a plausible input shape; it is not a
 measurement of real skills on real data, and the script says so in its own
