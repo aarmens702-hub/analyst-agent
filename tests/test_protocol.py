@@ -9,7 +9,11 @@ test that calls it (so startup failures surface inside tests, not fixtures)
 and shared for the rest of the module.
 """
 
+import ast
+import json
 import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -228,5 +232,33 @@ def test_container_end_to_end(tmp_path_factory):
             )
         )[-1]
         assert egress.value.strip() == "True", "net-none must block egress"
+    finally:
+        kc.close()
+
+
+@pytest.mark.docker
+def test_the_sandbox_can_run_the_gates_that_admit_a_skill():
+    """P2's admission cells import analyst_agent inside the kernel. If those
+    modules did not make it into the image, admission would fail only in
+    sandbox mode — the mode that matters — and nothing else would notice."""
+    kc = KernelClient(workspace_dir=Path(tempfile.mkdtemp()))
+    try:
+        kc.start()
+        probe = (
+            "import json\n"
+            "import pandas as pd\n"
+            "from analyst_agent.detect import detect_all, detect_one\n"
+            "from analyst_agent import library, provenance, skills, verify\n"
+            "df = pd.DataFrame({'flow': ['N/A'] * 12 + [str(v) for v in range(20)],\n"
+            "                   'name': [f's{i}' for i in range(32)]})\n"
+            "found = detect_all(df, 'probe')['findings']\n"
+            "json.dumps({'diseases': sorted({f['disease'] for f in found}),\n"
+            "            'one': detect_one(df, 4, ['flow']) is not None})"
+        )
+        result = list(kc.execute(probe, timeout_s=120))[-1]
+        assert result.status == "ok", result.error
+        payload = json.loads(ast.literal_eval(result.value))
+        assert 4 in payload["diseases"], "the detector must fire inside the sandbox"
+        assert payload["one"] is True, "and detect_one, which verifies every fix"
     finally:
         kc.close()
