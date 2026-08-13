@@ -5,6 +5,7 @@ FakeCard implements events.CardLike. The REPL is driven with scripted input_fn
 and a recording print_fn.
 """
 
+import json
 from collections.abc import Generator
 
 import pytest
@@ -445,3 +446,33 @@ def test_skills_show_prints_the_card_and_the_ledger_row(tmp_path) -> None:
     body = "\n".join(str(p) for p in printed)
     assert "name: fix-sentinel-missing" in body
     assert '"successes": 4' in body
+
+
+def test_why_prints_the_provenance_chain(tmp_path) -> None:
+    """P3: /why answers "where did this number come from" from artifacts on
+    disk, without the session having to remember anything extra."""
+    session = FakeSession()
+    session.session_dir = tmp_path
+    cards = tmp_path / "cards"
+    cards.mkdir()
+    (cards / "c001.json").write_text(
+        json.dumps(
+            {
+                "card_id": "s01-c001",
+                "question": "which brewery has the most beers?",
+                "answer": "Brewery Vivant",
+                "checks": [{"expr": "len(r) == 3", "passed": True}],
+                "lineage": {
+                    "datasets": [
+                        {"path": "data/beers.csv", "sha256": "abc", "variable": "beers"}
+                    ]
+                },
+                "flags": {},
+            }
+        )
+    )
+    printed: list = []
+    run_repl(session, input_fn=scripted_input("/why", "/quit"), print_fn=printed.append)
+    body = "\n".join(str(p) for p in printed)
+    assert "✓ trusted" in body
+    assert "source: data/beers.csv" in body

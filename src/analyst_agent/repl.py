@@ -7,6 +7,7 @@ by the hand-written session generators (run_turn for questions, clean for
 
 import json
 
+from analyst_agent import provenance
 from analyst_agent.events import (
     ArtifactSaved,
     CardReady,
@@ -18,7 +19,7 @@ from analyst_agent.events import (
 
 BANNER = (
     "analyst-agent — /load <path> [name] · /clean <var> · "
-    "/clean-family <glob> <name> · /skills · ask a question · /quit"
+    "/clean-family <glob> <name> · /skills · /why · ask a question · /quit"
 )
 PROMPT = "❯ "
 GATE_PROMPT = "[r]un / [j]eject / [s]kip: "
@@ -42,6 +43,9 @@ def run_repl(session, auto_run: bool = False, input_fn=input, print_fn=print) ->
                 continue
             if line.split()[:1] == ["/skills"]:
                 _skills(session, line, print_fn)
+                continue
+            if line.split()[:1] == ["/why"]:
+                _why(session, line, print_fn)
                 continue
             if line.split()[:1] == ["/clean-family"]:
                 _clean_family(session, line, auto_run, input_fn, print_fn)
@@ -147,3 +151,16 @@ def _clean_family(session, line: str, auto_run: bool, input_fn, print_fn) -> Non
         return
     pattern = parts[1].strip("\"'")
     _drive(session.clean_family(pattern, parts[2]), auto_run, input_fn, print_fn)
+
+
+def _why(session, line: str, print_fn) -> None:
+    """/why [claim id]: where an answer came from, and whether it holds up."""
+    parts = line.split()
+    dag = provenance.build(session.session_dir)
+    node_id = None
+    if len(parts) > 1:
+        wanted = parts[1]
+        node_id = next(
+            (n for n in dag["nodes"] if n.endswith(wanted) or n == wanted), wanted
+        )
+    print_fn(provenance.to_markdown(dag, node_id))
