@@ -589,3 +589,13 @@ def test_raha_movies_runs_and_serializes() -> None:
     assert res["findings"]
     assert 17 in _diseases(res)  # comma-packed actors/genre lists
     json.dumps(res)
+
+
+def test_d04_evidence_quotes_the_tokens_as_they_actually_appear() -> None:
+    """The model writes its fix against this string. Reporting a normalised
+    'n/a' when the data holds 'N/A' produces a fix that matches nothing —
+    observed live, where the fix ran clean and changed zero rows."""
+    dirty = pd.DataFrame({"flow": ["N/A"] * 10 + [str(v) for v in range(20)]})
+    (f,) = _of(detect_all(dirty), 4)
+    assert "N/A" in f["evidence"]
+    assert f["stats"]["tokens"] == ["N/A"]

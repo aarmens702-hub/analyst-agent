@@ -474,7 +474,10 @@ def _d04(df, cols) -> list:
             hits = lowered.isin(MISSING_TOKENS) | lowered.isin(SENTINEL_DATES)
             count = int(hits.sum())
             if count >= 2 and count < len(values):
-                tokens = sorted(set(lowered[hits]))
+                # the tokens as they really appear, not normalised: the model
+                # writes .replace(<this string>) and a case-folded quote
+                # produces a fix that matches nothing
+                tokens = sorted(set(values[hits].str.strip()))
                 out.append(
                     _finding(
                         4,
