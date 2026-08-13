@@ -10,6 +10,7 @@ import os
 import time
 from collections.abc import Iterable, Iterator
 
+import httpx
 from openai import OpenAI
 
 DEFAULT_MODEL = "deepseek-v4-pro"
@@ -18,6 +19,7 @@ TEMPERATURE = 0.0
 # A read timeout cannot fire while reasoning chunks keep arriving, so a model
 # can think without bound. This is the ceiling on one call, start to finish.
 MAX_CALL_S = 420
+STALL_S = 90  # no bytes at all for this long means the stream is dead
 
 _client: OpenAI | None = None
 
@@ -51,7 +53,11 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
         messages=list(messages),
         temperature=TEMPERATURE,
         stream=True,
-        timeout=180,
+        # An explicit READ timeout, not one total budget: a scalar timeout did
+        # not stop an observed stall, and MAX_CALL_S below can only fire when a
+        # chunk actually arrives. This one fires on silence, which is the case
+        # that looks like a hang.
+        timeout=httpx.Timeout(connect=15.0, read=STALL_S, write=30.0, pool=15.0),
     )
     started = time.monotonic()
     for chunk in stream:
