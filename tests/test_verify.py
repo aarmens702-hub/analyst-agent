@@ -7,6 +7,8 @@ import json
 
 import pandas as pd
 
+from analyst_agent import verify
+from analyst_agent.detect import detect_one
 from analyst_agent.verify import (
     ROW_DELTA_BOUNDED,
     ROW_DELTA_EXACT,
@@ -126,3 +128,35 @@ def test_verify_cell_exact_row_delta_for_rollup_rows():
 def test_row_delta_constants_match_spec_r9():
     assert ROW_DELTA_EXACT == {9: "dup_count", 21: "rollup_count"}
     assert ROW_DELTA_BOUNDED == {10: "pair_count"}
+
+
+def test_a_frozen_case_still_trips_the_detector_it_was_carved_from() -> None:
+    """Admission asserts the case still exhibits the disease, or passing proves
+    nothing. But the case concentrates sick rows (150 sick + 50 healthy), which
+    moves every fraction-based threshold — and disease 22's density guard reads
+    a dense integer range as a row counter rather than a code. Concentration
+    must not flip either verdict."""
+    zips = pd.DataFrame(
+        {"zip_code": ([35233, 90210, 60614, 98101] * 30) + ([2115, 2116] * 20)}
+    )
+    assert detect_one(zips, 22, ["zip_code"]) is not None, "the column itself"
+
+    short = zips["zip_code"].astype(str).str.len() < 5
+    case = pd.concat(
+        [
+            zips[short].head(verify.CASE_SICK_ROWS),
+            zips[~short].head(verify.CASE_HEALTHY_ROWS),
+        ]
+    ).sort_index()
+    assert detect_one(case, 22, ["zip_code"]) is not None, (
+        "the frozen case must still trip it, or admission refuses good skills"
+    )
+
+    sentinel = pd.DataFrame({"flow": ["N/A"] * 3 + [str(v) for v in range(200)]})
+    sick = sentinel["flow"] == "N/A"
+    thin = pd.concat(
+        [sentinel[sick], sentinel[~sick].head(verify.CASE_HEALTHY_ROWS)]
+    ).sort_index()
+    assert detect_one(thin, 4, ["flow"]) is not None, (
+        "a disease with only a handful of sick rows must survive the carve too"
+    )
