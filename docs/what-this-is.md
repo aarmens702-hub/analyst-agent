@@ -89,6 +89,12 @@ against the question. It catches correct code answering the wrong question —
 the failure assertions structurally cannot see, because assertions are about
 the code that ran, not the question that was asked.
 
+Run live against three cases, it got all three. The one worth reporting is the
+subtle one: asked for the average order value *across all customers*, and given
+code that filtered to a single region first, it answered `mismatch` — "it
+filtered the data to region == 'West' before taking the mean, so it answered a
+regional subset." Every assertion on that code would have passed.
+
 ### What governance is worth, simulated
 
 `scripts/ablate_governance.py` runs a synthetic skill population — including
@@ -154,13 +160,17 @@ Two 300-row slices of the real Vancouver exports, drift intact (2007 has 29
 columns, 2020 has 30). One gated turn, and the host verification accepted it:
 identical column lists afterwards, no rows moved, no populated cell lost.
 
-Read the mapping the model actually wrote, though, before believing too much of
-it. `HARMONIZE_MAP` came back **empty** for both slices — it unioned the columns
-and filled the absent one with NA. For this pair that is the correct answer,
-because 2007 does not rename anything, it simply lacks `note`. So the run
-proves the harmonize turn and its verification work end to end; it does not yet
-prove the model can find a genuine rename across eras, which is the harder half
-of the claim.
+Read the mapping the model actually wrote, though. `HARMONIZE_MAP` came back
+**empty** for both slices — it unioned the columns and filled the absent one
+with NA. For this pair that is the correct answer, because 2007 does not rename
+anything, it simply lacks `note`. But it means that run never exercised the
+harder half of the claim: finding a rename.
+
+So it was run against a pair that does. Raha's beers benchmark renames
+`beer_name` to `beer-name` and `brewery_name` to `brewery-name` between its two
+files. One model call produced a real mapping —
+`{"beer-name": "beer_name", ...}` — and afterwards the two frames had no
+differing columns at all. Both halves now hold.
 
 ## What it does not do
 
