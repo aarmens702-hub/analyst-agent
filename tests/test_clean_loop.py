@@ -120,7 +120,11 @@ def drive(turn, decisions=()):
 def session(tmp_path, monkeypatch):
     monkeypatch.setattr("analyst_agent.loop.KernelClient", FakeClient)
     FakeClient.script, FakeClient.executed = [], []
-    s = Session(workspace=tmp_path / "ws", data_dir=tmp_path)
+    # skills_dir must be per-test: the default is the repo's live library,
+    # and a test that writes a skill there leaks into every later test
+    s = Session(
+        workspace=tmp_path / "ws", data_dir=tmp_path, skills_dir=tmp_path / "skills"
+    )
     s._registry_prev = {"df": ("DataFrame", "[4, 2]")}
     s._registry = list(REG)
     s.datasets.append(
@@ -504,3 +508,46 @@ def test_a_family_run_summarises_across_its_slices(session, monkeypatch):
     assert summary["rows"] == 200
     text = "".join(e.text for e in events if isinstance(e, StreamText))
     assert "family tax" in text
+
+
+def test_a_saved_mapping_harmonizes_the_next_family_with_no_model_call(
+    session, monkeypatch
+):
+    """P2.5 AC3: the flagship claim. The mapping is the artifact worth keeping,
+    so file twenty-two costs nothing — the model is never consulted again."""
+    gen_stub = counting_generate([])
+    monkeypatch.setattr(llm, "generate", gen_stub)
+    skills.save(
+        skills.Skill(
+            name="fix-schema-drift-tax",
+            description="Apply the confirmed column mapping for this family.",
+            fix_source="def fix(df, columns):\n    return df.copy()\n",
+            test_source="def test_fix():\n    assert True\n",
+            metadata={"disease": "20", "mapping": '{"note": "note"}'},
+        ),
+        session.skills_dir,
+    )
+    entry = session.library.register("fix-schema-drift-tax", disease=20)
+    entry["state"] = "proven"
+
+    FakeClient.script = [
+        family_meta(),
+        drift_finding(),
+        [ok()],  # family baseline
+        [ok()],  # the saved mapping applied
+        [ok()],  # family verification passes
+        [ok()],
+        diag([]),
+        baseline(),
+        [ok()],
+        diag([]),
+        baseline(),
+    ]
+    events = drive(session.clean_family("data/vancouver/*.csv", "tax"))
+
+    assert gen_stub.calls == [], "a confirmed mapping must not be re-derived"
+    notices = [e.text for e in events if isinstance(e, Notice)]
+    assert any("fix-schema-drift-tax" in n for n in notices)
+    assert json.loads((session.session_dir / "family_tax.json").read_text())[
+        "harmonized"
+    ]

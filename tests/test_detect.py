@@ -612,9 +612,12 @@ needs_vancouver = pytest.mark.skipif(
 def test_detect_family_finds_the_real_vancouver_era_drift() -> None:
     """The compounding demo rests on this being true of real files: the
     2006-2010 era has no `note` column and types drift across eras."""
+    # earliest and latest available, so the pair straddles the era boundary
+    # whatever subset of years happens to be downloaded
+    slices = sorted(VANCOUVER.glob("property-tax-*.csv"))
     frames = {
         p.stem: pd.read_csv(p, sep=";", encoding="utf-8-sig", nrows=500)
-        for p in sorted(VANCOUVER.glob("property-tax-*.csv"))[:2]
+        for p in (slices[0], slices[-1])
     }
     (finding,) = detect_family(frames)
 

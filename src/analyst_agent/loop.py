@@ -468,7 +468,10 @@ class Session:
 
         harmonized = False
         if drift:
-            harmonized = yield from self._harmonize(name, meta, drift)
+            # a mapping this family already confirmed replays for free (R6)
+            harmonized = yield from self._replay_mapping(name)
+            if not harmonized:
+                harmonized = yield from self._harmonize(name, meta, drift)
             if not harmonized:
                 yield Notice(
                     "family", "harmonizing failed — cleaning slices as they are"
@@ -515,6 +518,51 @@ class Session:
 
     def _skill_uses(self) -> dict:
         return {n: e["uses"] for n, e in self.library.entries.items()}
+
+    def _replay_mapping(self, name: str):
+        """Apply a mapping this family already confirmed, if one exists (R6).
+
+        Retrieval for disease 20 cannot go through the single-frame path —
+        detect_all never runs a family signal — so the family flow asks for it
+        directly. Verification is the same family cell either way: a replayed
+        mapping earns no more trust than a fresh one.
+        """
+        for entry in self.library.candidates(20):
+            try:
+                skill = skills.load(self.skills_dir / entry["name"])
+            except (OSError, ValueError):
+                continue
+            yield from self._exec_events(verify.family_baseline_cell(name), quiet=True)
+            code = (
+                f"{skill.fix_source}\n"
+                f"{name} = {{k: fix(v, []) for k, v in {name}.items()}}\n"
+                f'"applied"'
+            )
+            res, _, _, ev_id = yield from self._exec_events(code, quiet=True)
+            if res.status == "ok":
+                vres, _, _, _v = yield from self._exec_events(
+                    verify.family_verify_cell(name), quiet=True
+                )
+                if vres.status == "ok":
+                    self.library.record(
+                        entry["name"], success=True, dataset=name, events=[ev_id]
+                    )
+                    self.library.save()
+                    yield Notice(
+                        "family",
+                        f"{entry['name']} harmonized the family from a confirmed "
+                        "mapping — no model call",
+                    )
+                    return True
+            yield from self._exec_events(verify.family_revert_cell(name), quiet=True)
+            self.library.record(
+                entry["name"], success=False, dataset=name, events=[ev_id]
+            )
+            self.library.save()
+            yield Notice(
+                "family", f"{entry['name']} no longer fits this family — reverted"
+            )
+        return False
 
     def _harmonize(self, name: str, meta: list, drift: list):
         """One gated mapping for the whole family (P2.5 R4/R5)."""
