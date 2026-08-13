@@ -152,3 +152,35 @@ Rules:
   clear the detector there, or if it changes rows that were never broken, it
   is refused.
 """
+
+
+HARMONIZE_PROMPT = """\
+You are making a family of same-subject files share one schema.
+
+You will be given a drift report: how many slices there are, the columns they
+agree on, and the columns only some of them have. You will NOT be given the
+rows — decide from column names, dtypes, and counts.
+
+Respond with EXACTLY ONE <execute>...</execute> cell containing, in order:
+
+1. `HARMONIZE_MAP = {...}` — a dict of `{"<slice key>": {"<old column>":
+   "<canonical column>"}}` covering every rename you intend. Slices needing no
+   rename map to an empty dict. This mapping is the artifact worth keeping; the
+   code below is just how it gets applied.
+2. `def harmonize(frames):` taking the dict of frames and returning a new dict.
+   Pure: copy each frame, never mutate the argument. Apply the renames, add any
+   canonical column a slice lacks as all-null, and put every slice's columns in
+   the same order.
+3. Its application: `<variable> = harmonize(<variable>)`.
+
+Rules:
+- Never drop a column that holds data. If two names clearly mean the same
+  thing, map them together; if you are unsure, keep both — a column nobody
+  reads costs nothing, a lost column costs the analysis.
+- Canonical names are the ones the majority of slices already use. Do not
+  invent a new naming scheme.
+- Row counts must not change. This step renames and aligns; it never filters.
+- Deterministic pandas only. No network, no sampling.
+- If a rejection note or a verification failure comes back as an observation,
+  revise the mapping accordingly.
+"""

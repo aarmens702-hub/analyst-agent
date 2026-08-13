@@ -213,3 +213,99 @@ def skill_test_cell(fix_source: str, test_source: str) -> str:
     return SKILL_TEST_TEMPLATE.format(
         fix_source=fix_source, test_source=json.dumps(test_source)
     )
+
+
+FAMILY_LOAD_TEMPLATE = """\
+import csv as _csv
+import glob as _glob
+import json as _json
+from pathlib import Path as _Path
+
+import pandas as pd
+
+{name} = {{}}
+_meta = []
+for _p in sorted(_glob.glob({pattern})):
+    with open(_p, encoding="utf-8-sig", errors="replace") as _fh:
+        _head = _fh.read(8192)
+    try:
+        _sep = _csv.Sniffer().sniff(_head, delimiters=",;\\t|").delimiter
+    except _csv.Error:
+        _sep = ","
+    _df = pd.read_csv(_p, sep=_sep, encoding="utf-8-sig", low_memory=False)
+    _key = _Path(_p).stem
+    {name}[_key] = _df
+    _meta.append({{
+        "slice": _key,
+        "path": _p,
+        "rows": int(len(_df)),
+        "columns": [str(c) for c in _df.columns],
+        "sep": _sep,
+    }})
+print(_json.dumps(_meta))
+"""
+
+
+def family_load_cell(name: str, pattern: str) -> str:
+    """Load a glob of same-family files into one dict variable (P2.5 R1).
+
+    The delimiter is sniffed per file rather than assumed: Vancouver's "csv"
+    exports are semicolon-delimited with a BOM, and guessing wrong turns thirty
+    columns into one — a failure that looks like clean data.
+    """
+    return FAMILY_LOAD_TEMPLATE.format(name=name, pattern=json.dumps(pattern))
+
+
+FAMILY_BASELINE_TEMPLATE = """\
+import json as _json
+_family_backup = {{k: v.copy() for k, v in {name}.items()}}
+_family_rows = {{k: int(len(v)) for k, v in {name}.items()}}
+_family_nonnull = {{}}
+for _k, _v in {name}.items():
+    _family_nonnull[_k] = {{str(c): int(_v[c].notna().sum()) for c in _v.columns}}
+_json.dumps(sorted(_family_rows))
+"""
+
+
+def family_baseline_cell(name: str) -> str:
+    return FAMILY_BASELINE_TEMPLATE.format(name=name)
+
+
+def family_revert_cell(name: str) -> str:
+    return f"{name} = {{k: v.copy() for k, v in _family_backup.items()}}\n'reverted'"
+
+
+FAMILY_VERIFY_TEMPLATE = """\
+import json as _json
+
+_keys = sorted({name})
+assert _keys == sorted(_family_rows), "harmonizing must not add or drop slices"
+_shapes = {{k: [str(c) for c in {name}[k].columns] for k in _keys}}
+_canonical = _shapes[_keys[0]]
+for _k in _keys:
+    assert _shapes[_k] == _canonical, (
+        "slice " + repr(_k) + " still has a different column list: "
+        + str(sorted(set(_shapes[_k]) ^ set(_canonical))[:6])
+    )
+for _k in _keys:
+    assert int(len({name}[_k])) == _family_rows[_k], (
+        "slice " + repr(_k) + " changed row count; harmonizing renames columns, "
+        "it does not filter rows"
+    )
+_lost = []
+for _k in _keys:
+    _after = {{str(c): int({name}[_k][c].notna().sum()) for c in {name}[_k].columns}}
+    _before_total = sum(_family_nonnull[_k].values())
+    if sum(_after.values()) < _before_total:
+        _lost.append((_k, _before_total - sum(_after.values())))
+assert not _lost, (
+    "harmonizing dropped populated cells: " + str(_lost[:4])
+    + " — a rename that loses values is a data loss, not a mapping"
+)
+_json.dumps({{"slices": len(_keys), "columns": len(_canonical)}})
+"""
+
+
+def family_verify_cell(name: str) -> str:
+    """One canonical schema, no rows moved, no populated cell lost (P2.5 R5)."""
+    return FAMILY_VERIFY_TEMPLATE.format(name=name)

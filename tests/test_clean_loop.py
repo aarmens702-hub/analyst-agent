@@ -8,7 +8,7 @@ from typing import ClassVar
 import pytest
 
 from analyst_agent import library, llm, skills
-from analyst_agent.events import GateDecision, GateRequest, Notice
+from analyst_agent.events import GateDecision, GateRequest, Notice, StreamText
 from analyst_agent.kernel.client import ExecResult, HelloInfo, StreamOut
 from analyst_agent.loop import Session
 
@@ -367,3 +367,113 @@ def test_a_skill_applied_fix_never_spawns_another_skill(stocked, monkeypatch):
 
     assert gen_stub.calls == [], "no proposal pass may run for a skill-applied fix"
     assert report_of(stocked)["skills_admitted"] == []
+
+
+# --- P2.5: family mode -------------------------------------------------------
+
+
+def family_meta(slices=("tax-2007", "tax-2020")):
+    """The manifest the family loader prints: per-slice shape, never rows."""
+    payload = json.dumps(
+        [
+            {
+                "slice": s,
+                "path": f"data/vancouver/{s}.csv",
+                "rows": 100,
+                "columns": ["folio", "land_value"] + ([] if i else ["note"]),
+                "sep": ";",
+            }
+            for i, s in enumerate(slices)
+        ]
+    )
+    return [StreamOut("stdout", payload + "\n"), ok()]
+
+
+def drift_finding():
+    payload = json.dumps(
+        [
+            {
+                "disease": 20,
+                "slug": "schema-drift",
+                "columns": ["note"],
+                "evidence": "note is missing from one era",
+                "stats": {"only_in_a": ["note"], "only_in_b": []},
+                "grade": "GATE",
+                "confidence": 0.95,
+                "indicator": False,
+            }
+        ]
+    )
+    return [StreamOut("stdout", payload + "\n"), ok()]
+
+
+HARMONIZE = (
+    "<execute>HARMONIZE_MAP = {'tax-2020': {}}\n"
+    "def harmonize(frames):\n"
+    "    return {k: v.copy() for k, v in frames.items()}\n"
+    "tax = harmonize(tax)</execute>"
+)
+
+
+def test_family_drift_summary_never_dumps_rows(session, monkeypatch):
+    """R2: the model sees shapes and a drift summary, never the data."""
+    monkeypatch.setattr(llm, "generate", gen([]))
+    FakeClient.script = [family_meta()]
+    events = drive(session.load_family("data/vancouver/*.csv", "tax"))
+
+    text = "".join(e.text for e in events if isinstance(e, StreamText))
+    assert "2 slices" in text
+    assert "sep ';'" in text
+    assert "missing note" in text
+
+
+def test_family_harmonizes_once_then_cleans_each_slice(session, monkeypatch):
+    """R4/R7: one mapping for the family, then the ordinary CLEAN per slice."""
+    monkeypatch.setattr(llm, "generate", gen([HARMONIZE]))
+    FakeClient.script = [
+        family_meta(),
+        drift_finding(),
+        [ok()],  # family baseline
+        [ok()],  # the harmonize cell
+        [ok()],  # family verification passes
+        [ok()],  # bind slice 1 to its own variable
+        diag([]),  # ... and clean it: nothing to fix
+        baseline(),
+        [ok()],  # bind slice 2
+        diag([]),
+        baseline(),
+    ]
+    events = drive(session.clean_family("data/vancouver/*.csv", "tax"))
+
+    notices = [e.text for e in events if isinstance(e, Notice)]
+    assert any("harmonized 2 slices" in n for n in notices)
+    gates = [e for e in events if isinstance(e, GateRequest)]
+    assert len(gates) == 1, "one mapping for the whole family, not one per slice"
+    assert "harmonize 2 slices" in gates[0].title
+
+
+def test_a_mapping_that_loses_data_is_reverted(session, monkeypatch):
+    """R5: renaming is not permission to drop populated cells."""
+    monkeypatch.setattr(llm, "generate", gen([HARMONIZE, HARMONIZE]))
+    FakeClient.script = [
+        family_meta(),
+        drift_finding(),
+        [ok()],  # baseline
+        [ok()],  # harmonize runs
+        [err("harmonizing dropped populated cells")],  # ... and is refused
+        [ok(value="'reverted'")],
+        [ok()],  # second attempt
+        [ok()],  # verification passes
+        [ok()],
+        diag([]),
+        baseline(),
+        [ok()],
+        diag([]),
+        baseline(),
+    ]
+    events = drive(session.clean_family("data/vancouver/*.csv", "tax"))
+
+    notices = [e.text for e in events if isinstance(e, Notice)]
+    assert any("harmonize rejected" in n for n in notices)
+    assert any("_family_backup" in c for c in FakeClient.executed), "must revert"
+    assert any("harmonized 2 slices" in n for n in notices), "and then succeed"

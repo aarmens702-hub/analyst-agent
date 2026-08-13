@@ -406,6 +406,188 @@ class Session:
         report.save(self.session_dir / "clean_reports")
         yield StreamText("stdout", "\n" + report.to_markdown() + "\n")
 
+    def load_family(self, pattern: str, name: str):
+        """Load a glob of same-family files into one dict variable (P2.5 R1)."""
+        result, stream, _, ev_id = yield from self._exec_events(
+            verify.family_load_cell(name, pattern), quiet=True
+        )
+        if result.status != "ok":
+            err = (result.error or {}).get("evalue", result.status)
+            yield Notice("error", f"family load failed: {err}")
+            return []
+        try:
+            meta = json.loads(stream.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            yield Notice("error", "family load produced no manifest")
+            return []
+        if not meta:
+            yield Notice("error", f"no files matched {pattern!r}")
+            return []
+        self._stamp_registry(result.registry, ev_id)
+        for entry in meta:
+            src = Path(entry["path"])
+            if src.exists():
+                self.datasets.append(
+                    {
+                        "path": str(src),
+                        "sha256": hashlib.sha256(src.read_bytes()).hexdigest(),
+                        "variable": f"{name}[{entry['slice']!r}]",
+                        "loaded_event": ev_id,
+                    }
+                )
+        yield StreamText("stdout", self._drift_text(name, meta))
+        return meta
+
+    def clean_family(self, pattern: str, name: str):
+        """P2.5: harmonize a family once, then clean each slice with the library.
+
+        The second half is deliberately the ordinary CLEAN flow. Harmonizing is
+        what makes the slices comparable; the compounding is what happens next,
+        when one skill fixes the same disease in twenty-one files.
+        """
+        meta = yield from self.load_family(pattern, name)
+        if not meta:
+            return
+
+        code = (
+            "from analyst_agent.detect import detect_family\n"
+            "import json\n"
+            f"print(json.dumps(detect_family({name})))"
+        )
+        result, stream, _, _ev = yield from self._exec_events(code, quiet=True)
+        drift = []
+        if result.status == "ok":
+            try:
+                drift = json.loads(stream.strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                drift = []
+
+        if drift:
+            harmonized = yield from self._harmonize(name, meta, drift)
+            if not harmonized:
+                yield Notice(
+                    "family", "harmonizing failed — cleaning slices as they are"
+                )
+        else:
+            yield Notice("family", "slices already share one schema")
+
+        for entry in meta:
+            var = re.sub(r"\W+", "_", f"{name}_{entry['slice']}").strip("_")
+            res, _, _, ev_id = yield from self._exec_events(
+                f"{var} = {name}[{entry['slice']!r}]\n{var}.shape", quiet=True
+            )
+            if res.status != "ok":
+                continue
+            self._stamp_registry(res.registry, ev_id)
+            yield StreamText("stdout", f"\n── slice {entry['slice']} ──\n")
+            yield from self.clean(var)
+
+    def _harmonize(self, name: str, meta: list, drift: list):
+        """One gated mapping for the whole family (P2.5 R4/R5)."""
+        yield from self._exec_events(verify.family_baseline_cell(name), quiet=True)
+        msgs = [
+            {"role": "system", "content": prompts.HARMONIZE_PROMPT},
+            {"role": "user", "content": self._drift_context(name, meta, drift)},
+        ]
+        for attempt in range(1, CLEAN_MAX_ATTEMPTS + 1):
+            try:
+                resp = yield from self._generate_scoped(msgs)
+            except Exception as exc:  # noqa: BLE001 — surface and fall through
+                yield Notice("llm_error", f"{type(exc).__name__}: {exc}")
+                return False
+            self.transcript.append("model", text=resp, kind_note="harmonize")
+            msgs.append({"role": "assistant", "content": resp})
+            kind, body = parse_tags(resp)
+            if kind != "execute" or "def harmonize" not in body:
+                msgs.append({"role": "user", "content": prompts.CLEAN_NUDGE_PROMPT})
+                continue
+
+            decision = yield GateRequest(
+                body,
+                attempt,
+                title=(
+                    f"harmonize {len(meta)} slices of {name} · GATE · "
+                    f"{len(drift)} drift finding(s)"
+                ),
+            )
+            if not isinstance(decision, GateDecision):
+                decision = GateDecision("run")
+            self.transcript.append("gate", action=decision.action, note=decision.note)
+            if decision.action == "skip":
+                return False
+            if decision.action == "reject":
+                msgs.append(
+                    {
+                        "role": "user",
+                        "content": f"<observation>rejected: {decision.note}</observation>",
+                    }
+                )
+                continue
+
+            res, stream, paths, ev_id = yield from self._exec_events(body)
+            if res.status != "ok":
+                yield from self._exec_events(
+                    verify.family_revert_cell(name), quiet=True
+                )
+                msgs.append(
+                    {
+                        "role": "user",
+                        "content": self._observation(ev_id, res, stream, paths, []),
+                    }
+                )
+                continue
+            vres, _, _, _v = yield from self._exec_events(
+                verify.family_verify_cell(name), quiet=True
+            )
+            if vres.status == "ok":
+                yield Notice("family", f"harmonized {len(meta)} slices to one schema")
+                return True
+            yield from self._exec_events(verify.family_revert_cell(name), quiet=True)
+            verr = (vres.error or {}).get("evalue", vres.status)
+            yield Notice("family", f"harmonize rejected: {verr}")
+            msgs.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"<observation>verification failed: {verr} — the family "
+                        "was reverted; revise the mapping</observation>"
+                    ),
+                }
+            )
+        return False
+
+    def _drift_text(self, name: str, meta: list) -> str:
+        """Per-slice shape plus union/intersection — never a per-file dump (R2)."""
+        sets = [set(m["columns"]) for m in meta]
+        shared = set.intersection(*sets) if sets else set()
+        union = set.union(*sets) if sets else set()
+        rows = sum(m["rows"] for m in meta)
+        header = (
+            f"\nfamily {name}: {len(meta)} slices, {rows:,} rows, "
+            f"{len(shared)} shared columns, {len(union) - len(shared)} that drift\n"
+        )
+        lines = [header]
+        for m in meta:
+            missing = sorted(union - set(m["columns"]))
+            note = f" · missing {', '.join(missing[:4])}" if missing else ""
+            lines.append(
+                f"  {m['slice']}: {m['rows']:,} rows × {len(m['columns'])} cols "
+                f"(sep {m['sep']!r}){note}\n"
+            )
+        return "".join(lines)
+
+    def _drift_context(self, name: str, meta: list, drift: list) -> str:
+        sets = [set(m["columns"]) for m in meta]
+        shared = sorted(set.intersection(*sets)) if sets else []
+        union = set.union(*sets) if sets else set()
+        per_slice = {m["slice"]: sorted(union - set(m["columns"])) for m in meta}
+        return (
+            f"Variable: {name} (a dict of {len(meta)} DataFrames)\n\n"
+            f"Columns every slice has ({len(shared)}): {json.dumps(shared)}\n\n"
+            f"Columns each slice is missing: {json.dumps(per_slice, indent=2)}\n\n"
+            f"Drift findings:\n{json.dumps(drift, indent=2)[:4000]}"
+        )
+
     def close(self) -> None:
         try:
             self.transcript.append("session_meta", event="close")

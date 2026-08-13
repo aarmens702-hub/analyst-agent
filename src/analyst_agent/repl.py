@@ -17,8 +17,8 @@ from analyst_agent.events import (
 )
 
 BANNER = (
-    "analyst-agent — /load <path> [name] · /clean <var> · /skills · "
-    "ask a question · /quit"
+    "analyst-agent — /load <path> [name] · /clean <var> · "
+    "/clean-family <glob> <name> · /skills · ask a question · /quit"
 )
 PROMPT = "❯ "
 GATE_PROMPT = "[r]un / [j]eject / [s]kip: "
@@ -42,6 +42,9 @@ def run_repl(session, auto_run: bool = False, input_fn=input, print_fn=print) ->
                 continue
             if line.split()[:1] == ["/skills"]:
                 _skills(session, line, print_fn)
+                continue
+            if line.split()[:1] == ["/clean-family"]:
+                _clean_family(session, line, auto_run, input_fn, print_fn)
                 continue
             _drive(session.run_turn(line), auto_run, input_fn, print_fn)
     except (EOFError, KeyboardInterrupt):
@@ -134,3 +137,13 @@ def _skills(session, line: str, print_fn) -> None:
         print_fn(
             f"{name:<32}{e['disease']:>8}  {e['state']:<10}{record:<10}{e['uses']}"
         )
+
+
+def _clean_family(session, line: str, auto_run: bool, input_fn, print_fn) -> None:
+    """/clean-family <glob> <name>: harmonize a family, then clean each slice."""
+    parts = line.split()
+    if len(parts) < 3:
+        print_fn('usage: /clean-family "<glob>" <name>')
+        return
+    pattern = parts[1].strip("\"'")
+    _drive(session.clean_family(pattern, parts[2]), auto_run, input_fn, print_fn)
