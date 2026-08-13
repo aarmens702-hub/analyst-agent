@@ -53,7 +53,13 @@ def run_repl(session, auto_run: bool = False, input_fn=input, print_fn=print) ->
             _drive(session.run_turn(line), auto_run, input_fn, print_fn)
     except (EOFError, KeyboardInterrupt):
         pass
-    session.close()
+    except Exception as exc:  # noqa: BLE001 — see below; the session must close
+        # A turn blowing up is not a reason to strand the session. Skipping
+        # close() loses the transcript's close event and, in docker mode,
+        # leaves the --network none container running with nobody attached.
+        print_fn(f"· error: {type(exc).__name__}: {exc}")
+    finally:
+        session.close()
 
 
 def _drive(gen, auto_run: bool, input_fn, print_fn) -> None:

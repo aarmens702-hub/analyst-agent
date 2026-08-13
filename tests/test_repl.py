@@ -476,3 +476,24 @@ def test_why_prints_the_provenance_chain(tmp_path) -> None:
     body = "\n".join(str(p) for p in printed)
     assert "✓ trusted" in body
     assert "source: data/beers.csv" in body
+
+
+def test_the_repl_survives_an_unexpected_failure_and_still_closes(tmp_path) -> None:
+    """A generator that raises must not take the session with it. Skipping
+    session.close() leaves the transcript without its close event and, in
+    docker mode, orphans the --network none container."""
+
+    class Exploding(FakeSession):
+        def run_turn(self, question):
+            raise RuntimeError("the kernel died")
+            yield  # pragma: no cover - makes this a generator
+
+    session = Exploding()
+    printed: list = []
+    run_repl(
+        session,
+        input_fn=scripted_input("count the rows", "/quit"),
+        print_fn=printed.append,
+    )
+    assert session.closed, "close() must run even when a turn blows up"
+    assert any("kernel died" in str(p) for p in printed), "and say what happened"

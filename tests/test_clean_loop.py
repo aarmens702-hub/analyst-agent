@@ -752,3 +752,68 @@ def test_a_kernel_death_after_the_fix_loop_still_writes_a_report(session, monkey
     assert any(isinstance(e, Notice) and "kernel" in e.text.lower() for e in events)
     md = (session.session_dir / "clean_reports" / "r001.md").read_text()
     assert "not saved" in md, "the report must say the fixes were never written out"
+
+
+def test_a_dead_kernel_during_family_mode_does_not_kill_the_driver(
+    session, monkeypatch
+):
+    """KernelLost is raised from every _exec_events call site but was caught in
+    clean() only. load_family, _harmonize and the per-slice binding are all
+    unguarded, and no driver catches it — so a death there unwound out of
+    run_repl, skipping session.close() and orphaning the sandbox container."""
+    monkeypatch.setattr(llm, "generate", gen([]))
+    FakeClient.script = [dead_kernel()] * 10
+
+    events = drive(session.clean_family("data/vancouver/*.csv", "tax"))
+
+    assert any(isinstance(e, Notice) and "kernel" in e.text.lower() for e in events), (
+        "the family flow must report the death, not raise through the driver"
+    )
+
+
+def test_a_family_slice_knows_which_file_it_came_from(session, monkeypatch):
+    """load_family registered datasets as tax['2007'] but the slice is cleaned
+    under the variable tax_2007, so _source_sha found nothing. Every family
+    report recorded a null source — making its output unreachable in the
+    provenance graph — and library.record(dataset="") never grew the skill's
+    source list, so a skill fixing the same disease in all 21 slices could
+    never reach the two distinct sources promotion requires. That is exactly
+    the compounding claim P2.5 exists to demonstrate."""
+    monkeypatch.setattr(llm, "generate", gen([]))
+    slices = []
+    for year in ("2007", "2020"):
+        path = session.session_dir / f"tax-{year}.csv"
+        path.write_text("folio;land_value\n1;100\n")
+        slices.append(
+            {
+                "slice": f"tax-{year}",
+                "path": str(path),
+                "rows": 1,
+                "columns": ["folio", "land_value"],
+                "sep": ";",
+            }
+        )
+    FakeClient.script = [[StreamOut("stdout", json.dumps(slices) + "\n"), ok()]]
+    drive(session.load_family(str(session.session_dir / "tax-*.csv"), "tax"))
+
+    var = session._slice_var("tax", "tax-2007")
+    registered = {d["variable"] for d in session.datasets}
+    assert var in registered, registered
+    assert session._source_sha(var), "a slice must resolve to the file it came from"
+
+
+def test_a_dead_kernel_is_restarted_so_the_next_clean_can_run(session, monkeypatch):
+    """supervisor latches _hung and only a restart clears it, so one timeout
+    made every later /clean in the session abort instantly and forever, with
+    nothing telling the user a restart was needed. QUERY mode already recovers
+    this way; CLEAN just gave up permanently."""
+    monkeypatch.setattr(llm, "generate", gen([]))
+    restarts: list = []
+    monkeypatch.setattr(
+        session, "_restart_and_replay", lambda dead: restarts.append(dead)
+    )
+    FakeClient.script = [dead_kernel()] * 6
+
+    drive(session.clean("df"))
+
+    assert restarts, "a dead kernel must be restarted, not left latched"

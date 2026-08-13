@@ -354,6 +354,7 @@ class Session:
             # Stop, and say what actually happened. Marching on would mark every
             # remaining finding "failed" and blame the model for a dead kernel.
             yield Notice("kernel_died", str(lost))
+            self._recover(lost)
 
     def _clean(self, var: str):
         start_ev = self.transcript.append("user", text=f"/clean {var}")
@@ -417,6 +418,21 @@ class Session:
             var, records, indicators, clear, evs_chain, outputs, stats, admitted
         )
 
+    def _recover(self, lost: "KernelLost") -> None:
+        """Restart after a death, so the session is not poisoned for good.
+
+        The supervisor latches `hung` and only a restart clears it, so without
+        this one timeout made every later /clean abort instantly and forever,
+        with nothing telling the user why. QUERY mode has always recovered this
+        way; CLEAN simply gave up. The dataframe's in-flight state is gone
+        either way — what a restart buys back is the ability to reload and try
+        again.
+        """
+        try:
+            self._restart_and_replay(dead=True)
+        except Exception:  # noqa: BLE001 — recovery is best-effort by nature
+            pass
+
     def _aborted(self, finding: dict) -> dict:
         """A finding we never got to. Distinct from `failed`, which means the
         model tried and the verification refused it."""
@@ -461,6 +477,13 @@ class Session:
         report.save(self.session_dir / "clean_reports")
         yield StreamText("stdout", "\n" + report.to_markdown() + "\n")
 
+    def _slice_var(self, name: str, slice_key: str) -> str:
+        """The variable a slice is cleaned under. Both the loader and the
+        cleaner must derive this identically — when they disagreed, every
+        family slice recorded a null source and no family skill could ever be
+        promoted, because promotion counts distinct sources."""
+        return re.sub(r"\W+", "_", f"{name}_{slice_key}").strip("_")
+
     def load_family(self, pattern: str, name: str):
         """Load a glob of same-family files into one dict variable (P2.5 R1)."""
         result, stream, _, ev_id = yield from self._exec_events(
@@ -486,7 +509,7 @@ class Session:
                     {
                         "path": str(src),
                         "sha256": hashlib.sha256(src.read_bytes()).hexdigest(),
-                        "variable": f"{name}[{entry['slice']!r}]",
+                        "variable": self._slice_var(name, entry["slice"]),
                         "loaded_event": ev_id,
                     }
                 )
@@ -494,6 +517,17 @@ class Session:
         return meta
 
     def clean_family(self, pattern: str, name: str):
+        """Harmonize a family, then clean each slice. Guarded like clean():
+        every step here touches the kernel, and an unguarded KernelLost unwinds
+        through the driver, skipping session.close() and orphaning the
+        container."""
+        try:
+            yield from self._clean_family(pattern, name)
+        except KernelLost as lost:
+            yield Notice("kernel_died", str(lost))
+            self._recover(lost)
+
+    def _clean_family(self, pattern: str, name: str):
         """P2.5: harmonize a family once, then clean each slice with the library.
 
         The second half is deliberately the ordinary CLEAN flow. Harmonizing is
@@ -533,7 +567,7 @@ class Session:
 
         hits: dict = {}
         for entry in meta:
-            var = re.sub(r"\W+", "_", f"{name}_{entry['slice']}").strip("_")
+            var = self._slice_var(name, entry["slice"])
             res, _, _, ev_id = yield from self._exec_events(
                 f"{var} = {name}[{entry['slice']!r}]\n{var}.shape", quiet=True
             )
@@ -1319,7 +1353,7 @@ class Session:
         )
         if not tolerate_death and result.status in ("kernel_died", "hung"):
             raise KernelLost(
-                f"the kernel {result.status.replace('_', ' ')} — "
+                f"the {result.status.replace('_', ' ')} — "
                 "stopping rather than reporting this as a failed fix"
             )
         return result, "".join(stream_parts), display_paths, ev_id
