@@ -842,3 +842,20 @@ def test_a_broken_detector_reaches_the_operator(session, monkeypatch):
     assert report_of(session)["broken"] == {
         "7": "ValueError: cannot reindex on a duplicate axis"
     }
+
+
+def test_a_family_run_records_what_it_did_even_when_the_kernel_dies(
+    session, monkeypatch
+):
+    """The same defect as clean()'s, one function away, for the third time:
+    _clean_family writes family_<name>.json as its last statement with no
+    guard, so a death anywhere earlier loses skill_hits — the single number
+    P2.5 exists to produce."""
+    monkeypatch.setattr(llm, "generate", gen([]))
+    FakeClient.script = [family_meta(), drift_finding(), *[dead_kernel()] * 10]
+
+    drive(session.clean_family("data/vancouver/*.csv", "tax"))
+
+    summary = session.session_dir / "family_tax.json"
+    assert summary.exists(), "a family run must record what it did"
+    assert json.loads(summary.read_text())["harmonized"] is False

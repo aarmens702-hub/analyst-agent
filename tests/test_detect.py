@@ -758,3 +758,23 @@ def test_evidence_stays_one_line_for_every_line_breaker() -> None:
         finding = detect._finding(6, ["c"], f"before{ch}after", {}, "AUTO", 0.9)
         assert len(finding["evidence"].splitlines()) == 1, repr(ch)
         assert "before" in finding["evidence"] and "after" in finding["evidence"]
+
+
+def test_d06_exotic_count_is_the_number_of_invisible_characters() -> None:
+    """Ground truth computed here, without importing detect's own tables — a
+    test that recomputes a number using the code under test only proves the
+    code agrees with itself. Building the damage table from Unicode Zs swept in
+    U+0020, so 'N with NBSP/zero-width characters' counted every value that had
+    an ordinary space: 15 of 20 where the true answer was 5."""
+    values = ["  Vancouver", "Burnaby ", "Vic\xa0toria", "Surrey"] * 5
+    invisible = sum(
+        # named by codepoint, never by literal: an invisible character
+        # in a fixture is unreviewable — the exact hazard this file
+        # exists to catch elsewhere
+        any(ord(c) in {0xA0, 0x200B, 0xFEFF, 0x2007, 0x202F, 0x3000} for c in v)
+        for v in values
+    )
+    (f,) = _of(detect_all(pd.DataFrame({"city": values})), 6)
+
+    assert f["stats"]["exotic"] == invisible == 5
+    assert "5 with NBSP" in f["evidence"], f["evidence"]

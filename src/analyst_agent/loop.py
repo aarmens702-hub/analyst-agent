@@ -439,8 +439,10 @@ class Session:
         """
         try:
             self._restart_and_replay(dead=True)
-        except Exception:  # noqa: BLE001 — recovery is best-effort by nature
-            pass
+        except Exception as exc:  # noqa: BLE001 — recovery is best-effort
+            self.transcript.append(
+                "session_meta", event="restart_failed", error=str(exc)
+            )
 
     def _aborted(self, finding: dict) -> dict:
         """A finding we never got to. Distinct from `failed`, which means the
@@ -556,58 +558,74 @@ class Session:
         meta = yield from self.load_family(pattern, name)
         if not meta:
             return
+        # One mutable record, so the summary below sees whatever progress was
+        # made before an exception. It is written on every exit: this used to
+        # be the method's last statement with no guard, so a death in the
+        # diagnosis or the harmonize turn lost skill_hits entirely — the one
+        # number this phase exists to produce.
+        run = {"harmonized": False, "drift": [], "hits": {}, "cleaned": []}
+        try:
+            yield from self._family_body(name, meta, run)
+        finally:
+            yield from self._save_family(name, pattern, meta, run)
 
+    def _family_body(self, name: str, meta: list, run: dict):
         code = (
             "from analyst_agent.detect import detect_family\n"
             "import json\n"
             f"print(json.dumps(detect_family({name})))"
         )
         result, stream, _, _ev = yield from self._exec_events(code, quiet=True)
-        drift = []
         if result.status == "ok":
             try:
-                drift = json.loads(stream.strip().splitlines()[-1])
+                run["drift"] = json.loads(stream.strip().splitlines()[-1])
             except (ValueError, IndexError):
-                drift = []
+                pass
 
-        harmonized = False
-        if drift:
+        if run["drift"]:
             # a mapping this family already confirmed replays for free (R6)
-            harmonized = yield from self._replay_mapping(name)
-            if not harmonized:
-                harmonized = yield from self._harmonize(name, meta, drift)
-            if not harmonized:
+            run["harmonized"] = yield from self._replay_mapping(name)
+            if not run["harmonized"]:
+                run["harmonized"] = yield from self._harmonize(name, meta, run["drift"])
+            if not run["harmonized"]:
                 yield Notice(
                     "family", "harmonizing failed — cleaning slices as they are"
                 )
         else:
-            harmonized = True  # nothing to reconcile is a kind of harmonized
+            run["harmonized"] = True  # nothing to reconcile is a kind of harmonized
             yield Notice("family", "slices already share one schema")
 
-        hits: dict = {}
         for entry in meta:
             var = self._slice_var(name, entry["slice"])
             res, _, _, ev_id = yield from self._exec_events(
                 f"{var} = {name}[{entry['slice']!r}]\n{var}.shape", quiet=True
             )
             if res.status != "ok":
+                # a slice that never bound was never cleaned; the summary said
+                # otherwise, because it was built from `meta` regardless
+                err = (res.error or {}).get("evalue", res.status)
+                yield Notice("family", f"slice {entry['slice']} skipped: {err}")
                 continue
             self._stamp_registry(res.registry, ev_id)
             yield StreamText("stdout", f"\n── slice {entry['slice']} ──\n")
             before = dict(self._skill_uses())
             yield from self.clean(var)
+            run["cleaned"].append(entry["slice"])
             for skill_name, count in self._skill_uses().items():
                 gained = count - before.get(skill_name, 0)
                 if gained:
-                    hits[skill_name] = hits.get(skill_name, 0) + gained
+                    run["hits"][skill_name] = run["hits"].get(skill_name, 0) + gained
 
+    def _save_family(self, name: str, pattern: str, meta: list, run: dict):
+        cleaned, hits = run["cleaned"], run["hits"]
         summary = {
             "family": name,
             "pattern": pattern,
-            "slices": [m["slice"] for m in meta],
-            "rows": sum(m["rows"] for m in meta),
-            "harmonized": harmonized,
-            "drift_findings": len(drift),
+            "slices": cleaned,  # what was actually cleaned, not what was found
+            "found": [m["slice"] for m in meta],
+            "rows": sum(m["rows"] for m in meta if m["slice"] in cleaned),
+            "harmonized": run["harmonized"],
+            "drift_findings": len(run["drift"]),
             # the number the whole phase exists to produce: one skill, many files
             "skill_hits": hits,
         }
@@ -616,8 +634,9 @@ class Session:
         replayed = sum(hits.values())
         yield StreamText(
             "stdout",
-            f"\nfamily {name}: {len(meta)} slices, {summary['rows']:,} rows · "
-            f"{replayed} fix(es) served by {len(hits)} skill(s) · {path}\n",
+            f"\nfamily {name}: {len(cleaned)}/{len(meta)} slices cleaned, "
+            f"{summary['rows']:,} rows · {replayed} fix(es) served by "
+            f"{len(hits)} skill(s) · {path}\n",
         )
 
     def _skill_uses(self) -> dict:

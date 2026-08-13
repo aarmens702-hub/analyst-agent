@@ -342,6 +342,11 @@ _ZERO_WIDTH_NOISE = {0x200B, 0xFEFF}
 # report 'woman technologist' as whitespace damage and split it while
 # "repairing" it.
 _WS_DAMAGE = {c: " " for c in _UNICODE_SPACES} | {c: None for c in _ZERO_WIDTH_NOISE}
+# The invisible subset, for the evidence's "N with NBSP/zero-width" clause.
+# _WS_DAMAGE itself contains U+0020 — normalising a space to a space is a
+# harmless no-op — but counting with it made every value holding an ordinary
+# space read as exotic, and the evidence said so out loud.
+_WS_EXOTIC = {c for c in _WS_DAMAGE if c != 0x20}
 
 
 def _ws_tidy(values):
@@ -630,7 +635,7 @@ def _d06(df, cols) -> list:
             continue
         # counted from the same table the repair uses, so the number in the
         # evidence cannot drift from what the fix would actually touch
-        exotic = int(values.map(lambda v: any(ord(c) in _WS_DAMAGE for c in v)).sum())
+        exotic = int(values.map(lambda v: any(ord(c) in _WS_EXOTIC for c in v)).sum())
         out.append(
             _finding(
                 6,
