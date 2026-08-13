@@ -6,6 +6,7 @@ skills/ directory: skills/<name>/{SKILL.md,scripts/} plus skills/ledger.json,
 or skills/retired/<name>/ for the ones the library has already retired.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -313,3 +314,20 @@ def test_main_runs_end_to_end_via_the_cli(tmp_path, monkeypatch, capsys) -> None
     assert "fix-proven" in captured.out
     assert (out / "fix-proven" / "SKILL.md").exists()
     assert (out / "MANIFEST.json").exists()
+
+
+def test_manifest_disease_is_always_an_int(tmp_path) -> None:
+    """The ledger stores it as int, SKILL.md metadata as str per spec. A
+    manifest that reports whichever it happened to read is one a consumer
+    cannot parse without guessing."""
+    root = tmp_path / "skills"
+    skills.save(make_skill("fix-a"), root)
+    skills.save(make_skill("fix-b"), root)
+    (root / "ledger.json").write_text(
+        json.dumps({"fix-a": {"disease": 4, "state": "proven"}})
+    )  # fix-b has no ledger row, so its disease comes from metadata as a string
+
+    run_export(root, tmp_path / "dist", include_all=True)
+    manifest = json.loads((tmp_path / "dist" / "MANIFEST.json").read_text())
+    diseases = [s["disease"] for s in manifest["skills"]]
+    assert diseases and all(isinstance(d, int) for d in diseases), diseases

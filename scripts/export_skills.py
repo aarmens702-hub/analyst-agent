@@ -175,7 +175,7 @@ def _build_manifest(results: list) -> dict:
         "skills": [
             {
                 "name": r.name,
-                "disease": r.disease,
+                "disease": _as_disease(r.disease),
                 "state": r.state,
                 "successes": r.successes,
                 "failures": r.failures,
@@ -231,6 +231,16 @@ def _render_readme(results: list) -> str:
         )
     lines.append("")
     return "\n".join(lines)
+
+
+def _as_disease(value) -> int | None:
+    """The ledger holds an int, SKILL.md metadata holds a str (the spec allows
+    nothing else there). A manifest reporting whichever it happened to read is
+    one a consumer cannot parse without guessing."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def run_export(
