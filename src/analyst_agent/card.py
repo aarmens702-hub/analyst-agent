@@ -21,6 +21,7 @@ class AnswerCard:
     lineage: dict = field(default_factory=dict)
     model: dict = field(default_factory=dict)
     flags: dict = field(default_factory=dict)
+    intent: dict = field(default_factory=dict)  # P3 intent gate verdict
     created: str = ""
 
     def to_markdown(self) -> str:
@@ -33,6 +34,16 @@ class AnswerCard:
         else:
             lines.append("- (none — see flags)")
         lines.append("")
+
+        # A mismatch belongs above the fold, next to the answer it undermines:
+        # every check can pass while the code answers a different question.
+        if self.intent.get("verdict") == "mismatch":
+            lines += [
+                "> ⚠ **the code may not answer the question asked**",
+                f"> it computed: {self.intent.get('restatement', '')}",
+                f"> {self.intent.get('reason', '')}",
+                "",
+            ]
 
         lines.append("**cells**")
         for cell in self.cells:

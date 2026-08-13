@@ -123,6 +123,7 @@ def test_full_turn_produces_card_with_lifted_checks(session, monkeypatch):
         "malformed_answer": False,
         "truncated": False,
         "unchecked": False,
+        "intent_mismatch": False,
     }
 
     saved = json.loads((session.session_dir / "cards" / "c001.json").read_text())
@@ -293,3 +294,54 @@ def test_registry_block_is_last_context_message(session, monkeypatch):
     ctx = fake.contexts[0]
     assert ctx[0]["role"] == "system"
     assert "<registry>" in ctx[-1]["content"]
+
+
+# --- P3: the intent gate (Talk Less Verify More, 2601.00224) ------------------
+
+
+def test_intent_gate_flags_correct_code_answering_the_wrong_question(
+    session, monkeypatch
+):
+    """Assertions cannot see this failure: the code ran, the checks passed, and
+    it answered a different question than the one asked."""
+    FakeClient.script = [[ok_result(value="'42'")]]
+    monkeypatch.setattr(
+        llm,
+        "generate",
+        scripted_generate(
+            [
+                "<execute>result = df['b'].sum()\nassert result > 0</execute>",
+                "<answer>the total is 42</answer>",
+                "<restatement>the code summed column b</restatement>"
+                "<verdict>mismatch</verdict>"
+                "<reason>the question asked for column a, the code used b</reason>",
+            ]
+        ),
+    )
+    card = card_from(drive(session.run_turn("what is the total of column a?")))
+
+    assert card.flags["intent_mismatch"] is True
+    assert "column a" in card.intent["reason"]
+    assert "summed column b" in card.intent["restatement"]
+
+
+def test_intent_gate_stays_quiet_when_the_answer_matches_the_question(
+    session, monkeypatch
+):
+    FakeClient.script = [[ok_result(value="'42'")]]
+    monkeypatch.setattr(
+        llm,
+        "generate",
+        scripted_generate(
+            [
+                "<execute>result = df['a'].sum()\nassert result > 0</execute>",
+                "<answer>the total is 42</answer>",
+                "<restatement>the code summed column a</restatement>"
+                "<verdict>match</verdict><reason>same quantity</reason>",
+            ]
+        ),
+    )
+    card = card_from(drive(session.run_turn("what is the total of column a?")))
+
+    assert card.flags["intent_mismatch"] is False
+    assert card.intent["verdict"] == "match"

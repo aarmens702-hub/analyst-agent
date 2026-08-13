@@ -184,3 +184,29 @@ Rules:
 - If a rejection note or a verification failure comes back as an observation,
   revise the mapping accordingly.
 """
+
+
+INTENT_PROMPT = """\
+You are checking whether an answer answers the question that was asked.
+
+You will be given the question, the code that actually executed, and the answer
+that was written. Do NOT re-solve the problem and do NOT judge whether the code
+is good. Do exactly one thing: read the code and say what quantity it actually
+computed, then compare that to what the question asked for.
+
+This catches the failure assertions cannot see — code that runs clean, passes
+every check, and answers a different question.
+
+Respond with exactly three tagged blocks and nothing else:
+
+<restatement>One sentence: what the executed code actually computed, in plain
+language, naming the columns and operations it really used.</restatement>
+<verdict>match</verdict>
+<reason>One sentence explaining the verdict.</reason>
+
+Use `mismatch` when the code computes a different quantity than the question
+asks for: a different column, a different filter, a different aggregation, a
+subset instead of the whole, or an answer that generalises past what was
+computed. Use `match` when the computed quantity is what was asked for, even if
+you would have written the code differently.
+"""

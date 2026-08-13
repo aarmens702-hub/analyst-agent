@@ -92,3 +92,24 @@ def test_capped_flag_appears_in_meta_line():
     card = _card()
     card.flags["capped"] = True
     assert "flags: capped" in card.to_markdown()
+
+
+def test_an_intent_mismatch_appears_next_to_the_answer_it_undermines() -> None:
+    """Every check can pass while the code answers a different question, so the
+    warning belongs above the fold, not buried in a flags dict."""
+    card = AnswerCard(
+        card_id="s01-c001",
+        session="s01",
+        question="what is the total of column a?",
+        answer="the total is 42",
+        checks=[{"expr": "result > 0", "passed": True}],
+        intent={
+            "verdict": "mismatch",
+            "restatement": "the code summed column b",
+            "reason": "the question asked for column a",
+        },
+    )
+    md = card.to_markdown()
+    assert "may not answer the question asked" in md
+    assert "the code summed column b" in md
+    assert md.index("summed column b") < md.index("**cells**")

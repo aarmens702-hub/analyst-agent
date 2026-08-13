@@ -312,6 +312,8 @@ class Session:
             checks=checks,
             cell_events=exec_evs,
         )
+        intent = yield from self._intent_check(question, cells, answer_text or "")
+        flags["intent_mismatch"] = intent.get("verdict") == "mismatch"
         card = AnswerCard(
             card_id=card_id,
             session=self.session_id,
@@ -325,6 +327,7 @@ class Session:
             },
             model=llm.model_info(),
             flags=flags,
+            intent=intent,
             created=datetime.now().astimezone().isoformat(timespec="seconds"),
         )
         card.save(self.session_dir / "cards")
@@ -720,6 +723,49 @@ class Session:
             "case": case,
         }
 
+    # -- P3: the intent gate --------------------------------------------------
+
+    def _intent_check(self, question: str, cells: list, answer: str):
+        """Restate what the code actually computed and diff it against the ask.
+
+        One extra call, deliberately narrow: it never re-solves the problem, it
+        only reads the code back. Catches correct code answering the wrong
+        question — the failure assertions structurally cannot see, because the
+        assertions are about the code that ran, not the question that was asked.
+        """
+        ran = [c for c in cells if c.get("status") == "ok" and c.get("code")]
+        if not ran:
+            return {}
+        code = "\n\n".join(c["code"] for c in ran[-2:])
+        msgs = [
+            {"role": "system", "content": prompts.INTENT_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Question:\n{question}\n\nCode that executed:\n{code}\n\n"
+                    f"Answer written:\n{answer}"
+                ),
+            },
+        ]
+        try:
+            resp = yield from self._generate_scoped(msgs, stream=False)
+        except Exception as exc:  # noqa: BLE001 — an unavailable check is not a verdict
+            yield Notice("intent", f"intent check unavailable: {type(exc).__name__}")
+            return {}
+        self.transcript.append("model", text=resp, kind_note="intent")
+        found = {}
+        for tag in ("restatement", "verdict", "reason"):
+            match = re.search(rf"<{tag}>(.*?)</{tag}>", resp, re.DOTALL)
+            found[tag] = match.group(1).strip() if match else ""
+        found["verdict"] = "mismatch" if found["verdict"] == "mismatch" else "match"
+        if found["verdict"] == "mismatch":
+            yield Notice(
+                "intent",
+                f"the code computed something else: {found['restatement']} "
+                f"({found['reason']})",
+            )
+        return found
+
     # -- P2: the library ------------------------------------------------------
 
     def _source_sha(self, var: str) -> str:
@@ -1073,14 +1119,21 @@ class Session:
             )
         )
 
-    def _generate_scoped(self, msgs: list[dict]):
-        """Stream a completion for an explicit message list + fresh registry."""
+    def _generate_scoped(self, msgs: list[dict], stream: bool = True):
+        """Complete an explicit message list + fresh registry.
+
+        `stream=False` for housekeeping calls whose text is not the answer —
+        rendering an intent check as if it were the model thinking out loud
+        would put the checker's words in the analyst's mouth.
+        """
         parts: list[str] = []
         context = [*msgs, {"role": "user", "content": self._registry_block()}]
         for chunk in llm.generate(context):
             parts.append(chunk)
-            yield StreamText("model", chunk)
-        yield StreamText("model", "\n")
+            if stream:
+                yield StreamText("model", chunk)
+        if stream:
+            yield StreamText("model", "\n")
         return "".join(parts)
 
     def _exec_events(self, code: str, quiet: bool = False):
