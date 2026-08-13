@@ -281,6 +281,7 @@ def run_export(
                 result.scrubbed = notes
                 if result.disease is None:
                     result.disease = scrubbed.metadata.get("disease")
+                problems += skills.validate(scrubbed, folder.name)
                 text = skills.render(scrubbed)
                 leaks = _absolute_paths(text)
                 if leaks:

@@ -319,9 +319,11 @@ def test_intent_gate_flags_correct_code_answering_the_wrong_question(
             [
                 "<execute>result = df['b'].sum()\nassert result > 0</execute>",
                 "<answer>the total is 42</answer>",
-                "<restatement>the code summed column b</restatement>"
-                "<verdict>mismatch</verdict>"
-                "<reason>the question asked for column a, the code used b</reason>",
+                (
+                    "<restatement>the code summed column b</restatement>"
+                    "<verdict>mismatch</verdict>"
+                    "<reason>the question asked for column a, not b</reason>"
+                ),
             ]
         ),
     )
@@ -343,8 +345,10 @@ def test_intent_gate_stays_quiet_when_the_answer_matches_the_question(
             [
                 "<execute>result = df['a'].sum()\nassert result > 0</execute>",
                 "<answer>the total is 42</answer>",
-                "<restatement>the code summed column a</restatement>"
-                "<verdict>match</verdict><reason>same quantity</reason>",
+                (
+                    "<restatement>the code summed column a</restatement>"
+                    "<verdict>match</verdict><reason>same quantity</reason>"
+                ),
             ]
         ),
     )

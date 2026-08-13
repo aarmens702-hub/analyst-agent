@@ -148,7 +148,7 @@ def test_the_frozen_case_holds_sick_rows_and_healthy_ones(seeded, monkeypatch):
 
     assert list((seeded.session_dir / "skill_cases").glob("*.parquet"))
     report = json.loads(
-        sorted((seeded.session_dir / "clean_reports").glob("*.json"))[-1].read_text()
+        max((seeded.session_dir / "clean_reports").glob("*.json")).read_text()
     )
     case = next(r["case"] for r in report["fixes"] if r["status"] == "fixed")
     assert case["sick"] == 12, "the rows the fix actually changed"
