@@ -31,6 +31,7 @@ from analyst_agent.transcript import Transcript
 
 MAX_ITERS = 6
 CLEAN_MAX_ATTEMPTS = 3
+HEARTBEAT_EVERY = 20  # reasoning chunks per progress tick
 SKILL_MAX_ATTEMPTS = 2  # one proposal, one revision (R6)
 EXEC_TIMEOUT_S = 120
 OBS_CLIP = 2000
@@ -1128,7 +1129,13 @@ class Session:
         """
         parts: list[str] = []
         context = [*msgs, {"role": "user", "content": self._registry_block()}]
+        beats = 0
         for chunk in llm.generate(context):
+            if not chunk:  # a heartbeat from the reasoning phase, not content
+                beats += 1
+                if stream and beats % HEARTBEAT_EVERY == 0:
+                    yield StreamText("model", "·")
+                continue
             parts.append(chunk)
             if stream:
                 yield StreamText("model", chunk)

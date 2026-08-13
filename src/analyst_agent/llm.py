@@ -52,6 +52,12 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
     for chunk in stream:
         if not chunk.choices:
             continue
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield delta
+        delta = chunk.choices[0].delta
+        if getattr(delta, "content", None):
+            yield delta.content
+        elif getattr(delta, "reasoning_content", None):
+            # A reasoning model can think for minutes before its first content
+            # token. Dropping those chunks silently — which we must, so thinking
+            # never reaches the tag parser — makes a working turn look hung.
+            # An empty chunk says "still alive" and carries nothing.
+            yield ""

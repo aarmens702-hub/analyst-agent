@@ -8,7 +8,13 @@ from typing import ClassVar
 import pytest
 
 from analyst_agent import llm
-from analyst_agent.events import CardReady, GateDecision, GateRequest, Notice
+from analyst_agent.events import (
+    CardReady,
+    GateDecision,
+    GateRequest,
+    Notice,
+    StreamText,
+)
 from analyst_agent.kernel.client import ExecResult, HelloInfo, StreamOut
 from analyst_agent.loop import Session, parse_tags
 
@@ -345,3 +351,23 @@ def test_intent_gate_stays_quiet_when_the_answer_matches_the_question(
 
     assert card.flags["intent_mismatch"] is False
     assert card.intent["verdict"] == "match"
+
+
+def test_a_long_reasoning_phase_shows_progress_instead_of_silence(session, monkeypatch):
+    """A reasoning model streams its thinking in a field we deliberately drop,
+    so a slow turn renders as nothing at all — indistinguishable from a hang.
+    Heartbeats keep it visible without letting thinking reach the parser."""
+
+    def generate(messages, model=None):
+        yield from [""] * 40  # reasoning chunks: no content
+        yield "<answer>42</answer>"
+
+    monkeypatch.setattr(llm, "generate", generate)
+    events = drive(session.run_turn("what is six times seven?"))
+
+    card = card_from(events)
+    assert card.answer == "42", "heartbeats must not reach the tag parser"
+    ticks = [
+        e for e in events if isinstance(e, StreamText) and e.text.strip() in {"·", "."}
+    ]
+    assert ticks, "a long think must show something"
