@@ -35,6 +35,11 @@ dev = [
 
 [tool.pytest.ini_options]
 tdd_guard_project_root = "/Users/aarmensidhu/Desktop/analyst-agent"
+# Container tests build an image and run it. That is real memory on whatever
+# machine `pytest` happens to be typed on, so it must be asked for, never
+# inherited: `uv run pytest -m docker` opts in.
+addopts = "-m 'not docker'"
+markers = ["docker: builds and runs the sandbox container; opt in explicitly"]
 
 [tool.ruff]
 target-version = "py312"
