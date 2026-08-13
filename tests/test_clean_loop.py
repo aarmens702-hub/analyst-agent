@@ -7,7 +7,7 @@ from typing import ClassVar
 
 import pytest
 
-from analyst_agent import llm
+from analyst_agent import library, llm, skills
 from analyst_agent.events import GateDecision, GateRequest, Notice
 from analyst_agent.kernel.client import ExecResult, HelloInfo, StreamOut
 from analyst_agent.loop import Session
@@ -86,6 +86,12 @@ def saved():
     return [ok(value="'saved 4 rows x 2 cols'")]
 
 
+def case():
+    """The P2 cell that freezes the case a verified fix came from."""
+    payload = json.dumps({"rows": 4, "sick": 2, "healthy": ["2", "3"]})
+    return [ok(value=repr(payload))]
+
+
 def gen(responses):
     queue = list(responses)
 
@@ -136,6 +142,7 @@ def test_fixed_path_end_to_end(session, monkeypatch):
         baseline(),
         [ok()],  # fix cell
         [ok()],  # verify cell
+        case(),  # freeze the case for skill admission
         baseline(),  # refresh after fixed
         saved(),  # parquet write
     ]
@@ -170,6 +177,7 @@ def test_reject_note_then_fixed(session, monkeypatch):
         baseline(),
         [ok()],  # FIX_B cell
         [ok()],  # verify
+        case(),
         baseline(),
         saved(),
     ]
@@ -193,6 +201,7 @@ def test_verify_failure_reverts_and_retries(session, monkeypatch):
         [ok(value="'reverted'")],  # revert
         [ok()],  # fix B
         [ok()],  # verify passes
+        case(),
         baseline(),
         saved(),
     ]
@@ -235,3 +244,126 @@ def test_unknown_variable_notices(session, monkeypatch):
     events = drive(session.clean("nope"))
     notices = [e for e in events if isinstance(e, Notice) and e.kind == "error"]
     assert notices and "unknown variable" in notices[0].text
+
+
+# --- P2: the library in the CLEAN flow ---------------------------------------
+
+
+@pytest.fixture
+def stocked(session, tmp_path):
+    """A session whose library holds one skill for disease 4, on disk."""
+    root = tmp_path / "skills"
+    skills.save(
+        skills.Skill(
+            name="fix-sentinel-missing",
+            description="Replace sentinel tokens with NaN when a column holds 'N/A'.",
+            fix_source="def fix(df, columns):\n    return df.copy()\n",
+            test_source="def test_fix():\n    assert True\n",
+            metadata={"disease": "4"},
+        ),
+        root,
+    )
+    session.skills_dir = root
+    session.library = library.Library(root=root)
+    return session
+
+
+def counting_generate(responses):
+    """A stub that records how many times the model was actually consulted."""
+    calls = []
+
+    def generate(messages, model=None):
+        calls.append(messages)
+        yield responses.pop(0) if responses else "<execute>pass</execute>"
+
+    generate.calls = calls
+    return generate
+
+
+def test_proven_skill_on_an_auto_finding_costs_no_model_call(stocked, monkeypatch):
+    """AC2 + AC4: the compounding payoff. No gate, no generate()."""
+    gen_stub = counting_generate([])
+    monkeypatch.setattr(llm, "generate", gen_stub)
+    entry = stocked.library.register("fix-sentinel-missing", disease=4)
+    entry["state"] = "proven"
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # skill's fix applied
+        [ok()],  # P1 verification still runs
+        baseline(),
+        saved(),
+    ]
+    events = drive(stocked.clean("df"))
+
+    assert gen_stub.calls == [], "a proven skill must not consult the model"
+    assert not [e for e in events if isinstance(e, GateRequest)]
+    rep = report_of(stocked)
+    assert rep["fixes"][0]["origin"] == "skill:fix-sentinel-missing"
+    assert rep["fixes"][0]["status"] == "fixed"
+    assert stocked.library.entries["fix-sentinel-missing"]["successes"] == 1
+
+
+def test_a_skill_on_probation_still_stops_at_the_gate(stocked, monkeypatch):
+    """AC4: earning silence takes a track record; a new skill has none."""
+    monkeypatch.setattr(llm, "generate", counting_generate([]))
+    stocked.library.register("fix-sentinel-missing", disease=4)
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],
+        [ok()],
+        baseline(),
+        saved(),
+    ]
+    events = drive(stocked.clean("df"))
+
+    gates = [e for e in events if isinstance(e, GateRequest)]
+    assert len(gates) == 1
+    assert "probation" in gates[0].title
+
+
+def test_a_skill_that_fails_verification_hands_back_to_the_model(stocked, monkeypatch):
+    """AC5: one wasted cell, not a corrupted dataset."""
+    monkeypatch.setattr(llm, "generate", gen([FIX_A]))
+    stocked.library.register("fix-sentinel-missing", disease=4)
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # skill applies
+        [err("signal still fires")],  # ... but verification refuses it
+        [ok(value="'reverted'")],
+        [ok()],  # the model's fix
+        [ok()],  # verifies
+        case(),
+        baseline(),
+        saved(),
+    ]
+    drive(stocked.clean("df"), decisions=[GateDecision("run"), GateDecision("run")])
+
+    entry = stocked.library.entries["fix-sentinel-missing"]
+    assert entry["failures"] == 1
+    assert any("_clean_backup" in c for c in FakeClient.executed), "must revert"
+    rep = report_of(stocked)
+    assert rep["fixes"][0]["status"] == "fixed"
+    assert rep["fixes"][0]["origin"] == "model", "the model rescued the finding"
+
+
+def test_a_skill_applied_fix_never_spawns_another_skill(stocked, monkeypatch):
+    """AC7: the depth-1 recursion cap. Skills do not breed skills."""
+    gen_stub = counting_generate([])
+    monkeypatch.setattr(llm, "generate", gen_stub)
+    entry = stocked.library.register("fix-sentinel-missing", disease=4)
+    entry["state"] = "proven"
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],
+        [ok()],
+        baseline(),
+        saved(),
+    ]
+    drive(stocked.clean("df"))
+
+    assert gen_stub.calls == [], "no proposal pass may run for a skill-applied fix"
+    assert report_of(stocked)["skills_admitted"] == []

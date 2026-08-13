@@ -381,3 +381,67 @@ def test_main_without_api_key_exits_1(tmp_path) -> None:
     from analyst_agent import main
 
     assert callable(main)
+
+
+# --- P2: the library view (R16) ----------------------------------------------
+
+
+class _Lib:
+    def __init__(self, entries):
+        self.entries = entries
+
+
+def _stocked_session(tmp_path):
+    session = FakeSession()
+    session.library = _Lib(
+        {
+            "fix-sentinel-missing": {
+                "name": "fix-sentinel-missing",
+                "disease": 4,
+                "state": "proven",
+                "uses": 4,
+                "successes": 4,
+                "failures": 0,
+            }
+        }
+    )
+    session.skills_dir = tmp_path
+    return session
+
+
+def test_skills_lists_what_each_skill_has_earned(tmp_path) -> None:
+    session = _stocked_session(tmp_path)
+    printed: list = []
+    run_repl(
+        session, input_fn=scripted_input(*["/skills", "/quit"]), print_fn=printed.append
+    )
+    body = "\n".join(str(p) for p in printed)
+    assert "fix-sentinel-missing" in body
+    assert "proven" in body
+    assert "4✓/0✗" in body
+
+
+def test_skills_on_an_empty_library_says_so() -> None:
+    session = FakeSession()
+    session.library = _Lib({})
+    printed: list = []
+    run_repl(
+        session, input_fn=scripted_input(*["/skills", "/quit"]), print_fn=printed.append
+    )
+    assert any("empty" in str(p) for p in printed)
+
+
+def test_skills_show_prints_the_card_and_the_ledger_row(tmp_path) -> None:
+    session = _stocked_session(tmp_path)
+    folder = tmp_path / "fix-sentinel-missing"
+    folder.mkdir()
+    (folder / "SKILL.md").write_text("---\nname: fix-sentinel-missing\n---\n")
+    printed: list = []
+    run_repl(
+        session,
+        input_fn=scripted_input(*["/skills show fix-sentinel-missing", "/quit"]),
+        print_fn=printed.append,
+    )
+    body = "\n".join(str(p) for p in printed)
+    assert "name: fix-sentinel-missing" in body
+    assert '"successes": 4' in body

@@ -104,3 +104,51 @@ single <answer>...</answer> tag and nothing else. Summarize what you established
 from the cells that ran; if the question could not be fully answered, state
 plainly what is missing and why.
 """
+
+
+SKILL_PROMPT = """\
+You are packaging a fix that already worked into a reusable skill.
+
+You will be given the finding it was born from, the exact fix code that ran and
+passed verification on that dataset, and the dataset profile. Your job is to
+generalise it: the same fix, written so it works on ANY dataset with this
+disease, in whatever columns are passed to it.
+
+Respond with EXACTLY these four tagged blocks, in this order, and nothing else:
+
+<name>fix-some-slug</name>
+<description>One or two sentences: what it fixes AND when to use it. This is
+all a future agent sees when deciding whether to reach for this skill.</description>
+<fix>
+def fix(df, columns):
+    out = df.copy()
+    ...
+    return out
+</fix>
+<test>
+import pandas as pd
+
+def test_fix_clears_the_disease():
+    dirty = pd.DataFrame({"col": [...]})   # a small frame exhibiting the disease
+    out = fix(dirty, ["col"])
+    assert ...
+</test>
+
+Rules:
+- `fix(df, columns)` takes the target column names as its second argument. Do
+  not hardcode the column names from the case you were given; that is the whole
+  point of this step.
+- Pure: copy the frame, never mutate the argument, return the result. Handle a
+  column that is absent or already clean by leaving it alone rather than
+  raising — a skill runs unattended on data nobody has looked at.
+- Deterministic. No sampling, no network, no new dependencies: pandas and the
+  standard library only.
+- The name must be lowercase [a-z0-9-], start with `fix-`, and describe the
+  disease, not the dataset. `fix-sentinel-missing`, never `fix-beers-ibu`.
+- The test must build its own small synthetic frame — never load a file, and
+  never embed real data. It ships with the skill and runs forever. Assume
+  `fix` is already defined; do not import it.
+- Your fix will be re-run against the frozen original case. If it does not
+  clear the detector there, or if it changes rows that were never broken, it
+  is refused.
+"""

@@ -19,6 +19,7 @@ class CleanReport:
     indicators: list = field(default_factory=list)  # findings flagged, not fixed
     clear: list = field(default_factory=list)  # disease ids that ran clean
     outputs: dict = field(default_factory=dict)  # {parquet, lineage} paths
+    skills_admitted: list = field(default_factory=list)  # skills born here (P2)
     stats: dict = field(default_factory=dict)  # before/after shape + nulls
     event_chain: list = field(default_factory=list)
     created: str = ""
@@ -57,6 +58,12 @@ class CleanReport:
             lines += [
                 f"- ⚠ d{f['disease']:02d} {f['slug']}: {f['evidence']}"
                 for f in self.indicators
+            ]
+        if self.skills_admitted:
+            lines += [
+                "",
+                "**skills admitted**",
+                *[f"- 🌱 {name} (on probation)" for name in self.skills_admitted],
             ]
         if self.outputs:
             lines += [

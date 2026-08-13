@@ -5,6 +5,8 @@ by the hand-written session generators (run_turn for questions, clean for
 /clean) and feeds gate decisions back in.
 """
 
+import json
+
 from analyst_agent.events import (
     ArtifactSaved,
     CardReady,
@@ -14,7 +16,10 @@ from analyst_agent.events import (
     StreamText,
 )
 
-BANNER = "analyst-agent — /load <path> [name] · /clean <var> · ask a question · /quit"
+BANNER = (
+    "analyst-agent — /load <path> [name] · /clean <var> · /skills · "
+    "ask a question · /quit"
+)
 PROMPT = "❯ "
 GATE_PROMPT = "[r]un / [j]eject / [s]kip: "
 
@@ -34,6 +39,9 @@ def run_repl(session, auto_run: bool = False, input_fn=input, print_fn=print) ->
                 continue
             if line.split()[:1] == ["/clean"]:
                 _clean(session, line, auto_run, input_fn, print_fn)
+                continue
+            if line.split()[:1] == ["/skills"]:
+                _skills(session, line, print_fn)
                 continue
             _drive(session.run_turn(line), auto_run, input_fn, print_fn)
     except (EOFError, KeyboardInterrupt):
@@ -100,3 +108,29 @@ def _clean(session, line: str, auto_run: bool, input_fn, print_fn) -> None:
         print_fn("usage: /clean <variable>")
         return
     _drive(session.clean(parts[1]), auto_run, input_fn, print_fn)
+
+
+def _skills(session, line: str, print_fn) -> None:
+    """Show the library: what it holds, what each skill has earned (R16)."""
+    parts = line.split()
+    entries = getattr(session, "library", None)
+    entries = dict(entries.entries) if entries else {}
+    if len(parts) > 2 and parts[1] == "show":
+        entry = entries.get(parts[2])
+        if not entry:
+            print_fn(f"no skill named {parts[2]!r}")
+            return
+        path = session.skills_dir / parts[2] / "SKILL.md"
+        if path.exists():
+            print_fn(path.read_text(encoding="utf-8"))
+        print_fn(json.dumps(entry, indent=2))
+        return
+    if not entries:
+        print_fn("the library is empty — skills are born from verified fixes")
+        return
+    print_fn(f"{'skill':<32}{'disease':>8}  {'state':<10}{'record':<10}uses")
+    for name, e in sorted(entries.items(), key=lambda kv: kv[0]):
+        record = f"{e['successes']}✓/{e['failures']}✗"
+        print_fn(
+            f"{name:<32}{e['disease']:>8}  {e['state']:<10}{record:<10}{e['uses']}"
+        )

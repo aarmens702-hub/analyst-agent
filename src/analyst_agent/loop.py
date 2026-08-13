@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from analyst_agent import llm, prompts, verify
+from analyst_agent import llm, prompts, skills, verify
 from analyst_agent.card import AnswerCard, lift_checks
 from analyst_agent.events import (
     ArtifactSaved,
@@ -25,11 +25,13 @@ from analyst_agent.events import (
     StreamText,
 )
 from analyst_agent.kernel.client import DisplayItem, KernelClient, StreamOut
+from analyst_agent.library import Library, unattended
 from analyst_agent.report import CleanReport
 from analyst_agent.transcript import Transcript
 
 MAX_ITERS = 6
 CLEAN_MAX_ATTEMPTS = 3
+SKILL_MAX_ATTEMPTS = 2  # one proposal, one revision (R6)
 EXEC_TIMEOUT_S = 120
 OBS_CLIP = 2000
 VALUE_PREVIEW = 300
@@ -75,6 +77,7 @@ class Session:
         data_dir: str = "data",
         docker: bool = False,
         transport_argv: list | None = None,
+        skills_dir: str = "skills",
     ) -> None:
         self.workspace_root = Path(workspace)
         self.workspace_root.mkdir(parents=True, exist_ok=True)
@@ -83,6 +86,8 @@ class Session:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir = Path(data_dir)
         self.docker = docker
+        self.skills_dir = Path(skills_dir)
+        self.library = Library.load(self.skills_dir)
 
         if transport_argv is None and not docker:
             transport_argv = [sys.executable, "-m", "analyst_agent.kernel.supervisor"]
@@ -354,13 +359,20 @@ class Session:
         records: list[dict] = []
         evs_chain = [start_ev, diag_ev]
         for i, finding in enumerate(fixable, 1):
-            rec = yield from self._fix_mini_turn(
+            # the library first: a proven skill costs no model call at all
+            rec = yield from self._skill_attempt(
                 var, finding, i, len(fixable), baseline_cols
             )
+            if rec is None:
+                rec = yield from self._fix_mini_turn(
+                    var, finding, i, len(fixable), baseline_cols
+                )
             records.append(rec)
             evs_chain.extend(rec["transcript_evs"])
             if rec["status"] == "fixed":
                 baseline_cols = yield from self._snapshot_baseline(var)
+
+        admitted = yield from self._skill_pass(var, records)
 
         outputs: dict = {}
         stats: dict = {}
@@ -387,6 +399,7 @@ class Session:
             clear=clear,
             outputs=outputs,
             stats=stats,
+            skills_admitted=admitted,
             event_chain=[*evs_chain, rep_ev],
             created=datetime.now().astimezone().isoformat(timespec="seconds"),
         )
@@ -422,6 +435,7 @@ class Session:
         evs: list[int] = []
         attempts, nudged = 0, False
         status, fix_source, verify_info = "failed", None, {}
+        case: dict = {}
 
         while attempts < CLEAN_MAX_ATTEMPTS:
             try:
@@ -489,6 +503,11 @@ class Session:
             if vres.status == "ok":
                 status = "fixed"
                 verify_info = {"layer1": "pass"}
+                # freeze the case now: the next verified fix moves the baseline
+                # forward and the pre-fix frame is gone (P2 R7)
+                case, case_ev = yield from self._freeze_case(var, finding)
+                if case_ev:
+                    evs.append(case_ev)
                 break
             _, _, _, rev_ev = yield from self._exec_events(
                 verify.revert_cell(var), quiet=True
@@ -515,7 +534,276 @@ class Session:
             "verify": verify_info,
             "transcript_evs": evs,
             "elapsed_s": round(time.monotonic() - t0, 1),
+            "origin": "model",
+            "case": case,
         }
+
+    # -- P2: the library ------------------------------------------------------
+
+    def _source_sha(self, var: str) -> str:
+        """Which file this variable came from. Promotion counts distinct
+        sources, so this is what makes a track record mean anything (R14)."""
+        for ds in self.datasets:
+            if ds["variable"] == var:
+                return ds.get("sha256", "")
+        return ""
+
+    def _freeze_case(self, var: str, finding: dict):
+        """Save the pre-fix rows this fix was born from, for admission (R7)."""
+        slug = finding.get("slug", f"d{finding['disease']}")
+        rel = f"skill_cases/{slug}-{finding['disease']}.parquet"
+        (self.session_dir / "skill_cases").mkdir(parents=True, exist_ok=True)
+        kernel_path = (
+            f"/workspace/{rel}" if self.docker else str(self.session_dir / rel)
+        )
+        result, _, _, ev_id = yield from self._exec_events(
+            verify.case_cell(var, finding, kernel_path), quiet=True
+        )
+        if result.status != "ok":
+            return {}, ev_id
+        try:
+            info = json.loads(ast.literal_eval(result.value))
+        except (ValueError, SyntaxError, TypeError, json.JSONDecodeError):
+            return {}, ev_id
+        if not isinstance(info, dict):
+            return {}, ev_id
+        info["path"] = kernel_path
+        return info, ev_id
+
+    def _skill_attempt(
+        self, var: str, finding: dict, i: int, n: int, baseline_cols: list[str]
+    ):
+        """Try the library before paying a model call (R11/R12).
+
+        Returns a fix record when the skill worked, or None to hand the finding
+        to the model — including when a skill was tried and failed, since a
+        failure must not cost the run its fix.
+        """
+        candidates = self.library.candidates(finding["disease"])
+        if not candidates:
+            return None
+        entry = candidates[0]
+        try:
+            skill = skills.load(self.skills_dir / entry["name"])
+        except (OSError, ValueError) as exc:
+            yield Notice("skill", f"{entry['name']} is unreadable ({exc}) — skipping")
+            return None
+
+        t0 = time.monotonic()
+        evs: list[int] = []
+        sha = self._source_sha(var)
+        code = verify.skill_apply_cell(var, skill.fix_source, finding["columns"])
+        silent = unattended(entry, finding["grade"])
+        title = (
+            f"skill {i}/{n} · {entry['name']} · {entry['state']} · "
+            f"{finding['grade']} · {finding['evidence'][:60]}"
+        )
+
+        if not silent:
+            decision = yield GateRequest(code, 1, title=title)
+            if not isinstance(decision, GateDecision):
+                decision = GateDecision("run")
+            evs.append(
+                self.transcript.append(
+                    "gate", action=decision.action, note=decision.note
+                )
+            )
+            if decision.action == "skip":
+                return {
+                    "finding": finding,
+                    "status": "skipped",
+                    "attempts": 0,
+                    "fix_source": skill.fix_source,
+                    "verify": {},
+                    "transcript_evs": evs,
+                    "elapsed_s": round(time.monotonic() - t0, 1),
+                    "origin": f"skill:{entry['name']}",
+                    "case": {},
+                }
+            if decision.action == "reject":
+                self.library.record(
+                    entry["name"], success=False, dataset=sha, events=evs
+                )
+                return None
+
+        result, _, _, ev_id = yield from self._exec_events(code, quiet=True)
+        evs.append(ev_id)
+        if result.status == "ok":
+            self._stamp_registry(result.registry, ev_id)
+            vres, _, _, v_ev = yield from self._exec_events(
+                verify.verify_cell(var, finding, baseline_cols), quiet=True
+            )
+            evs.append(v_ev)
+            if vres.status == "ok":
+                self.library.record(
+                    entry["name"], success=True, dataset=sha, events=evs
+                )
+                self.library.save()
+                yield Notice(
+                    "skill",
+                    f"{entry['name']} fixed {finding['slug']} with no model call"
+                    + (" (unattended)" if silent else ""),
+                )
+                return {
+                    "finding": finding,
+                    "status": "fixed",
+                    "attempts": 0,
+                    "fix_source": skill.fix_source,
+                    "verify": {"layer1": "pass", "by": entry["name"]},
+                    "transcript_evs": evs,
+                    "elapsed_s": round(time.monotonic() - t0, 1),
+                    "origin": f"skill:{entry['name']}",
+                    "case": {},
+                }
+
+        _, _, _, rev_ev = yield from self._exec_events(
+            verify.revert_cell(var), quiet=True
+        )
+        evs.append(rev_ev)
+        self.library.record(entry["name"], success=False, dataset=sha, events=evs)
+        self.library.save()
+        state = self.library.entries[entry["name"]]["state"]
+        yield Notice(
+            "skill",
+            f"{entry['name']} failed verification — reverted, handing to the model"
+            + (" (and retired)" if state == "retired" else ""),
+        )
+        return None
+
+    def _skill_pass(self, var: str, records: list[dict]):
+        """After the run, offer each model-authored verified fix as a skill.
+
+        Only `origin == "model"` records qualify: a fix a skill produced never
+        spawns another skill. That is the depth-1 recursion cap, and keeping it
+        here in the flow means no prompt can talk its way past it (R5).
+        """
+        candidates = [
+            r
+            for r in records
+            if r["status"] == "fixed"
+            and r.get("origin") == "model"
+            and r.get("case", {}).get("path")
+        ]
+        admitted: list[str] = []
+        for rec in candidates:
+            name = yield from self._propose_skill(var, rec)
+            if name:
+                admitted.append(name)
+        if admitted:
+            self.library.save()
+        return admitted
+
+    def _propose_skill(self, var: str, rec: dict):
+        """One candidate through generalise -> execute -> execute -> human."""
+        finding = rec["finding"]
+        source = next((d["path"] for d in self.datasets if d["variable"] == var), var)
+        msgs = [
+            {"role": "system", "content": prompts.SKILL_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Finding:\n{json.dumps(finding, indent=2)}\n\n"
+                    f"The fix that ran and passed verification:\n{rec['fix_source']}"
+                ),
+            },
+        ]
+        for _ in range(SKILL_MAX_ATTEMPTS):
+            try:
+                resp = yield from self._generate_scoped(msgs)
+            except Exception as exc:  # noqa: BLE001 — a skill is optional; the fix stands
+                yield Notice("llm_error", f"{type(exc).__name__}: {exc}")
+                return None
+            self.transcript.append("model", text=resp, kind_note="skill_proposal")
+            msgs.append({"role": "assistant", "content": resp})
+
+            proposal = skills.parse_proposal(resp)
+            if proposal is None:
+                msgs.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "<observation>reply must be exactly the four tagged "
+                            "blocks: name, description, fix, test</observation>"
+                        ),
+                    }
+                )
+                continue
+
+            skill = skills.from_proposal(proposal, finding, source=str(source))
+            problems = skills.validate(skill, skill.name)
+            if problems:
+                yield Notice("skill", f"{skill.name}: {problems[0]}")
+                msgs.append(
+                    {
+                        "role": "user",
+                        "content": "<observation>"
+                        + "; ".join(problems)
+                        + "</observation>",
+                    }
+                )
+                continue
+
+            failure = yield from self._admit(skill, finding, rec["case"])
+            if failure:
+                yield Notice("skill", f"{skill.name} refused: {failure}")
+                msgs.append(
+                    {"role": "user", "content": f"<observation>{failure}</observation>"}
+                )
+                continue
+
+            preview = f"# {skill.name}\n# {skill.description}\n\n{skill.fix_source}"
+            decision = yield GateRequest(
+                preview,
+                1,
+                title=(
+                    f"admit skill {skill.name} · d{finding['disease']} · "
+                    f"reproduces the case it came from"
+                ),
+            )
+            if not isinstance(decision, GateDecision):
+                decision = GateDecision("run")
+            self.transcript.append(
+                "gate",
+                action=decision.action,
+                note=decision.note,
+                kind_note="admission",
+            )
+            if decision.action == "run":
+                skills.save(skill, self.skills_dir)
+                self.library.register(skill.name, finding["disease"])
+                yield Notice("skill", f"admitted {skill.name} (on probation)")
+                return skill.name
+            if decision.action == "skip":
+                return None
+            msgs.append(
+                {
+                    "role": "user",
+                    "content": f"<observation>rejected: {decision.note}</observation>",
+                }
+            )
+        return None
+
+    def _admit(self, skill, finding: dict, case: dict) -> str:
+        """Both execution gates. Returns "" when admitted, else why not (R7/R8).
+
+        Runs in the kernel, not the host: this is model-authored code meeting
+        real data, and the sandbox is where that belongs.
+        """
+        adm, _, _, _ev = yield from self._exec_events(
+            verify.admission_cell(
+                case["path"], skill.fix_source, finding, case.get("healthy", [])
+            ),
+            quiet=True,
+        )
+        if adm.status != "ok":
+            return (adm.error or {}).get("evalue", adm.status)
+
+        test, _, _, _tev = yield from self._exec_events(
+            verify.skill_test_cell(skill.fix_source, skill.test_source), quiet=True
+        )
+        if test.status != "ok":
+            return "its own test fails: " + (test.error or {}).get("evalue", "")
+        return ""
 
     def _diagnosis_text(
         self, var: str, fixable: list, indicators: list, clear: list

@@ -206,3 +206,51 @@ def load(path) -> Skill:
     if problems:
         raise ValueError(f"{path.name} is not a valid skill: " + "; ".join(problems))
     return skill
+
+
+PROPOSAL_TAGS = ("name", "description", "fix", "test")
+
+
+def parse_proposal(text: str) -> dict | None:
+    """Pull a skill proposal out of a model reply (R6).
+
+    Returns None when any block is missing, which the caller treats as a
+    malformed reply worth one revision — the same discipline the QUERY loop
+    applies to a missing <execute> tag.
+    """
+    found = {}
+    for tag in PROPOSAL_TAGS:
+        match = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
+        if not match:
+            return None
+        found[tag] = match.group(1).strip()
+    if not found["name"] or not found["fix"]:
+        return None
+    return found
+
+
+def from_proposal(proposal: dict, finding: dict, source: str = "") -> Skill:
+    """Build a Skill from a parsed proposal, stamping where it came from.
+
+    Provenance goes in `metadata` as strings because the spec allows nothing
+    else there — and a skill that cannot say which disease and which case it
+    was born from cannot be audited later.
+    """
+    return Skill(
+        name=proposal["name"],
+        description=proposal["description"],
+        fix_source=proposal["fix"] + "\n",
+        test_source=proposal["test"] + "\n",
+        metadata={
+            "disease": str(finding["disease"]),
+            "slug": str(finding.get("slug", "")),
+            "born_from": source,
+            "version": "1",
+        },
+        body=(
+            f"## What this fixes\n\n{proposal['description']}\n\n"
+            f"## Where it came from\n\n"
+            f"Disease {finding['disease']} ({finding.get('slug', '')}) on "
+            f"`{source or 'an earlier dataset'}`: {finding.get('evidence', '')}\n"
+        ),
+    )
