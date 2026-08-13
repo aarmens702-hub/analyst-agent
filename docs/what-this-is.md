@@ -148,6 +148,20 @@ so the generalisation generalised rather than memorising its case. It stayed on
 probation — one application on one source, where promotion needs three
 successes across two.
 
+### Family mode, observed
+
+Two 300-row slices of the real Vancouver exports, drift intact (2007 has 29
+columns, 2020 has 30). One gated turn, and the host verification accepted it:
+identical column lists afterwards, no rows moved, no populated cell lost.
+
+Read the mapping the model actually wrote, though, before believing too much of
+it. `HARMONIZE_MAP` came back **empty** for both slices — it unioned the columns
+and filled the absent one with NA. For this pair that is the correct answer,
+because 2007 does not rename anything, it simply lacks `note`. So the run
+proves the harmonize turn and its verification work end to end; it does not yet
+prove the model can find a genuine rename across eras, which is the harder half
+of the claim.
+
 ## What it does not do
 
 - It does not fix everything. Two of the twenty-two diseases — cross-field
