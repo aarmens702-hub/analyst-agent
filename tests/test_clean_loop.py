@@ -477,3 +477,30 @@ def test_a_mapping_that_loses_data_is_reverted(session, monkeypatch):
     assert any("harmonize rejected" in n for n in notices)
     assert any("_family_backup" in c for c in FakeClient.executed), "must revert"
     assert any("harmonized 2 slices" in n for n in notices), "and then succeed"
+
+
+def test_a_family_run_summarises_across_its_slices(session, monkeypatch):
+    """R8: per-slice reports answer "what happened to 2007". The family summary
+    answers "did the library earn its keep across all of them"."""
+    monkeypatch.setattr(llm, "generate", gen([HARMONIZE]))
+    FakeClient.script = [
+        family_meta(),
+        drift_finding(),
+        [ok()],
+        [ok()],
+        [ok()],
+        [ok()],
+        diag([]),
+        baseline(),
+        [ok()],
+        diag([]),
+        baseline(),
+    ]
+    events = drive(session.clean_family("data/vancouver/*.csv", "tax"))
+
+    summary = json.loads((session.session_dir / "family_tax.json").read_text())
+    assert summary["slices"] == ["tax-2007", "tax-2020"]
+    assert summary["harmonized"] is True
+    assert summary["rows"] == 200
+    text = "".join(e.text for e in events if isinstance(e, StreamText))
+    assert "family tax" in text

@@ -466,6 +466,7 @@ class Session:
             except (ValueError, IndexError):
                 drift = []
 
+        harmonized = False
         if drift:
             harmonized = yield from self._harmonize(name, meta, drift)
             if not harmonized:
@@ -473,8 +474,10 @@ class Session:
                     "family", "harmonizing failed — cleaning slices as they are"
                 )
         else:
+            harmonized = True  # nothing to reconcile is a kind of harmonized
             yield Notice("family", "slices already share one schema")
 
+        hits: dict = {}
         for entry in meta:
             var = re.sub(r"\W+", "_", f"{name}_{entry['slice']}").strip("_")
             res, _, _, ev_id = yield from self._exec_events(
@@ -484,7 +487,34 @@ class Session:
                 continue
             self._stamp_registry(res.registry, ev_id)
             yield StreamText("stdout", f"\n── slice {entry['slice']} ──\n")
+            before = dict(self._skill_uses())
             yield from self.clean(var)
+            for skill_name, count in self._skill_uses().items():
+                gained = count - before.get(skill_name, 0)
+                if gained:
+                    hits[skill_name] = hits.get(skill_name, 0) + gained
+
+        summary = {
+            "family": name,
+            "pattern": pattern,
+            "slices": [m["slice"] for m in meta],
+            "rows": sum(m["rows"] for m in meta),
+            "harmonized": harmonized,
+            "drift_findings": len(drift),
+            # the number the whole phase exists to produce: one skill, many files
+            "skill_hits": hits,
+        }
+        path = self.session_dir / f"family_{name}.json"
+        path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        replayed = sum(hits.values())
+        yield StreamText(
+            "stdout",
+            f"\nfamily {name}: {len(meta)} slices, {summary['rows']:,} rows · "
+            f"{replayed} fix(es) served by {len(hits)} skill(s) · {path}\n",
+        )
+
+    def _skill_uses(self) -> dict:
+        return {n: e["uses"] for n, e in self.library.entries.items()}
 
     def _harmonize(self, name: str, meta: list, drift: list):
         """One gated mapping for the whole family (P2.5 R4/R5)."""
