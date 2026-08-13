@@ -40,6 +40,12 @@ EXEC_TIMEOUT_S = 120
 OBS_CLIP = 2000
 VALUE_PREVIEW = 300
 
+
+class KernelLost(RuntimeError):
+    """The kernel died or hung. Every cell after this one is meaningless,
+    so callers must stop rather than read the failure as a bad result."""
+
+
 EXEC_RE = re.compile(r"<execute>(.*?)</execute>", re.DOTALL)
 ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 
@@ -342,6 +348,14 @@ class Session:
         if var not in self._registry_prev:
             yield Notice("error", f"unknown variable {var!r} — /load it first")
             return
+        try:
+            yield from self._clean(var)
+        except KernelLost as lost:
+            # Stop, and say what actually happened. Marching on would mark every
+            # remaining finding "failed" and blame the model for a dead kernel.
+            yield Notice("kernel_died", str(lost))
+
+    def _clean(self, var: str):
         start_ev = self.transcript.append("user", text=f"/clean {var}")
 
         code = (
@@ -365,19 +379,28 @@ class Session:
         baseline_cols = yield from self._snapshot_baseline(var)
         records: list[dict] = []
         evs_chain = [start_ev, diag_ev]
-        for i, finding in enumerate(fixable, 1):
-            # the library first: a proven skill costs no model call at all
-            rec = yield from self._skill_attempt(
-                var, finding, i, len(fixable), baseline_cols
-            )
-            if rec is None:
-                rec = yield from self._fix_mini_turn(
+        try:
+            for i, finding in enumerate(fixable, 1):
+                # the library first: a proven skill costs no model call at all
+                rec = yield from self._skill_attempt(
                     var, finding, i, len(fixable), baseline_cols
                 )
-            records.append(rec)
-            evs_chain.extend(rec["transcript_evs"])
-            if rec["status"] == "fixed":
-                baseline_cols = yield from self._snapshot_baseline(var)
+                if rec is None:
+                    rec = yield from self._fix_mini_turn(
+                        var, finding, i, len(fixable), baseline_cols
+                    )
+                records.append(rec)
+                evs_chain.extend(rec["transcript_evs"])
+                if rec["status"] == "fixed":
+                    baseline_cols = yield from self._snapshot_baseline(var)
+        except KernelLost as lost:
+            yield Notice("kernel_died", str(lost))
+            done = {id(r["finding"]) for r in records}
+            records += [self._aborted(f) for f in fixable if id(f) not in done]
+            yield from self._save_report(
+                var, records, indicators, clear, evs_chain, {}, {}, []
+            )
+            return
 
         admitted = yield from self._skill_pass(var, records)
 
@@ -387,6 +410,28 @@ class Session:
             outputs, stats, out_ev = yield from self._write_cleaned(var, records)
             evs_chain.append(out_ev)
 
+        yield from self._save_report(
+            var, records, indicators, clear, evs_chain, outputs, stats, admitted
+        )
+
+    def _aborted(self, finding: dict) -> dict:
+        """A finding we never got to. Distinct from `failed`, which means the
+        model tried and the verification refused it."""
+        return {
+            "finding": finding,
+            "status": "aborted",
+            "attempts": 0,
+            "fix_source": None,
+            "verify": {},
+            "transcript_evs": [],
+            "elapsed_s": 0.0,
+            "origin": "none",
+            "case": {},
+        }
+
+    def _save_report(
+        self, var, records, indicators, clear, evs_chain, outputs, stats, admitted
+    ):
         self.report_seq += 1
         report_id = f"{self.session_id}-r{self.report_seq:03d}"
         source = next(
@@ -1229,10 +1274,17 @@ class Session:
             yield StreamText("model", "\n")
         return "".join(parts)
 
-    def _exec_events(self, code: str, quiet: bool = False):
+    def _exec_events(self, code: str, quiet: bool = False, tolerate_death=False):
         """Execute a cell; yield render events unless quiet; log the exec.
 
         Returns (result, stream_text, display_paths, ev_id).
+
+        A dead kernel raises KernelLost by default, because every caller that
+        reads `status != "ok"` as "that did not work" would otherwise report an
+        infrastructure death as a failed fix — and then do it again for every
+        remaining finding. QUERY mode opts out via `tolerate_death`: there a
+        restart genuinely recovers, since the loads replay and nothing has been
+        mutated yet.
         """
         stream_parts: list[str] = []
         display_paths: list[str] = []
@@ -1262,10 +1314,17 @@ class Session:
             artifacts=display_paths,
             truncated=result.truncated,
         )
+        if not tolerate_death and result.status in ("kernel_died", "hung"):
+            raise KernelLost(
+                f"the kernel {result.status.replace('_', ' ')} — "
+                "stopping rather than reporting this as a failed fix"
+            )
         return result, "".join(stream_parts), display_paths, ev_id
 
     def _execute_cell(self, code: str):
-        result, stream_text, display_paths, ev_id = yield from self._exec_events(code)
+        result, stream_text, display_paths, ev_id = yield from self._exec_events(
+            code, tolerate_death=True
+        )
         delta = self._stamp_registry(result.registry, ev_id)
         self.history.append(
             {

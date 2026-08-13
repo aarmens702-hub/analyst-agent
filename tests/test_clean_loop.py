@@ -692,3 +692,37 @@ def test_a_saved_mapping_harmonizes_the_next_family_with_no_model_call(
     assert json.loads((session.session_dir / "family_tax.json").read_text())[
         "harmonized"
     ]
+
+
+def dead_kernel():
+    """Every subsequent cell reports the kernel gone."""
+    return [
+        ExecResult(
+            status="kernel_died",
+            error={"ename": "KernelDied", "evalue": "kernel died"},
+            exec_count=0,
+        )
+    ]
+
+
+def test_a_dead_kernel_is_reported_as_such_not_as_failed_fixes(session, monkeypatch):
+    """The substrate dying is not the model being wrong. Reported: a kernel
+    killed mid-clean marked every finding 'failed (3 attempts)' and never
+    mentioned the kernel, which blames the model for an infrastructure death."""
+    monkeypatch.setattr(llm, "generate", gen([FIX_A] * 12))
+    FakeClient.script = [
+        diag([finding(), finding(disease=6, slug="whitespace-damage")]),
+        baseline(),
+        *[dead_kernel()] * 20,
+    ]
+    events = drive(session.clean("df"))
+
+    notices = [e.text for e in events if isinstance(e, Notice)]
+    assert any("kernel" in n.lower() for n in notices), (
+        "the run must say the kernel died"
+    )
+    rep = report_of(session)
+    assert [f["status"] for f in rep["fixes"]] == ["aborted", "aborted"]
+    assert all(f["attempts"] == 0 for f in rep["fixes"]), (
+        "a dead kernel must not burn the attempt budget"
+    )

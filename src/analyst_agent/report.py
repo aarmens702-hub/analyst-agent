@@ -6,7 +6,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-STATUS_MARKS = {"fixed": "✓", "skipped": "→", "failed": "✗"}
+# aborted != failed: the model never got a turn, the substrate died
+STATUS_MARKS = {"fixed": "✓", "skipped": "→", "failed": "✗", "aborted": "⊘"}
 
 
 @dataclass
@@ -25,7 +26,7 @@ class CleanReport:
     created: str = ""
 
     def counts(self) -> dict:
-        out = {"fixed": 0, "skipped": 0, "failed": 0}
+        out = {"fixed": 0, "skipped": 0, "failed": 0, "aborted": 0}
         for rec in self.fixes:
             out[rec["status"]] = out.get(rec["status"], 0) + 1
         out["flagged"] = len(self.indicators)
@@ -35,7 +36,8 @@ class CleanReport:
         c = self.counts()
         counts_line = (
             f"**{c['fixed']} fixed · {c['skipped']} skipped · "
-            f"{c['failed']} failed · {c['flagged']} flagged** · "
+            f"{c['failed']} failed · {c['aborted']} not attempted · "
+            f"{c['flagged']} flagged** · "
             f"{len(self.clear)} signals clear"
         )
         lines = [

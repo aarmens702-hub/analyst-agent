@@ -79,6 +79,7 @@ def test_counts_tallies_statuses_and_flagged():
         "fixed": 2,
         "skipped": 1,
         "failed": 1,
+        "aborted": 0,
         "flagged": 1,
     }
 
@@ -86,7 +87,7 @@ def test_counts_tallies_statuses_and_flagged():
 def test_markdown_render_contains_the_contract():
     md = _report().to_markdown()
     assert "## clean report s01-r001 — `beers`" in md
-    assert "**2 fixed · 1 skipped · 1 failed · 1 flagged**" in md
+    assert "**2 fixed · 1 skipped · 1 failed · 0 not attempted · 1 flagged**" in md
     assert "4 signals clear" in md
     assert "- ✓ d04 sentinel-missing [ibu] · fixed (1 attempt) · ev 11, 12" in md
     assert "- → d07 case-variants [state] · skipped (1 attempt)" in md
@@ -124,8 +125,9 @@ def test_empty_report_renders_with_zero_counts():
         "fixed": 0,
         "skipped": 0,
         "failed": 0,
+        "aborted": 0,
         "flagged": 0,
     }
     md = report.to_markdown()
     assert "## clean report s01-r002 — `df`" in md
-    assert "**0 fixed · 0 skipped · 0 failed · 0 flagged**" in md
+    assert "**0 fixed · 0 skipped · 0 failed · 0 not attempted · 0 flagged**" in md
