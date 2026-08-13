@@ -3,6 +3,7 @@ a stubbed generate(), and a fake kernel client. No LLM, no kernel."""
 
 import hashlib
 import json
+import time
 from typing import ClassVar
 
 import pytest
@@ -371,3 +372,43 @@ def test_a_long_reasoning_phase_shows_progress_instead_of_silence(session, monke
         e for e in events if isinstance(e, StreamText) and e.text.strip() in {"·", "."}
     ]
     assert ticks, "a long think must show something"
+
+
+def test_a_call_that_never_finishes_thinking_is_abandoned(monkeypatch):
+    """A read timeout never fires while reasoning chunks keep arriving, so a
+    model can think indefinitely. A wall-clock budget ends the turn with an
+    error the loop can report, rather than a process that sits there."""
+    monkeypatch.setattr(llm, "MAX_CALL_S", 0.05)
+
+    class Endless:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            time.sleep(0.02)
+            chunk = type("C", (), {})()
+            delta = type("D", (), {"content": None, "reasoning_content": "..."})()
+            chunk.choices = [type("Ch", (), {"delta": delta})()]
+            return chunk
+
+    monkeypatch.setattr(
+        llm,
+        "_get_client",
+        lambda: type(
+            "Client",
+            (),
+            {
+                "chat": type(
+                    "Chat",
+                    (),
+                    {
+                        "completions": type(
+                            "Comp", (), {"create": staticmethod(lambda **kw: Endless())}
+                        )()
+                    },
+                )()
+            },
+        )(),
+    )
+    with pytest.raises(TimeoutError, match="thinking"):
+        list(llm.generate([{"role": "user", "content": "hi"}]))

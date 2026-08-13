@@ -7,6 +7,7 @@ thinking into the tag parser.
 """
 
 import os
+import time
 from collections.abc import Iterable, Iterator
 
 from openai import OpenAI
@@ -14,6 +15,9 @@ from openai import OpenAI
 DEFAULT_MODEL = "deepseek-v4-pro"
 BASE_URL = "https://api.deepseek.com"
 TEMPERATURE = 0.0
+# A read timeout cannot fire while reasoning chunks keep arriving, so a model
+# can think without bound. This is the ceiling on one call, start to finish.
+MAX_CALL_S = 420
 
 _client: OpenAI | None = None
 
@@ -49,7 +53,12 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
         stream=True,
         timeout=180,
     )
+    started = time.monotonic()
     for chunk in stream:
+        if time.monotonic() - started > MAX_CALL_S:
+            raise TimeoutError(
+                f"gave up after {MAX_CALL_S}s of thinking with no complete reply"
+            )
         if not chunk.choices:
             continue
         delta = chunk.choices[0].delta
