@@ -6,9 +6,12 @@ skills/ directory: skills/<name>/{SKILL.md,scripts/} plus skills/ledger.json,
 or skills/retired/<name>/ for the ones the library has already retired.
 """
 
+import importlib.util
 import json
 import sys
 from pathlib import Path
+
+import pandas as pd
 
 from analyst_agent import library, skills
 
@@ -331,3 +334,40 @@ def test_manifest_disease_is_always_an_int(tmp_path) -> None:
     manifest = json.loads((tmp_path / "dist" / "MANIFEST.json").read_text())
     diseases = [s["disease"] for s in manifest["skills"]]
     assert diseases and all(isinstance(d, int) for d in diseases), diseases
+
+
+def test_an_exported_skill_runs_in_a_consumer_that_never_heard_of_us(tmp_path):
+    """The README claims these are portable to any SKILL.md-speaking tool. A
+    consumer does not run our test harness or import our package — it imports
+    fix.py and calls it. Until this ran, 'portable' was a sentence, not a
+    checked claim."""
+    root = tmp_path / "skills"
+    skills.save(
+        make_skill(
+            fix_source=(
+                "import pandas as pd\n\n\n"
+                "def fix(df, columns):\n"
+                "    out = df.copy()\n"
+                "    for c in columns:\n"
+                "        if c in out.columns:\n"
+                "            out[c] = pd.to_numeric(out[c], errors='coerce')\n"
+                "    return out\n"
+            )
+        ),
+        root,
+    )
+    (root / library.LEDGER_NAME).write_text(
+        json.dumps({"fix-sentinel-missing": {"disease": 4, "state": "proven"}})
+    )
+    out = tmp_path / "bundle"
+    run_export(root, out)
+
+    spec = importlib.util.spec_from_file_location(
+        "exported_fix", out / "fix-sentinel-missing" / "scripts" / "fix.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    result = module.fix(pd.DataFrame({"ibu": ["N/A", "60", "unknown"]}), ["ibu"])
+    assert result["ibu"].isna().sum() == 2
+    assert result["ibu"].tolist()[1] == 60.0
