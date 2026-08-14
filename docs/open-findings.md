@@ -149,14 +149,33 @@ over all 7 kernel touch points.
 
 ### Recovery path — consolidated once, still incomplete
 
-- `_restart_and_replay` (`loop.py:1500`) never calls `_stamp_registry`, so after a recover the next `/clean df` says *"unknown variable 'df' — /load it first"* forever. **This got worse from the consolidation**: `_recover()` now runs on every death path instead of one, so the dead-registry state is reachable everywhere. Fix these two together, not in isolation.
+- ~~`_restart_and_replay` never calls `_stamp_registry`~~ **Fixed 2026-08-14**:
+  the replay now keeps each load's registry and stamps it with the variable's
+  original event, so provenance still points at the load the operator saw. The
+  test drives the *real* replay (the prior test monkeypatched it away) and runs
+  a whole second clean through the recovered session, parameterised over all
+  seven death points — red 7/7 before the fix.
 - `loop.py:413` — the in-flight finding is backfilled as `aborted (0 attempts)` even when its gate-approved fix cell already mutated the frame; on a *timeout* `verify.revert_cell` never runs, so the kernel keeps an unverified mutation the report denies exists.
 - `loop.py:406` — `admitted` is discarded on death, so a human-approved skill can exist on disk and be invisible to `candidates()` permanently (`library.save()` never runs).
-- `loop.py:570` — `yield from` inside a generator's `finally` raises `RuntimeError: generator ignored GeneratorExit` on Ctrl-C at a gate prompt.
+- ~~`loop.py:570` — `yield from` inside a generator's `finally`~~ **Fixed
+  2026-08-14**: the family summary write is now a pure function called from the
+  `finally` (never yields), and the human-facing summary line is yielded only on
+  the normal path. Test closes the generator midway and demands the summary.
 
 ### Operator-facing
 
-- `repl.py:56` — the blanket `except Exception` sits **outside** the `while`, so one failed turn ends the session and `__main__.main()` still returns 0. Its test passes either way: the scripted `/quit` is never consumed.
+- ~~`repl.py:56` — blanket `except` outside the `while`~~ **Fixed 2026-08-14**:
+  the per-turn guard sits inside the loop; interrupts still exit. The new test
+  requires the turn *after* a failure to actually run — the old test's scripted
+  `/quit` was never consumed, so it passed either way.
+
+### Found by the live run (2026-08-14, both fixed by config)
+
+- Admitted skills each ship `scripts/test_fix.py`; two same-basename files
+  broke repo-wide pytest collection. `testpaths = ["tests"]` — skill self-tests
+  are the admission gate's to run, in-kernel, never the host suite's.
+- Skill artifacts use a `fix` name injected by the admission harness, so host
+  lint rules structurally cannot apply: `skills/` joined ruff's exclude list.
 - `diff.py:116` — `_clip` truncates to 60 chars **before** `inline()` diffs, so any change past char 59 renders with no markers at all. The module's stated purpose, inverted.
 - `detect.py:1456` — `broken[...]` is the one string in the pipeline with no sanitiser and no length bound; a pandas message with an embedded newline splits a report bullet in half.
 - `detect.py:336` — 60ms full-Unicode scan at import (~92% of the module's import self-time, paid on every kernel start and every replay) to buy two codepoints already named in `ZERO_WIDTH`; and `map(lambda)` replacing vectorised `str.contains`, measured 23–89× slower, re-run inside every verify cell.

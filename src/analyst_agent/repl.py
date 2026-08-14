@@ -35,30 +35,34 @@ def run_repl(session, auto_run: bool = False, input_fn=input, print_fn=print) ->
                 continue
             if line == "/quit":
                 break
-            if line.split()[:1] == ["/load"]:
-                _load(session, line, print_fn)
-                continue
-            if line.split()[:1] == ["/clean"]:
-                _clean(session, line, auto_run, input_fn, print_fn)
-                continue
-            if line.split()[:1] == ["/skills"]:
-                _skills(session, line, print_fn)
-                continue
-            if line.split()[:1] == ["/why"]:
-                _why(session, line, print_fn)
-                continue
-            if line.split()[:1] == ["/clean-family"]:
-                _clean_family(session, line, auto_run, input_fn, print_fn)
-                continue
-            _drive(session.run_turn(line), auto_run, input_fn, print_fn)
+            # One turn blowing up must not end the loop: the guard sits
+            # inside the while, so the operator keeps their session, their
+            # loaded datasets, and their kernel after a failed command.
+            # Interrupts still exit — they are the operator leaving, not a
+            # turn failing.
+            try:
+                if line.split()[:1] == ["/load"]:
+                    _load(session, line, print_fn)
+                elif line.split()[:1] == ["/clean"]:
+                    _clean(session, line, auto_run, input_fn, print_fn)
+                elif line.split()[:1] == ["/skills"]:
+                    _skills(session, line, print_fn)
+                elif line.split()[:1] == ["/why"]:
+                    _why(session, line, print_fn)
+                elif line.split()[:1] == ["/clean-family"]:
+                    _clean_family(session, line, auto_run, input_fn, print_fn)
+                else:
+                    _drive(session.run_turn(line), auto_run, input_fn, print_fn)
+            except (EOFError, KeyboardInterrupt):
+                raise
+            except Exception as exc:  # noqa: BLE001 — one turn must not strand the rest
+                print_fn(f"· error: {type(exc).__name__}: {exc}")
     except (EOFError, KeyboardInterrupt):
         pass
-    except Exception as exc:  # noqa: BLE001 — see below; the session must close
-        # A turn blowing up is not a reason to strand the session. Skipping
-        # close() loses the transcript's close event and, in docker mode,
-        # leaves the --network none container running with nobody attached.
-        print_fn(f"· error: {type(exc).__name__}: {exc}")
     finally:
+        # close() always runs: skipping it loses the transcript's close event
+        # and, in docker mode, leaves the --network none container running
+        # with nobody attached.
         session.close()
 
 

@@ -579,7 +579,18 @@ class Session:
         try:
             yield from self._family_body(name, meta, run)
         finally:
-            yield from self._save_family(name, pattern, meta, run)
+            # a pure write, deliberately: yielding here while GeneratorExit
+            # propagates (Ctrl-C at a gate, a UI rerun abandoning the
+            # generator) is a RuntimeError, which failed the save on exactly
+            # the exit this finally was added to survive
+            path, summary = self._write_family(name, pattern, meta, run)
+        replayed = sum(run["hits"].values())
+        yield StreamText(
+            "stdout",
+            f"\nfamily {name}: {len(run['cleaned'])}/{len(meta)} slices cleaned, "
+            f"{summary['rows']:,} rows · {replayed} fix(es) served by "
+            f"{len(run['hits'])} skill(s) · {path}\n",
+        )
 
     def _family_body(self, name: str, meta: list, run: dict):
         code = (
@@ -628,7 +639,9 @@ class Session:
                 if gained:
                     run["hits"][skill_name] = run["hits"].get(skill_name, 0) + gained
 
-    def _save_family(self, name: str, pattern: str, meta: list, run: dict):
+    def _write_family(self, name: str, pattern: str, meta: list, run: dict):
+        """Persist the family summary. Never yields: it runs inside a finally,
+        where a yield during GeneratorExit is a RuntimeError."""
         cleaned, hits = run["cleaned"], run["hits"]
         summary = {
             "family": name,
@@ -643,13 +656,7 @@ class Session:
         }
         path = self.session_dir / f"family_{name}.json"
         path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-        replayed = sum(hits.values())
-        yield StreamText(
-            "stdout",
-            f"\nfamily {name}: {len(cleaned)}/{len(meta)} slices cleaned, "
-            f"{summary['rows']:,} rows · {replayed} fix(es) served by "
-            f"{len(hits)} skill(s) · {path}\n",
-        )
+        return path, summary
 
     def _skill_uses(self) -> dict:
         return {n: e["uses"] for n, e in self.library.entries.items()}
@@ -1510,9 +1517,18 @@ class Session:
         else:
             self.client.restart()
         self._registry_prev = {}
-        for _name, code in self.loads:
-            for _ev in self.client.execute(code, timeout_s=EXEC_TIMEOUT_S):
-                pass
+        for name, code in self.loads:
+            result = None
+            for ev in self.client.execute(code, timeout_s=EXEC_TIMEOUT_S):
+                result = ev
+            # a replayed load must put its registry back, or the survivor's
+            # next /clean is greeted with "unknown variable" — restarting is
+            # not recovering. Stamped with the variable's original event so
+            # provenance keeps pointing at the load the operator saw.
+            if getattr(result, "status", None) == "ok" and getattr(
+                result, "registry", None
+            ):
+                self._stamp_registry(result.registry, self.origins.get(name, 0))
 
     def _kernel_path(self, src: Path) -> str:
         if not self.docker:

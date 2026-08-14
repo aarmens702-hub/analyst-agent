@@ -40,9 +40,16 @@ tdd_guard_project_root = "/Users/aarmensidhu/Desktop/analyst-agent"
 # inherited: `uv run pytest -m docker` opts in.
 addopts = "-m 'not docker'"
 markers = ["docker: builds and runs the sandbox container; opt in explicitly"]
+# The suite lives in tests/. Admitted skills each ship a scripts/test_fix.py
+# whose basenames collide under repo-wide collection — those tests are run by
+# the admission gate inside the kernel, never by the project suite.
+testpaths = ["tests"]
 
 [tool.ruff]
 target-version = "py312"
 # ruff formats fenced code in markdown, and the specs' pseudocode is written for
 # reading, not for running. Keep `ruff format .` off the design docs.
-extend-exclude = ["specs", "docs"]
+# skills/ holds model-authored, gate-validated artifacts: their test files use
+# a `fix` name injected by the admission harness, so host-project lint rules
+# structurally cannot apply to them
+extend-exclude = ["specs", "docs", "skills"]

@@ -572,6 +572,25 @@ def test_family_drift_summary_never_dumps_rows(session, monkeypatch):
     assert "missing note" in text
 
 
+def test_closing_a_family_clean_midway_still_writes_the_summary(session, monkeypatch):
+    """Ctrl-C at a gate prompt closes the abandoned generator, and CPython's
+    GC closes it after CardReady or a UI rerun parks it. Yielding from inside
+    the finally while GeneratorExit propagates raises RuntimeError: generator
+    ignored GeneratorExit — so the save the finally exists to guarantee failed
+    on exactly the exit it was meant to cover."""
+    monkeypatch.setattr(llm, "generate", gen([HARMONIZE]))
+    FakeClient.script = [family_meta(), drift_finding(), [ok()]]
+    turn = session.clean_family("data/vancouver/*.csv", "tax")
+    for _ in range(3):
+        next(turn)
+
+    turn.close()  # the operator left; this must not raise
+
+    assert (session.session_dir / "family_tax.json").exists(), (
+        "the summary is the guarantee: closing early must still write it"
+    )
+
+
 def test_family_harmonizes_once_then_cleans_each_slice(session, monkeypatch):
     """R4/R7: one mapping for the family, then the ordinary CLEAN per slice."""
     monkeypatch.setattr(llm, "generate", gen([HARMONIZE]))
@@ -898,3 +917,51 @@ def test_a_kernel_death_at_any_point_reports_recovers_and_records(
         "a report must exist whatever cell died"
     )
     assert restarts, "the kernel must be restarted or the session stays latched"
+
+
+@pytest.mark.parametrize("die_after", range(7))
+def test_after_recovery_the_next_clean_actually_works(session, monkeypatch, die_after):
+    """Restarting is not recovering. The test above monkeypatches
+    _restart_and_replay away, so it proved the restart was *requested* while
+    the real replay threw away every replayed load's registry — and the next
+    /clean greeted the survivor with "unknown variable 'df'", on every death
+    path, forever. The invariant is the session is USABLE afterwards, so this
+    drives the real replay and then runs a whole second clean through it."""
+    monkeypatch.setattr(llm, "generate", gen([FIX_A] * 16))
+    session.loads.append(("df", "df = pd.read_csv('x.csv')"))
+
+    real_execute = FakeClient.execute
+
+    def forgiving(self, code, timeout_s=120):
+        # the replay happens after the scripted death; feed it a plain ok
+        # instead of an IndexError so the real _restart_and_replay can run
+        if not FakeClient.script:
+            FakeClient.executed.append(code)
+            yield ok()
+            return
+        yield from real_execute(self, code, timeout_s)
+
+    monkeypatch.setattr(FakeClient, "execute", forgiving)
+    happy = [
+        diag([finding()]),
+        baseline(),
+        [ok()],
+        [ok()],
+        case(),
+        baseline(),
+        saved(),
+    ]
+    FakeClient.script = happy[:die_after] + [dead_kernel()]
+    drive(session.clean("df"))
+
+    FakeClient.script = list(happy)
+    events = drive(session.clean("df"))
+
+    unknown = [
+        e for e in events if isinstance(e, Notice) and "unknown variable" in e.text
+    ]
+    assert not unknown, f"recovered session refused to work: {unknown[0].text}"
+    rep = report_of(session)
+    assert [f["status"] for f in rep["fixes"]] == ["fixed"], (
+        "the second clean must run end to end on the recovered session"
+    )

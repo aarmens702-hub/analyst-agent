@@ -497,3 +497,31 @@ def test_the_repl_survives_an_unexpected_failure_and_still_closes(tmp_path) -> N
     )
     assert session.closed, "close() must run even when a turn blows up"
     assert any("kernel died" in str(p) for p in printed), "and say what happened"
+
+
+def test_one_failed_turn_does_not_end_the_repl() -> None:
+    """The test above cannot see whether the loop survived: its scripted /quit
+    is simply never consumed when the loop dies early, so it passes either
+    way — the test-points-at-the-reproduction failure the findings doc names.
+    The invariant is stronger: the turn AFTER the failure must actually run."""
+
+    class ExplodesOnce(FakeSession):
+        def run_turn(self, question):
+            if not self.questions:
+                self.questions.append(question)
+                raise RuntimeError("the kernel died")
+                yield  # pragma: no cover - makes this a generator
+            yield from FakeSession.run_turn(self, question)
+
+    session = ExplodesOnce()
+    printed: list = []
+    run_repl(
+        session,
+        input_fn=scripted_input("count the rows", "and the columns", "/quit"),
+        print_fn=printed.append,
+    )
+    assert any("kernel died" in str(p) for p in printed), "the failure is reported"
+    assert session.questions == ["count the rows", "and the columns"], (
+        "the turn after the failure must run: one bad turn is not a dead REPL"
+    )
+    assert session.closed
