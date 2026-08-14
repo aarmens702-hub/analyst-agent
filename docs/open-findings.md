@@ -142,8 +142,8 @@ over all 7 kernel touch points.
 
 | Where | What |
 |---|---|
-| `detect.py:339` | The zero-width design is unenforceable. A fix turning `Bud<ZWSP>weiser` into `Bud weiser` **passes verification** — the signal stopped firing, which is all layer 1 checks. It is then frozen as a case and can be generalised into a skill that runs unattended on AUTO-grade findings. |
-| `detect.py:1487` | Removing that `except` stopped manufacturing proof but added no attribution: inside `verify_cell` a detector *crash* is indistinguishable from a *bad fix*. `library.record(success=False)` twice retires a working skill into `skills/retired/`. |
+| ~~zero-width unenforceable~~ | **Fixed 2026-08-14**: d06 verification is anchored to the reference repair — the fixed column must equal `_ws_tidy` of the original, which deletes zero-widths by construction, so a word-splitting repair fails layer 1 instead of passing it. Test executes the built cell against both the corrupting and the honest repair. |
+| ~~detector crash charged to the skill~~ | **Fixed 2026-08-14**: `verify_cell` wraps the detector re-run and raises with an `uncheckable:` prefix; the loop still reverts (unverified is unverified) but declines to score the skill — retirement evidence must be about the skill. Pinned at both the cell and the ledger. |
 | ~~`_slice_var` not injective~~ | **Fixed 2026-08-14**: an unconditional short digest of the raw slice key keeps distinct slices distinct ("only when lossy" is itself a collision surface). Test demands four colliding spellings produce four identifiers, deterministically. |
 | ~~`run["cleaned"]` unconditional~~ | **Fixed 2026-08-14**: `clean()` returns whether it ran to completion; the family loop only counts slices that did. The honest fake this needed exposed an existing family test whose bind cells never carried the slice variable — its "cleaned" slices had always early-returned, masked by the unconditional append. |
 
@@ -155,7 +155,12 @@ over all 7 kernel touch points.
   test drives the *real* replay (the prior test monkeypatched it away) and runs
   a whole second clean through the recovered session, parameterised over all
   seven death points — red 7/7 before the fix.
-- `loop.py:413` — the in-flight finding is backfilled as `aborted (0 attempts)` even when its gate-approved fix cell already mutated the frame; on a *timeout* `verify.revert_cell` never runs, so the kernel keeps an unverified mutation the report denies exists.
+- ~~in-flight finding loses its events~~ **Fixed 2026-08-14**: the fix loop
+  watermarks the transcript per finding; on a death the handler attributes
+  every event past the watermark to the finding that was in flight, so the
+  cell that mutated the frame stays reachable from `/why`. (The mutation
+  itself no longer survives either death path: recovery replays loads from
+  raw, a consequence of the earlier handler consolidation.)
 - ~~`admitted` discarded on death~~ **Fixed 2026-08-14**: the admitted list
   lives in the clean's state dict and the ledger is saved the moment each
   admission is granted, not at the end of the pass — a death during the next

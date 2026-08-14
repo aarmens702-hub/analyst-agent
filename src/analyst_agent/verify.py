@@ -68,9 +68,30 @@ def _row_invariant(var: str, finding: dict) -> str:
 
 
 def verify_cell(var: str, finding: dict, baseline_columns: list[str]) -> str:
-    """Layer-1 verification: signal clear + row invariant + untouched columns."""
+    """Layer-1 verification: signal clear + row invariant + untouched columns.
+
+    For whitespace damage (d06) the signal going quiet is not enough: a repair
+    that turns zero-width characters into spaces also silences the detector,
+    while corrupting every affected word — 'Bud<ZWSP>weiser' must become
+    'Budweiser', never 'Bud weiser'. That disease is therefore anchored to the
+    reference repair: the fixed column must equal _ws_tidy of the original,
+    which deletes zero-widths by construction."""
     targets = set(finding.get("columns", []))
     untouched = [c for c in baseline_columns if c not in targets]
+    reference = ""
+    if int(finding.get("disease", 0)) == 6:
+        reference = (
+            "from analyst_agent.detect import _ws_tidy\n"
+            f"for _c in {json.dumps(finding.get('columns', []))}:\n"
+            f"    if _c in {var}.columns and _c in _clean_backup.columns:\n"
+            "        _m = _clean_backup[_c].notna()\n"
+            "        _want = _ws_tidy(_clean_backup[_c][_m].astype(str))\n"
+            f"        _got = {var}[_c][_m].astype(str)\n"
+            "        assert _got.equals(_want), (\n"
+            "            f'column {_c!r} does not match the whitespace "
+            "reference repair'\n"
+            "        )\n"
+        )
     return (
         "from analyst_agent.detect import detect_one\n"
         "import pandas as pd\n"
@@ -85,6 +106,7 @@ def verify_cell(var: str, finding: dict, baseline_columns: list[str]) -> str:
         "        f'uncheckable: {type(_exc).__name__}: {_exc}'\n"
         "    ) from _exc\n"
         "assert _v is None, f\"signal still fires: {_v['evidence']}\"\n"
+        f"{reference}"
         f"{_row_invariant(var, finding)}\n"
         f"for _c in {json.dumps(untouched)}:\n"
         f"    if _c in {var}.columns:\n"

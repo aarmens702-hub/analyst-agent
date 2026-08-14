@@ -882,6 +882,33 @@ def test_a_family_slice_knows_which_file_it_came_from(session, monkeypatch):
     assert session._source_sha(var), "a slice must resolve to the file it came from"
 
 
+def test_the_in_flight_finding_keeps_its_events_when_the_kernel_dies(
+    session, monkeypatch
+):
+    """The finding being worked when the kernel died was backfilled by
+    _aborted() with transcript_evs: [] — even when its gate-approved fix cell
+    had already run and mutated the frame. provenance got an empty chain for
+    that record, so /why could not reach the one cell that touched the user's
+    data. Whatever the kernel was doing when it died, the record must carry
+    the events that actually happened."""
+    monkeypatch.setattr(llm, "generate", gen([FIX_A] * 4))
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # the gate-approved fix cell runs and mutates the frame
+        dead_kernel(),  # ... and the verify cell kills the kernel
+    ]
+    drive(session.clean("df"))
+
+    rep = report_of(session)
+    (fix,) = rep["fixes"]
+    assert fix["status"] == "aborted"
+    assert fix["transcript_evs"], (
+        "the fix cell that ran must be reachable from the record"
+    )
+    assert fix["transcript_evs"] == sorted(fix["transcript_evs"])
+
+
 def test_a_detector_crash_is_not_charged_to_the_skill(stocked, monkeypatch):
     """verify_cell raises 'uncheckable: ...' when the detector itself crashes.
     Charging that to the skill retired working skills on someone else's bug —

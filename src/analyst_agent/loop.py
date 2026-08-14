@@ -378,9 +378,16 @@ class Session:
         except KernelLost as lost:
             yield Notice("kernel_died", str(lost))
             done = {id(r["finding"]) for r in state["records"]}
-            state["records"] += [
-                self._aborted(f) for f in state["fixable"] if id(f) not in done
-            ]
+            inflight = state.get("inflight") or {}
+            for f in state["fixable"]:
+                if id(f) in done:
+                    continue
+                rec = self._aborted(f)
+                if inflight.get("finding") is f:
+                    rec["transcript_evs"] = list(
+                        range(inflight["since"] + 1, self.transcript._last_id + 1)
+                    )
+                state["records"].append(rec)
             if state["records"] or state["fixable"]:
                 # a verified fix that never reached disk is not a durable result
                 state["stats"]["persisted"] = False
@@ -430,6 +437,10 @@ class Session:
         baseline_cols = yield from self._snapshot_baseline(var)
         fixable = state["fixable"]
         for i, finding in enumerate(fixable, 1):
+            # watermark before the attempts: if the kernel dies mid-fix, the
+            # handler attributes every event after this point to THIS finding,
+            # so the cell that mutated the frame stays reachable from /why
+            state["inflight"] = {"finding": finding, "since": self.transcript._last_id}
             # the library first: a proven skill costs no model call at all
             rec = yield from self._skill_attempt(
                 var, finding, i, len(fixable), baseline_cols
@@ -442,6 +453,7 @@ class Session:
             state["evs"].extend(rec["transcript_evs"])
             if rec["status"] == "fixed":
                 baseline_cols = yield from self._snapshot_baseline(var)
+        state["inflight"] = None
 
         yield from self._skill_pass(var, state["records"], state["admitted"])
         if any(r["status"] == "fixed" for r in state["records"]):

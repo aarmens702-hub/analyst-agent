@@ -105,6 +105,33 @@ def test_a_detector_crash_reads_as_uncheckable_not_as_a_failed_fix():
         exec(compile(code, "<v-crash>", "exec"), namespace)  # noqa: S102
 
 
+def test_a_word_splitting_whitespace_repair_fails_verification():
+    """detect.py documents zero-width as delete-not-space, so Bud<ZWSP>weiser
+    becomes Budweiser and never 'Bud weiser' — but layer 1 only asserted the
+    signal stopped firing, which the word-splitting repair also satisfies. The
+    corrupted fix was marked fixed, frozen as its own case, and eligible to
+    become a skill that runs unattended on AUTO findings. d06 verification is
+    now anchored to the reference repair (_ws_tidy of the original), which the
+    split disagrees with and the honest repair matches."""
+    import pytest
+
+    original = pd.Series(["Bud\u200bweiser"] * 8 + ["Coors Light"] * 12, name="beer")
+    finding = _finding(disease=6, slug="whitespace-damage", columns=("beer",))
+    code = verify_cell("df", finding, ["beer"])
+    namespace = {
+        "df": pd.DataFrame({"beer": original.str.replace("\u200b", " ")}),
+        "_clean_backup": pd.DataFrame({"beer": original}),
+        "_clean_rows": 20,
+        "_clean_hashes": {},
+    }
+
+    with pytest.raises(AssertionError, match="reference"):
+        exec(compile(code, "<v-zw>", "exec"), namespace)  # noqa: S102
+
+    namespace["df"] = pd.DataFrame({"beer": original.str.replace("\u200b", "")})
+    exec(compile(code, "<v-zw-ok>", "exec"), namespace)  # noqa: S102
+
+
 def test_verify_cell_reruns_detector_and_holds_rows_constant():
     code = verify_cell("df", _finding(), BASELINE_COLS)
     assert "detect_one" in code
