@@ -93,6 +93,7 @@ class Session:
         skills_dir: str = "skills",
         preview: bool = True,
         snapshots: bool = True,
+        resume: str | None = None,
     ) -> None:
         # R3: gates show consequence computed on a sampled scratch copy;
         # drivers that auto-approve can turn it off, since nobody reads it
@@ -101,9 +102,18 @@ class Session:
         self.snapshots = snapshots
         self.workspace_root = Path(workspace)
         self.workspace_root.mkdir(parents=True, exist_ok=True)
-        self.session_id = self._next_session_id()
-        self.session_dir = self.workspace_root / self.session_id
-        self.session_dir.mkdir(parents=True, exist_ok=True)
+        if resume:
+            # R9: a resumed session is a new process reading an old log
+            self.session_id = resume
+            self.session_dir = self.workspace_root / resume
+            if not self.session_dir.exists():
+                raise FileNotFoundError(
+                    f"no session {resume!r} under {self.workspace_root}"
+                )
+        else:
+            self.session_id = self._next_session_id()
+            self.session_dir = self.workspace_root / self.session_id
+            self.session_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir = Path(data_dir)
         self.docker = docker
         self.skills_dir = Path(skills_dir)
@@ -140,6 +150,8 @@ class Session:
         self._registry_prev: dict[str, tuple] = {}
         self.card_seq = 0
         self.report_seq = 0
+        if resume:
+            self._resume_state()
 
     # -- SessionLike ---------------------------------------------------------
 
@@ -166,6 +178,11 @@ class Session:
             error=result.error,
             exec_count=result.exec_count,
             kind_note="load",
+            # R9: everything resume needs to rebuild the dataset entry from
+            # the log alone — the transcript is the only durable record
+            path=str(src),
+            sha256=hashlib.sha256(src.read_bytes()).hexdigest(),
+            variable=name,
         )
         if result.status != "ok":
             err = result.error or {}
@@ -477,6 +494,68 @@ class Session:
             state["evs"].append(out_ev)
 
         yield from self._save_report(state)
+
+    def _resume_state(self) -> None:
+        """R9: rebuild history, datasets, and loads from the transcript, then
+        replay the loads into the fresh kernel and restore the R8 snapshot.
+        Numbering continues (Transcript reopens its log; card and report
+        sequences count what is already on disk), so a resumed session never
+        overwrites what the original wrote. QUERY observations are not
+        reconstructed — the model's own prior answers carry what mattered."""
+        for ev in self.transcript.events():
+            kind = ev.get("kind")
+            if (
+                kind == "exec"
+                and ev.get("kind_note") == "load"
+                and ev.get("status") == "ok"
+            ):
+                name = ev.get("variable")
+                if not name:
+                    continue  # a pre-R9 transcript: this load predates resume
+                self.loads.append((name, ev["code"]))
+                self.origins[name] = ev["ev_id"]
+                if ev.get("path"):
+                    self.datasets.append(
+                        {
+                            "path": ev["path"],
+                            "sha256": ev.get("sha256", ""),
+                            "variable": name,
+                            "loaded_event": ev["ev_id"],
+                        }
+                    )
+            elif kind == "user":
+                self.history.append({"role": "user", "content": ev.get("text", "")})
+            elif kind == "model":
+                self.history.append(
+                    {"role": "assistant", "content": ev.get("text", "")}
+                )
+        profiles: list[dict] = []
+        for name, code in self.loads:
+            stream_parts: list[str] = []
+            result = None
+            for item in self.client.execute(code, timeout_s=EXEC_TIMEOUT_S):
+                if isinstance(item, StreamOut):
+                    stream_parts.append(item.text)
+                elif not isinstance(item, DisplayItem):
+                    result = item
+            if getattr(result, "status", None) == "ok" and getattr(
+                result, "registry", None
+            ):
+                self._stamp_registry(result.registry, self.origins.get(name, 0))
+                profile = "".join(stream_parts).strip()
+                profiles.append(
+                    {
+                        "role": "user",
+                        "content": f"<dataset variable={name!r}>\n{profile}\n</dataset>",
+                    }
+                )
+        # the model's view of the data leads the conversation, as it did live
+        self.history = profiles + self.history
+        self._restore_snapshot()
+        self.card_seq = len(list((self.session_dir / "cards").glob("c*.json")))
+        self.report_seq = len(
+            list((self.session_dir / "clean_reports").glob("r*.json"))
+        )
 
     def _preview(self, names, cell_source: str):
         """R3: consequence before consent, on sampled scratch copies inside
@@ -1627,26 +1706,30 @@ class Session:
                 result, "registry", None
             ):
                 self._stamp_registry(result.registry, self.origins.get(name, 0))
-        # R8's second half: the loads bring back raw files; the verified fixes
-        # applied since live only in the snapshot. Restored after the loads,
-        # so restored state wins over raw state.
+        self._restore_snapshot()
+
+    def _restore_snapshot(self) -> None:
+        """R8's second half: the loads bring back raw files; the verified
+        fixes applied since live only in the snapshot. Restored after the
+        loads, so restored state wins over raw state."""
         state_file = self.session_dir / "kernel_state.pkl"
-        if self.snapshots and state_file.exists():
-            result = None
-            for ev in self.client.execute(
-                snapshot.restore_cell(str(state_file)), timeout_s=EXEC_TIMEOUT_S
-            ):
-                result = ev
-            if getattr(result, "status", None) == "ok" and getattr(
-                result, "registry", None
-            ):
-                prior = dict(self.origins)
-                self._stamp_registry(result.registry, 0)
-                # a restored variable keeps the origin it had before the
-                # death; 0 marks only names this session never saw
-                for name, ev_id in prior.items():
-                    if self.origins.get(name) == 0:
-                        self.origins[name] = ev_id
+        if not (self.snapshots and state_file.exists()):
+            return
+        result = None
+        for ev in self.client.execute(
+            snapshot.restore_cell(str(state_file)), timeout_s=EXEC_TIMEOUT_S
+        ):
+            result = ev
+        if getattr(result, "status", None) == "ok" and getattr(
+            result, "registry", None
+        ):
+            prior = dict(self.origins)
+            self._stamp_registry(result.registry, 0)
+            # a restored variable keeps the origin it had before the death;
+            # 0 marks only names this session never saw
+            for name, ev_id in prior.items():
+                if self.origins.get(name) == 0:
+                    self.origins[name] = ev_id
 
     def _kernel_path(self, src: Path) -> str:
         if not self.docker:

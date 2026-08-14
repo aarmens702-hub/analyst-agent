@@ -34,6 +34,53 @@ def test_a_windows_encoded_export_loads_into_the_kernel(tmp_path) -> None:
         session.close()
 
 
+def test_resume_rebuilds_a_usable_session(tmp_path) -> None:
+    """P5 R9/AC6: no daemon, no socket — a resumed session is a new process
+    reading an old log. It must come back with its datasets loaded into a
+    fresh kernel, its history carrying the dataset profiles, its numbering
+    continuing, and a /why chain that still resolves from disk."""
+    from analyst_agent import provenance
+
+    csv = tmp_path / "tiny.csv"
+    csv.write_text("a,b\n1,2\n3,4\n")
+    first = Session(
+        workspace=tmp_path / "ws",
+        data_dir=tmp_path,
+        transport_argv=SUBPROCESS_ARGV,
+        skills_dir=tmp_path / "skills",
+    )
+    first.load(str(csv), "tiny")
+    session_id = first.session_id
+    first.close()
+
+    second = Session(
+        workspace=tmp_path / "ws",
+        data_dir=tmp_path,
+        transport_argv=SUBPROCESS_ARGV,
+        skills_dir=tmp_path / "skills",
+        resume=session_id,
+    )
+    try:
+        assert second.session_id == session_id
+        assert [d["variable"] for d in second.datasets] == ["tiny"]
+        assert second.datasets[0]["sha256"] == first.datasets[0]["sha256"]
+
+        result = None
+        for ev in second.client.execute("tuple(tiny.shape)", timeout_s=60):
+            result = ev
+        assert result.status == "ok", result.error
+        assert result.value == "(2, 2)", "the dataset must be loaded, not just listed"
+
+        assert any(
+            "<dataset variable='tiny'>" in m["content"] for m in second.history
+        ), "the model's view of the data must survive the resume"
+
+        dag = provenance.build(second.session_dir)
+        assert dag, "the /why chain must still resolve from disk"
+    finally:
+        second.close()
+
+
 def test_the_agent_loads_with_the_same_policy_diagnose_does(tmp_path) -> None:
     """LOAD_TEMPLATE was a second, weaker copy of the loader: no delimiter
     sniff (a semicolon CSV became one column) and pandas' default NA handling

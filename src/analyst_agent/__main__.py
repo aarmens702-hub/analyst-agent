@@ -24,6 +24,12 @@ def main() -> int:
         action="store_true",
         help="run the kernel in the net-none container (default: subprocess)",
     )
+    parser.add_argument(
+        "--resume",
+        metavar="SESSION",
+        help="resume an earlier session by id (e.g. s16): datasets reloaded, "
+        "fixes restored from the snapshot, /why chain intact",
+    )
     # `diagnose` deliberately sits before the API-key check: it runs the
     # detection engine in-process with no model and no kernel, so needing a
     # paid credential to be told a CSV holds "N/A" would be the barrier it
@@ -78,6 +84,7 @@ def main() -> int:
         # previews cost one kernel cell per gate and nobody reads them when
         # every gate auto-approves
         preview=not args.auto_run,
+        resume=args.resume,
     )
     run_repl(session, auto_run=args.auto_run)
     return 0

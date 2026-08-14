@@ -48,6 +48,30 @@ def test_the_cli_runs_without_an_api_key(tmp_path, monkeypatch, capsys) -> None:
     assert "numbers-as-strings" in capsys.readouterr().out
 
 
+def test_resume_flag_reaches_the_session(monkeypatch) -> None:
+    """P5 R9's last mile: --resume s16 must construct the Session with
+    resume='s16'. Everything past the constructor is covered by the real
+    kernel resume test; this pins the plumbing between argv and Session."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
+    monkeypatch.setattr("sys.argv", ["analyst-agent", "--resume", "s16"])
+    seen: dict = {}
+
+    class Captures:
+        def __init__(self, **kw):
+            seen.update(kw)
+            raise SystemExit  # constructor reached; nothing else should run
+
+    monkeypatch.setattr("analyst_agent.loop.Session", Captures)
+    import pytest as _pytest
+
+    from analyst_agent.__main__ import main
+
+    with _pytest.raises(SystemExit):
+        main()
+    assert seen.get("resume") == "s16"
+
+
 def test_the_key_gate_matches_the_provider(monkeypatch, capsys) -> None:
     """R10 follow-through: with ANALYST_PROVIDER=claude, holding a DeepSeek
     key must not satisfy the gate, and the message must name the key the
