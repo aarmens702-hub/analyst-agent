@@ -355,7 +355,7 @@ class Session:
         """P1 CLEAN flow (spec R5): host drives the checklist, model fixes."""
         if var not in self._registry_prev:
             yield Notice("error", f"unknown variable {var!r} — /load it first")
-            return
+            return False
         # One handler, at one level, doing the whole job. There were two — an
         # outer one that restarted and an inner one that saved the report — and
         # because the inner caught first, every death did exactly half of what
@@ -386,6 +386,11 @@ class Session:
                 state["stats"]["persisted"] = False
             yield from self._save_report(state)
             self._recover(lost)
+            return False
+        # the return value is for programmatic callers (family mode counts a
+        # slice as cleaned only when its clean ran to completion); interactive
+        # drivers ignore it
+        return True
 
     def _clean(self, state: dict):
         """The flow. Every kernel touch is inside its caller's guard, and all
@@ -514,8 +519,17 @@ class Session:
         """The variable a slice is cleaned under. Both the loader and the
         cleaner must derive this identically — when they disagreed, every
         family slice recorded a null source and no family skill could ever be
-        promoted, because promotion counts distinct sources."""
-        return re.sub(r"\W+", "_", f"{name}_{slice_key}").strip("_")
+        promoted, because promotion counts distinct sources.
+
+        The sanitised form alone is not injective (tax-2007 and tax_2007 both
+        become tax_2007), and a collision silently overwrites the first
+        slice's frame and credits its file to the second's lineage. A short
+        digest of the raw key keeps distinct slices distinct; it is applied
+        unconditionally because "only when lossy" is itself a collision
+        surface."""
+        base = re.sub(r"\W+", "_", f"{name}_{slice_key}").strip("_")
+        digest = hashlib.sha256(slice_key.encode("utf-8")).hexdigest()[:6]
+        return f"{base}_{digest}"
 
     def load_family(self, pattern: str, name: str):
         """Load a glob of same-family files into one dict variable (P2.5 R1)."""
@@ -632,8 +646,9 @@ class Session:
             self._stamp_registry(res.registry, ev_id)
             yield StreamText("stdout", f"\n── slice {entry['slice']} ──\n")
             before = dict(self._skill_uses())
-            yield from self.clean(var)
-            run["cleaned"].append(entry["slice"])
+            completed = yield from self.clean(var)
+            if completed:
+                run["cleaned"].append(entry["slice"])
             for skill_name, count in self._skill_uses().items():
                 gained = count - before.get(skill_name, 0)
                 if gained:

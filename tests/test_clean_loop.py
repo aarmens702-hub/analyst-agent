@@ -697,16 +697,25 @@ def test_a_family_run_summarises_across_its_slices(session, monkeypatch):
     """R8: per-slice reports answer "what happened to 2007". The family summary
     answers "did the library earn its keep across all of them"."""
     monkeypatch.setattr(llm, "generate", gen([HARMONIZE]))
+    v1 = session._slice_var("tax", "tax-2007")
+    v2 = session._slice_var("tax", "tax-2020")
+
+    def reg(v):
+        # the bind result must carry the slice variable, as the real kernel's
+        # would — with only `df` in it, clean() refuses the unknown variable
+        # and the "cleaned" slices were never cleaned at all
+        return [dict(REG[0]), {"name": v, "type": "DataFrame", "shape": [100, 2]}]
+
     FakeClient.script = [
         family_meta(),
         drift_finding(),
         [ok()],
         [ok()],
         [ok()],
-        [ok()],
+        [ok(registry=reg(v1))],
         diag([]),
         baseline(),
-        [ok()],
+        [ok(registry=reg(v2))],
         diag([]),
         baseline(),
     ]
@@ -871,6 +880,54 @@ def test_a_family_slice_knows_which_file_it_came_from(session, monkeypatch):
     registered = {d["variable"] for d in session.datasets}
     assert var in registered, registered
     assert session._source_sha(var), "a slice must resolve to the file it came from"
+
+
+def test_an_aborted_slice_is_not_counted_as_cleaned(session, monkeypatch):
+    """clean() swallows KernelLost internally, and the family loop appended to
+    run["cleaned"] unconditionally after it — so family_<name>.json listed
+    slices whose report was 100% aborted and whose parquet was never written,
+    and _write_family summed their rows into the headline. "What was actually
+    cleaned, not what was found" is the comment on the field; this makes the
+    comment true."""
+    monkeypatch.setattr(llm, "generate", gen([FIX_A] * 4))
+    v1 = session._slice_var("tax", "tax-2007")
+    v2 = session._slice_var("tax", "tax-2020")
+
+    def reg(v):
+        return [dict(REG[0]), {"name": v, "type": "DataFrame", "shape": [100, 2]}]
+
+    FakeClient.script = [
+        family_meta(),
+        [StreamOut("stdout", "[]\n"), ok()],  # no drift to reconcile
+        [ok(registry=reg(v1))],  # bind slice 1
+        dead_kernel(),  # ... whose diagnosis kills the kernel
+        [ok(registry=reg(v2))],  # bind slice 2
+        diag([]),  # ... which cleans: nothing to fix
+        baseline(),
+    ]
+    drive(session.clean_family("data/vancouver/*.csv", "tax"))
+
+    summary = json.loads((session.session_dir / "family_tax.json").read_text())
+    assert summary["slices"] == ["tax-2020"], summary["slices"]
+    assert summary["rows"] == 100, "aborted slices must not inflate the headline"
+
+
+def test_colliding_slice_names_stay_distinct_variables(session):
+    """re.sub(r'\\W+', '_') is not injective: tax-2007, tax_2007, tax 2007 and
+    tax.2007 all collapsed to one variable, so the second slice's kernel frame
+    silently overwrote the first, both clean reports cited the first file's
+    sha, and library.record credited the wrong dataset — defeating the
+    distinct-sources promotion rule this helper was extracted to fix. Slices
+    with different names must get different variables, and every variable must
+    still be a Python identifier the kernel can bind."""
+    keys = ["tax-2007", "tax_2007", "tax 2007", "tax.2007"]
+    variables = [session._slice_var("tax", k) for k in keys]
+
+    assert len(set(variables)) == len(keys), variables
+    for variable in variables:
+        assert variable.isidentifier(), variable
+    # deterministic: the loader and the cleaner derive it independently
+    assert variables == [session._slice_var("tax", k) for k in keys]
 
 
 def test_a_dead_kernel_is_restarted_so_the_next_clean_can_run(session, monkeypatch):
