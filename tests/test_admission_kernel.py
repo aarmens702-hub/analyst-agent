@@ -153,3 +153,27 @@ def test_the_frozen_case_holds_sick_rows_and_healthy_ones(seeded, monkeypatch):
     case = next(r["case"] for r in report["fixes"] if r["status"] == "fixed")
     assert case["sick"] == 12, "the rows the fix actually changed"
     assert case["rows"] > case["sick"], "healthy rows ride along"
+
+
+def test_a_verified_fix_survives_a_kernel_death(seeded, monkeypatch):
+    """P5 AC5, against the real kernel. The replay brings back only the
+    original loads — and this frame was never loaded from a file at all, so
+    after a SIGKILL the snapshot is the only road back. If the restored frame
+    still carries the verified fix, R8 has done its whole job."""
+    monkeypatch.setattr(llm, "generate", scripted([GOOD_FIX, GOOD_PROPOSAL]))
+    drive(seeded.clean("beers"))
+    assert (seeded.session_dir / "kernel_state.pkl").exists(), (
+        "a verified fix must leave a snapshot behind"
+    )
+
+    for _ev in seeded.client.execute(
+        "import os, signal\nos.kill(os.getpid(), signal.SIGKILL)", timeout_s=30
+    ):
+        pass
+    seeded._restart_and_replay(dead=True)
+
+    result = None
+    for ev in seeded.client.execute("int((beers['ibu'] == 'N/A').sum())", timeout_s=60):
+        result = ev
+    assert result.status == "ok", result.error
+    assert result.value == "0", "the verified fix must survive the death"

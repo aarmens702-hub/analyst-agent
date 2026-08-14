@@ -88,7 +88,9 @@ def session(tmp_path, monkeypatch):
     FakeClient.executed = []
     # previews off: the scripted flows here would otherwise need one extra
     # kernel-cell entry per gate (see test_clean_loop's preview tests)
-    return Session(workspace=tmp_path / "ws", data_dir=tmp_path, preview=False)
+    return Session(
+        workspace=tmp_path / "ws", data_dir=tmp_path, preview=False, snapshots=False
+    )
 
 
 def card_from(events):

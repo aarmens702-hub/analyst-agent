@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from analyst_agent import llm, prompts, skills, verify
+from analyst_agent import llm, prompts, skills, snapshot, verify
 from analyst_agent.card import AnswerCard, lift_checks
 from analyst_agent.events import (
     ArtifactSaved,
@@ -92,10 +92,13 @@ class Session:
         transport_argv: list | None = None,
         skills_dir: str = "skills",
         preview: bool = True,
+        snapshots: bool = True,
     ) -> None:
         # R3: gates show consequence computed on a sampled scratch copy;
         # drivers that auto-approve can turn it off, since nobody reads it
         self.preview = preview
+        # R8: verified fixes survive a kernel death via namespace snapshots
+        self.snapshots = snapshots
         self.workspace_root = Path(workspace)
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         self.session_id = self._next_session_id()
@@ -452,6 +455,15 @@ class Session:
                 )
             state["records"].append(rec)
             state["evs"].extend(rec["transcript_evs"])
+            if rec["status"] == "fixed" and self.snapshots:
+                # R8: a verified fix must survive a kernel death — the replay
+                # reloads raw files only. Best-effort and death-tolerant: a
+                # failed snapshot never fails the fix it follows.
+                yield from self._exec_events(
+                    snapshot.snapshot_cell(str(self.session_dir / "kernel_state.pkl")),
+                    quiet=True,
+                    tolerate_death=True,
+                )
             if rec["status"] == "fixed":
                 baseline_cols = yield from self._snapshot_baseline(var)
         state["inflight"] = None
@@ -1615,6 +1627,26 @@ class Session:
                 result, "registry", None
             ):
                 self._stamp_registry(result.registry, self.origins.get(name, 0))
+        # R8's second half: the loads bring back raw files; the verified fixes
+        # applied since live only in the snapshot. Restored after the loads,
+        # so restored state wins over raw state.
+        state_file = self.session_dir / "kernel_state.pkl"
+        if self.snapshots and state_file.exists():
+            result = None
+            for ev in self.client.execute(
+                snapshot.restore_cell(str(state_file)), timeout_s=EXEC_TIMEOUT_S
+            ):
+                result = ev
+            if getattr(result, "status", None) == "ok" and getattr(
+                result, "registry", None
+            ):
+                prior = dict(self.origins)
+                self._stamp_registry(result.registry, 0)
+                # a restored variable keeps the origin it had before the
+                # death; 0 marks only names this session never saw
+                for name, ev_id in prior.items():
+                    if self.origins.get(name) == 0:
+                        self.origins[name] = ev_id
 
     def _kernel_path(self, src: Path) -> str:
         if not self.docker:

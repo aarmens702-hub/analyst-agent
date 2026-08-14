@@ -129,6 +129,7 @@ def session(tmp_path, monkeypatch):
         data_dir=tmp_path,
         skills_dir=tmp_path / "skills",
         preview=False,
+        snapshots=False,
     )
     s._registry_prev = {"df": ("DataFrame", "[4, 2]")}
     s._registry = list(REG)
@@ -920,6 +921,31 @@ def test_a_family_slice_knows_which_file_it_came_from(session, monkeypatch):
     assert session._source_sha(var), "a slice must resolve to the file it came from"
 
 
+def test_a_verified_fix_is_snapshotted_before_the_next_one_runs(session, monkeypatch):
+    """R8: _restart_and_replay replays only the original load cells, so every
+    verified fix applied since the load died with the kernel. After each fix
+    that verifies, the kernel namespace is snapshotted — best-effort and
+    death-tolerant, because a failed snapshot must never fail the fix it
+    follows."""
+    session.snapshots = True
+    monkeypatch.setattr(llm, "generate", gen([FIX_A]))
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # the fix
+        [ok()],  # verify
+        case(),
+        [ok()],  # the snapshot cell
+        baseline(),
+        saved(),
+    ]
+    drive(session.clean("df"))
+
+    snapshots = [c for c in FakeClient.executed if "_pickle" in c]
+    assert snapshots, "no snapshot cell ran after the verified fix"
+    assert "kernel_state" in snapshots[0]
+
+
 def test_the_gate_carries_a_preview_of_the_consequence(session, monkeypatch):
     """R3/AC2: the gate showed only code, so the operator executed pandas in
     their head. Before each gate the fix runs against a sampled scratch copy
@@ -1144,6 +1170,33 @@ def test_a_kernel_death_at_any_point_reports_recovers_and_records(
         "a report must exist whatever cell died"
     )
     assert restarts, "the kernel must be restarted or the session stays latched"
+
+
+def test_recovery_restores_the_snapshot_not_just_the_loads(session, monkeypatch):
+    """R8's second half. Replaying the loads brings back the raw files; the
+    verified fixes applied since live only in the snapshot. When one exists,
+    recovery restores it into the fresh kernel — after the loads, so restored
+    state wins over raw state."""
+    session.snapshots = True
+    monkeypatch.setattr(llm, "generate", gen([FIX_A] * 4))
+    (session.session_dir / "kernel_state.pkl").write_bytes(b"placeholder")
+
+    real_execute = FakeClient.execute
+
+    def forgiving(self, code, timeout_s=120):
+        if not FakeClient.script:
+            FakeClient.executed.append(code)
+            yield ok()
+            return
+        yield from real_execute(self, code, timeout_s)
+
+    monkeypatch.setattr(FakeClient, "execute", forgiving)
+    FakeClient.script = [diag([finding()]), baseline(), dead_kernel()]
+    drive(session.clean("df"))
+
+    restores = [c for c in FakeClient.executed if "_pickle.load" in c]
+    assert restores, "recovery must restore the snapshot, not just the loads"
+    assert "kernel_state" in restores[0]
 
 
 @pytest.mark.parametrize("die_after", range(7))
