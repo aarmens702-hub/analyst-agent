@@ -111,7 +111,7 @@ DATE_STYLES = (
     lambda i: f"2024-0{i % 9 + 1}-1{i % 9} 14:3{i % 6}:00",  # iso, space sep
     lambda i: f"0{i % 9 + 1}/1{i % 9}/2024",  # slash
     lambda i: f"2024-0{i % 9 + 1}-1{i % 9}T14:3{i % 6}:00Z",  # iso-zoned
-    lambda i: f"171{i % 9}0000{i % 9}0",  # epoch seconds — no family claims these
+    lambda i: f"171{i % 9}0000{i % 9}0",  # epoch seconds, claimed only in company
 )
 
 
@@ -132,7 +132,41 @@ def test_d03_fires_on_a_format_mix_even_with_an_unclaimed_tail(k) -> None:
 
     assert found is not None, f"{k} date formats -> silence; the gate ran backwards"
     if k == 4:
-        assert "no known" in found["evidence"], found["evidence"]
+        # epoch became a claimed family (in company); the tail is now named,
+        # not unknown — see test_epoch_seconds_join_the_mix_when_dates_keep_them_company
+        assert "epoch" in found["evidence"], found["evidence"]
+
+
+def test_epoch_seconds_join_the_mix_when_dates_keep_them_company() -> None:
+    """The transaction fixture's posted_at rotates iso, slash, iso-zoned, and
+    epoch seconds; epoch was unclaimed, so the mix reported a 25% unknown
+    tail. Ten digits ARE a timestamp when real date formats share the column:
+    all four families named, nothing unclaimed."""
+    import random
+
+    rng = random.Random(7)
+    values = [DATE_STYLES[rng.randrange(4)](i) for i in range(600)]
+
+    found = detect_one(pd.DataFrame({"posted_at": values}), 3, ["posted_at"])
+
+    assert found is not None
+    assert "epoch" in found["evidence"], found["evidence"]
+    assert "no known" not in found["evidence"], found["evidence"]
+
+
+def test_a_column_of_bare_ten_digit_integers_is_not_dates() -> None:
+    """The other half of the epoch decision, and the reason it was deferred
+    until now: order ids, account numbers, and phone-adjacent columns live in
+    the same ten digits as unix seconds. Alone, they are integers; only in the
+    company of another date family (>= 5%) does epoch count. Without this
+    guard, adding the family would have turned every id column into a
+    dates-as-strings AUTO fix."""
+    ids = [str(1_700_000_000 + i) for i in range(40)]
+
+    result = detect_all(pd.DataFrame({"order_id": ids}))
+
+    assert 2 not in _diseases(result), "an id column must never be a date finding"
+    assert 3 not in _diseases(result)
 
 
 def test_a_half_money_column_is_a_judgement_call_not_a_clean_bill() -> None:
@@ -878,6 +912,21 @@ def test_d17_counts_are_measured_where_they_are_claimed() -> None:
     assert found is not None
     assert "85/100" in found["evidence"], found["evidence"]
     assert found["stats"]["packed"] == 85
+
+
+def test_d17_does_not_read_thousands_commas_as_packed_fields() -> None:
+    """Observed live on HM Treasury's Amount column: '26,594.25' fired d17 as
+    comma_list, overlapping d01 — the commas are number formatting, not field
+    packing. A number-shaped column is d01's subject; a genuine comma-packed
+    column must still fire, and pipe/semicolon lists are untouched because
+    nothing writes money with those."""
+    money = [f"{v:,.2f}" for v in range(10_000, 10_040)]
+    assert detect_one(pd.DataFrame({"amount": money}), 17, ["amount"]) is None
+
+    packed = [f"north{i},south{i},east{i}" for i in range(40)]
+    found = detect_one(pd.DataFrame({"tags": packed}), 17, ["tags"])
+    assert found is not None
+    assert found["stats"]["kind"] == "comma_list"
 
 
 def test_the_unicode_space_table_matches_the_unicode_database() -> None:

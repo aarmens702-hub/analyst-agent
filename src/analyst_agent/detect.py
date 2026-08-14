@@ -143,6 +143,10 @@ DATE_FAMILIES = (
     ("month-name-day", re.compile(r"^[A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4}$")),
     ("compact", re.compile(r"^(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$")),
     ("time", re.compile(r"^\d{1,2}:\d{2}(:\d{2})?\s*([aApP]\.?\s?[mM]\.?)?$")),
+    # unix seconds bounded to 2001-09..2036-08: outside that band ten digits
+    # are far more likely an id than an instant. _date_families additionally
+    # refuses to count this family alone — see the guard there.
+    ("epoch", re.compile(r"^(?:1\d{9}|20\d{8})$")),
 )
 SLOTTED_FAMILIES = {"slash", "dash", "dot"}
 
@@ -542,6 +546,14 @@ def _date_families(values) -> dict:
         share = float(values.str.match(pattern).mean())
         if share > 0:
             hits[family] = share
+    # ten digits are only a timestamp in company: order ids and account
+    # numbers live in the same band as unix seconds, so a lone epoch match is
+    # an integer column, and "dates as strings" would be a false claim on it.
+    # With any real date family (>= 5%) beside it, epoch counts in full.
+    if "epoch" in hits and not any(
+        share >= 0.05 for family, share in hits.items() if family != "epoch"
+    ):
+        del hits["epoch"]
     return hits
 
 
@@ -1330,6 +1342,12 @@ def _pack_kind(values):
         # cell, which is seconds of work on a large frame
         separators = probe.str.count(re.escape(delimiter))
         if float((separators >= 1).mean()) >= 0.8 and float(separators.mean()) >= 1.0:
+            if label == "comma" and sum(_number_families(probe).values()) >= 0.8:
+                # thousands commas are number formatting, not field packing:
+                # '26,594.25' is d01's subject, and reporting it here too made
+                # one disease look like two. Pipe and semicolon lists are
+                # exempt — nothing writes money with those.
+                continue
             return f"{label}_list", 0.85
     return None, 0.0
 
