@@ -859,3 +859,42 @@ def test_a_family_run_records_what_it_did_even_when_the_kernel_dies(
     summary = session.session_dir / "family_tax.json"
     assert summary.exists(), "a family run must record what it did"
     assert json.loads(summary.read_text())["harmonized"] is False
+
+
+@pytest.mark.parametrize("die_after", range(7))
+def test_a_kernel_death_at_any_point_reports_recovers_and_records(
+    session, monkeypatch, die_after
+):
+    """Written against the invariant, not against one reproduction.
+
+    Every previous kernel fix was verified by killing the kernel at the one
+    place that had broken, and each test then passed while a sibling path
+    stayed broken — two handlers ended up doing half the job each, and the half
+    was different. Whatever cell dies, all three must hold: the operator is
+    told, a report exists, and the kernel is restarted so the session is not
+    latched for good.
+    """
+    monkeypatch.setattr(llm, "generate", gen([FIX_A] * 8))
+    restarts: list = []
+    monkeypatch.setattr(
+        session, "_restart_and_replay", lambda dead: restarts.append(dead)
+    )
+    happy = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # the fix cell
+        [ok()],  # its verification
+        case(),
+        baseline(),  # baseline walks forward
+        saved(),  # the cleaned copy
+    ]
+    FakeClient.script = happy[:die_after] + [dead_kernel()] * 12
+    events = drive(session.clean("df"))
+
+    assert any(isinstance(e, Notice) and "kernel" in e.text.lower() for e in events), (
+        "the operator must be told the kernel died"
+    )
+    assert list((session.session_dir / "clean_reports").glob("*.json")), (
+        "a report must exist whatever cell died"
+    )
+    assert restarts, "the kernel must be restarted or the session stays latched"

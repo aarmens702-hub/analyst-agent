@@ -348,16 +348,44 @@ class Session:
         if var not in self._registry_prev:
             yield Notice("error", f"unknown variable {var!r} — /load it first")
             return
+        # One handler, at one level, doing the whole job. There were two — an
+        # outer one that restarted and an inner one that saved the report — and
+        # because the inner caught first, every death did exactly half of what
+        # a death needs to do, and which half depended on where it happened.
+        # Each was written against its own reproduction and each test proved
+        # only its own path.
+        state = {
+            "var": var,
+            "records": [],
+            "fixable": [],
+            "indicators": [],
+            "clear": [],
+            "evs": [],
+            "outputs": {},
+            "stats": {},
+            "admitted": [],
+        }
         try:
-            yield from self._clean(var)
+            yield from self._clean(state)
         except KernelLost as lost:
-            # Stop, and say what actually happened. Marching on would mark every
-            # remaining finding "failed" and blame the model for a dead kernel.
             yield Notice("kernel_died", str(lost))
+            done = {id(r["finding"]) for r in state["records"]}
+            state["records"] += [
+                self._aborted(f) for f in state["fixable"] if id(f) not in done
+            ]
+            if state["records"] or state["fixable"]:
+                # a verified fix that never reached disk is not a durable result
+                state["stats"]["persisted"] = False
+            yield from self._save_report(state)
             self._recover(lost)
 
-    def _clean(self, var: str):
-        start_ev = self.transcript.append("user", text=f"/clean {var}")
+    def _clean(self, state: dict):
+        """The flow. Every kernel touch is inside its caller's guard, and all
+        shared results live in `state` so the handler can report whatever
+        progress was made — including progress made before the diagnosis, which
+        the previous boundary discarded."""
+        var = state["var"]
+        state["evs"].append(self.transcript.append("user", text=f"/clean {var}"))
 
         code = (
             "from analyst_agent.detect import detect_all\n"
@@ -365,67 +393,52 @@ class Session:
             f"print(json.dumps(detect_all({var}, {var!r})))"
         )
         result, stream, _, diag_ev = yield from self._exec_events(code, quiet=True)
+        state["evs"].append(diag_ev)
         if result.status != "ok":
             err = (result.error or {}).get("evalue", result.status)
             yield Notice("error", f"diagnosis failed: {err}")
             return
         diagnosis = json.loads(stream.strip().splitlines()[-1])
-        fixable = [f for f in diagnosis["findings"] if not f["indicator"]]
-        indicators = [f for f in diagnosis["findings"] if f["indicator"]]
-        clear = diagnosis["clear"]
-        broken = diagnosis.get("broken", {})
+        state["fixable"] = [f for f in diagnosis["findings"] if not f["indicator"]]
+        state["indicators"] = [f for f in diagnosis["findings"] if f["indicator"]]
+        state["clear"] = diagnosis["clear"]
+        state["broken"] = diagnosis.get("broken", {})
         yield StreamText(
-            "stdout", self._diagnosis_text(var, fixable, indicators, clear, broken)
+            "stdout",
+            self._diagnosis_text(
+                var,
+                state["fixable"],
+                state["indicators"],
+                state["clear"],
+                state["broken"],
+            ),
         )
 
         baseline_cols = yield from self._snapshot_baseline(var)
-        records: list[dict] = []
-        evs_chain = [start_ev, diag_ev]
-        admitted: list = []
-        outputs: dict = {}
-        stats: dict = {}
-        # Everything that can touch the kernel lives in here, and the report is
-        # written after it either way. A death between the last fix and the
-        # write used to unwind past the report entirely, so a gate-approved,
-        # verified fix mutated the frame and left no record at all.
-        try:
-            for i, finding in enumerate(fixable, 1):
-                # the library first: a proven skill costs no model call at all
-                rec = yield from self._skill_attempt(
+        fixable = state["fixable"]
+        for i, finding in enumerate(fixable, 1):
+            # the library first: a proven skill costs no model call at all
+            rec = yield from self._skill_attempt(
+                var, finding, i, len(fixable), baseline_cols
+            )
+            if rec is None:
+                rec = yield from self._fix_mini_turn(
                     var, finding, i, len(fixable), baseline_cols
                 )
-                if rec is None:
-                    rec = yield from self._fix_mini_turn(
-                        var, finding, i, len(fixable), baseline_cols
-                    )
-                records.append(rec)
-                evs_chain.extend(rec["transcript_evs"])
-                if rec["status"] == "fixed":
-                    baseline_cols = yield from self._snapshot_baseline(var)
+            state["records"].append(rec)
+            state["evs"].extend(rec["transcript_evs"])
+            if rec["status"] == "fixed":
+                baseline_cols = yield from self._snapshot_baseline(var)
 
-            admitted = yield from self._skill_pass(var, records)
-            if any(r["status"] == "fixed" for r in records):
-                outputs, stats, out_ev = yield from self._write_cleaned(var, records)
-                evs_chain.append(out_ev)
-        except KernelLost as lost:
-            yield Notice("kernel_died", str(lost))
-            done = {id(r["finding"]) for r in records}
-            records += [self._aborted(f) for f in fixable if id(f) not in done]
-            # a verified fix that never reached disk is not a durable result,
-            # and the report must not imply one
-            stats["persisted"] = False
+        state["admitted"] = yield from self._skill_pass(var, state["records"])
+        if any(r["status"] == "fixed" for r in state["records"]):
+            outputs, stats, out_ev = yield from self._write_cleaned(
+                var, state["records"]
+            )
+            state["outputs"], state["stats"] = outputs, stats
+            state["evs"].append(out_ev)
 
-        yield from self._save_report(
-            var,
-            records,
-            indicators,
-            clear,
-            evs_chain,
-            outputs,
-            stats,
-            admitted,
-            broken,
-        )
+        yield from self._save_report(state)
 
     def _recover(self, lost: "KernelLost") -> None:
         """Restart after a death, so the session is not poisoned for good.
@@ -459,18 +472,9 @@ class Session:
             "case": {},
         }
 
-    def _save_report(
-        self,
-        var,
-        records,
-        indicators,
-        clear,
-        evs_chain,
-        outputs,
-        stats,
-        admitted,
-        broken=None,
-    ):
+    def _save_report(self, state: dict):
+        """Written on every exit, from whatever the run managed to establish."""
+        var = state["var"]
         self.report_seq += 1
         report_id = f"{self.session_id}-r{self.report_seq:03d}"
         source = next(
@@ -485,14 +489,14 @@ class Session:
             session=self.session_id,
             variable=var,
             source={"path": source.get("path"), "sha256": source.get("sha256")},
-            fixes=records,
-            indicators=indicators,
-            clear=clear,
-            broken=broken or {},
-            outputs=outputs,
-            stats=stats,
-            skills_admitted=admitted,
-            event_chain=[*evs_chain, rep_ev],
+            fixes=state["records"],
+            indicators=state["indicators"],
+            clear=state["clear"],
+            broken=state.get("broken") or {},
+            outputs=state["outputs"],
+            stats=state["stats"],
+            skills_admitted=state["admitted"],
+            event_chain=[*state["evs"], rep_ev],
             created=datetime.now().astimezone().isoformat(timespec="seconds"),
         )
         report.save(self.session_dir / "clean_reports")
