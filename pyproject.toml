@@ -22,6 +22,7 @@ dependencies = [
 
 [project.scripts]
 analyst-agent = "analyst_agent:main"
+analyst-agent-mcp = "analyst_agent.mcp_server:main"
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
