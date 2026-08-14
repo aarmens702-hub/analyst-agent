@@ -219,3 +219,89 @@ def test_the_server_exposes_exactly_the_six_tools_with_docstrings() -> None:
     for tool in tools.values():
         assert tool.description and len(tool.description) > 40
     assert "consent" in tools["clean_file"].description.lower()
+
+
+def test_the_elicit_decider_asks_only_for_gate_grade() -> None:
+    """v1.5: GATE fixes are the client's human's call, per fix. HUMAN
+    findings and admissions are never a yes/no popup — they stay deferred —
+    and AUTO never bothers anyone. Decline and elicitation failure both skip
+    with the reason in the note, because a popup that errored is not consent."""
+    from types import SimpleNamespace
+
+    from analyst_agent.events import GateRequest
+
+    asked: list[str] = []
+
+    def accept(message: str):
+        asked.append(message)
+        return SimpleNamespace(action="accept", data=SimpleNamespace(approve=True))
+
+    decide = mcp_server._make_decider(accept)
+    auto = GateRequest("c", 1, title="fix 1/3 · auto", grade="AUTO")
+    human = GateRequest("c", 1, title="fix 2/3 · human", grade="HUMAN")
+    gate = GateRequest(
+        "c", 1, title="fix 3/3 · gate", preview="a: 2 cells", grade="GATE"
+    )
+
+    assert decide(auto).action == "run"
+    assert decide(human).action == "skip"
+    assert asked == [], "AUTO and HUMAN must never reach the client"
+    assert decide(gate).action == "run"
+    assert asked and "fix 3/3 · gate" in asked[0] and "a: 2 cells" in asked[0]
+
+    def decline(message: str):
+        return SimpleNamespace(action="decline", data=None)
+
+    decision = mcp_server._make_decider(decline)(gate)
+    assert decision.action == "skip" and "declined" in decision.note
+
+    def boom(message: str):
+        raise RuntimeError("client hung up")
+
+    decision = mcp_server._make_decider(boom)(gate)
+    assert decision.action == "skip" and "unavailable" in decision.note
+
+
+def test_clean_file_threads_the_decide_callback_through(monkeypatch) -> None:
+    """The tool layer hands its elicitation decider to the driver; without
+    this seam the decider exists but every clean still runs blanket policy."""
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    received: dict = {}
+
+    def fake_run(session, path, name=None, policy="auto", decide=None):
+        received.update(path=path, policy=policy, decide=decide)
+        return {"file": path, "needs_human": []}
+
+    monkeypatch.setattr("analyst_agent.repl.run_clean_once", fake_run)
+    monkeypatch.setattr(
+        mcp_server, "_make_session", lambda: SimpleNamespace(close=lambda: None)
+    )
+    sentinel = object()
+
+    summary = mcp_server._clean_file("x.csv", decide=sentinel)
+
+    assert summary["file"] == "x.csv"
+    assert received["decide"] is sentinel
+
+
+def test_client_capability_detection_fails_closed(monkeypatch) -> None:
+    """No elicitation capability, no popup — exactly v1 behavior. The check
+    itself failing must read as 'cannot ask', never as a crash."""
+    from types import SimpleNamespace
+
+    def ctx_with(answer):
+        session = SimpleNamespace(check_client_capability=lambda cap: answer)
+        return SimpleNamespace(request_context=SimpleNamespace(session=session))
+
+    assert mcp_server._client_can_elicit(ctx_with(True)) is True
+    assert mcp_server._client_can_elicit(ctx_with(False)) is False
+
+    class Exploding:
+        @property
+        def request_context(self):
+            raise RuntimeError("no request context outside a call")
+
+    assert mcp_server._client_can_elicit(Exploding()) is False
+    assert mcp_server._client_can_elicit(None) is False

@@ -47,17 +47,22 @@ def _make_session():
     )
 
 
-def _clean_file(path: str, name: str | None = None, policy: str = "auto") -> dict:
-    """Headless one-shot clean under the grade policy (R2)."""
+def _clean_file(
+    path: str, name: str | None = None, policy: str = "auto", decide=None
+) -> dict:
+    """Headless one-shot clean under the grade policy (R2); `decide` is the
+    v1.5 per-gate callback when the client can be asked (elicitation)."""
     missing = _required_key()
     if missing:
         return {"error": missing}
     try:
-        from analyst_agent.repl import run_clean_once
+        from analyst_agent import repl
 
         session = _make_session()
         try:
-            summary = run_clean_once(session, path, name=name, policy=policy)
+            summary = repl.run_clean_once(
+                session, path, name=name, policy=policy, decide=decide
+            )
             summary["policy"] = policy
             return summary
         finally:
@@ -205,7 +210,7 @@ def build_server():
     here, not at module top: importing analyst_agent must never require the
     mcp package (AC4). Each docstring below is the contract a calling model
     acts on — they are instructions, not comments."""
-    from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver import Context, MCPServer
 
     app = MCPServer("analyst-agent")
 
@@ -219,17 +224,32 @@ def build_server():
         return _diagnose_file(path)
 
     @app.tool()
-    def clean_file(path: str, name: str | None = None, policy: str = "auto") -> dict:
+    async def clean_file(
+        path: str,
+        name: str | None = None,
+        policy: str = "auto",
+        ctx: Context | None = None,
+    ) -> dict:
         """Clean a data file headlessly. Fixes are model-written, executed in
         a sandboxed kernel, and verified by re-running the detector plus row
         and hash invariants; failures revert. Under policy="auto" only
         AUTO-grade fixes run — judgement-grade findings come back in
-        needs_human for a person to decide. policy="all" approves
-        judgement-grade changes unattended and requires explicit human
-        consent relayed by you, the calling agent; do not pass it on your own
-        initiative. Returns fixes, needs_human, and artifact paths (cleaned
-        parquet, lineage, report)."""
-        return _clean_file(path, name=name, policy=policy)
+        needs_human for a person to decide; if your client supports
+        elicitation, GATE-grade fixes are offered to the human one by one
+        instead. policy="all" approves judgement-grade changes unattended and
+        requires explicit human consent relayed by you, the calling agent; do
+        not pass it on your own initiative. Returns fixes, needs_human, and
+        artifact paths (cleaned parquet, lineage, report)."""
+        import anyio
+
+        decide = None
+        if policy == "auto" and ctx is not None and _client_can_elicit(ctx):
+            decide = _make_decider(_elicit_sync_via(ctx))
+        # the kernel blocks for minutes; a worker thread keeps the event loop
+        # free to carry the elicitation replies the decider waits on
+        return await anyio.to_thread.run_sync(
+            lambda: _clean_file(path, name=name, policy=policy, decide=decide)
+        )
 
     @app.tool()
     def open_data(path: str) -> dict:
@@ -271,3 +291,84 @@ def main() -> None:
         app.run()
     finally:
         close_all()
+
+
+def _make_decider(elicit_sync):
+    """v1.5: per-gate decisions through the client's human (R3 of the wrapper
+    spec's future notes). Only GATE grades are asked — AUTO needs nobody and
+    HUMAN findings and skill admissions need a richer conversation than a
+    yes/no popup, so they stay deferred. Decline, cancel, and elicitation
+    failure all skip with the reason in the note: a popup that errored is not
+    consent."""
+    from analyst_agent.events import GateDecision
+
+    def decide(event):
+        if event.grade != "GATE":
+            return (
+                GateDecision("run") if event.grade == "AUTO" else GateDecision("skip")
+            )
+        message = f"Approve this fix? {event.title}"
+        if event.preview:
+            message += f"\n\n{event.preview}"
+        try:
+            result = elicit_sync(message)
+        except Exception as exc:  # noqa: BLE001 — R6: failure is a skip, not a crash
+            return GateDecision(
+                "skip", f"elicitation unavailable: {type(exc).__name__}"
+            )
+        if getattr(result, "action", "") == "accept" and getattr(
+            getattr(result, "data", None), "approve", False
+        ):
+            return GateDecision("run")
+        return GateDecision("skip", "declined via elicitation")
+
+    return decide
+
+
+def _client_can_elicit(ctx) -> bool:
+    """True only when the connected client declared the elicitation
+    capability. Fails closed: no capability, no context, or a check that
+    itself errors all mean "cannot ask" — which degrades to exactly the v1
+    blanket-policy behavior, never to a crash."""
+    try:
+        from mcp_types import ClientCapabilities, ElicitationCapability
+
+        session = ctx.request_context.session
+        return bool(
+            session.check_client_capability(
+                ClientCapabilities(elicitation=ElicitationCapability())
+            )
+        )
+    except Exception:  # noqa: BLE001 — fail closed by design
+        return False
+
+
+def _approve_schema():
+    """The one-field yes/no schema an elicitation popup shows. Built lazily:
+    pydantic is a hard dependency but the schema is only needed when a
+    client can actually be asked."""
+    from pydantic import BaseModel
+
+    class ApproveFix(BaseModel):
+        approve: bool
+
+    return ApproveFix
+
+
+def _elicit_sync_via(ctx):
+    """Bridge a worker-thread gate decision to the async client ask. The
+    clean runs in a worker thread (kernel cells block for minutes and must
+    not starve the event loop that carries the elicitation reply), so the
+    decider hops back to the loop per question. Only a live client proves
+    this bridge end to end."""
+
+    def elicit_sync(message: str):
+        import anyio.from_thread
+
+        return anyio.from_thread.run(_do_elicit, ctx, message)
+
+    return elicit_sync
+
+
+async def _do_elicit(ctx, message: str):
+    return await ctx.elicit(message, _approve_schema())

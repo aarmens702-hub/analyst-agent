@@ -232,13 +232,23 @@ def policy_decision(event: GateRequest, policy: str) -> GateDecision:
     return GateDecision("skip")
 
 
-def run_clean_once(session, path: str, name: str | None = None, policy: str = "auto"):
+def run_clean_once(
+    session,
+    path: str,
+    name: str | None = None,
+    policy: str = "auto",
+    decide=None,
+):
     """Headless one-shot clean, for agents and scripts (no gate operator).
 
-    Loads the file, drives the clean under `policy_decision`, and returns a
-    machine-readable summary: what ran, what was deferred to a human, and
-    where the durable artifacts landed. Tolerant of SessionLike doubles, like
-    every other driver in this module.
+    Loads the file, drives the clean under `policy_decision` — or under
+    `decide`, a per-gate callback (v1.5: an MCP server with an
+    elicitation-capable client asks the human gate by gate instead of
+    applying the blanket policy). A skip whose decision carries a note
+    (declined, elicitation unavailable) surfaces the note in needs_human.
+    Returns a machine-readable summary: what ran, what was deferred to a
+    human, and where the durable artifacts landed. Tolerant of SessionLike
+    doubles, like every other driver in this module.
     """
     session.load(path, name)
     datasets = getattr(session, "datasets", None) or []
@@ -253,9 +263,15 @@ def run_clean_once(session, path: str, name: str | None = None, policy: str = "a
         while True:
             answer = None
             if isinstance(event, GateRequest):
-                answer = policy_decision(event, policy)
+                if decide is not None:
+                    answer = decide(event)
+                else:
+                    answer = policy_decision(event, policy)
                 if answer.action == "skip":
-                    needs_human.append(event.title or event.code.splitlines()[0])
+                    title = event.title or event.code.splitlines()[0]
+                    if answer.note:
+                        title = f"{title} ({answer.note})"
+                    needs_human.append(title)
             event = turn.send(answer)
     except StopIteration:
         pass

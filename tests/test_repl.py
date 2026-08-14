@@ -612,3 +612,32 @@ def test_one_failed_turn_does_not_end_the_repl() -> None:
         "the turn after the failure must run: one bad turn is not a dead REPL"
     )
     assert session.closed
+
+
+def test_headless_clean_accepts_a_per_gate_decide_callback() -> None:
+    """v1.5 seam: an MCP server with an elicitation-capable client decides
+    gate by gate through the human, not by blanket policy. The callback owns
+    every gate decision, and a skip that carries a note (declined, or
+    elicitation unavailable) lands in needs_human with the note visible."""
+    from analyst_agent.repl import run_clean_once
+
+    gates = [
+        GateRequest("fix_a", 1, title="fix 1/2 · trailing space", grade="AUTO"),
+        GateRequest("fix_b", 1, title="fix 2/2 · merge variants", grade="GATE"),
+    ]
+    seen: list[str] = []
+
+    def decide(event: GateRequest) -> GateDecision:
+        seen.append(event.grade)
+        if event.grade == "AUTO":
+            return GateDecision("run")
+        return GateDecision("skip", "declined via elicitation")
+
+    session = FakeSession(script=gates)
+    summary = run_clean_once(session, "data/x.csv", name="x", decide=decide)
+
+    assert seen == ["AUTO", "GATE"], "the callback owns every gate"
+    assert [d.action for d in session.decisions] == ["run", "skip"]
+    assert summary["needs_human"] == [
+        "fix 2/2 · merge variants (declined via elicitation)"
+    ]
