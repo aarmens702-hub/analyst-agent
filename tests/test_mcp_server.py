@@ -305,3 +305,44 @@ def test_client_capability_detection_fails_closed(monkeypatch) -> None:
 
     assert mcp_server._client_can_elicit(Exploding()) is False
     assert mcp_server._client_can_elicit(None) is False
+
+
+def test_session_chatter_never_reaches_stdout(monkeypatch) -> None:
+    """In stdio MCP mode, stdout IS the protocol channel — Session prints
+    'starting kernel', 'loaded ...', and the profile, which a strict client
+    parses as corrupt JSON-RPC. Found live: a real client warned 'Invalid
+    JSON: starting kernel' mid-handshake. The tool paths must route every byte
+    of that chatter to stderr, the way the CLI already does."""
+    import contextlib
+    import io
+
+    class ChattySession:
+        def __init__(self):
+            print("starting kernel (subprocess) …")  # to stdout, like the real one
+            self.datasets = []
+            self.history = []
+            self.closed = False
+            self.session_dir = None
+
+        def load(self, path, name=None):
+            print(f"loaded {path} → df")
+            self.datasets.append({"path": path, "variable": "df"})
+            self.history.append(
+                {"role": "user", "content": "<dataset variable='df'>\nrows\n</dataset>"}
+            )
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
+    monkeypatch.setattr(mcp_server, "_make_session", ChattySession)
+
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        opened = mcp_server._open_data("data/tiny.csv")
+
+    assert "session_id" in opened, opened
+    assert captured.getvalue() == "", (
+        f"session chatter leaked to the protocol channel: {captured.getvalue()!r}"
+    )

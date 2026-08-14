@@ -11,9 +11,20 @@ analyst_agent never requires it (AC4). Every tool returns errors as results —
 one bad file must not kill the server (R6).
 """
 
+import contextlib
 import json
+import sys
 
 from analyst_agent import diagnose
+
+
+def _quiet():
+    """Route Session's own chatter (starting kernel, loaded ..., the profile)
+    to stderr. In stdio MCP mode stdout is the JSON-RPC channel, and a strict
+    client parses any stray line as a corrupt message — observed live as
+    'Invalid JSON: starting kernel'. The CLI does this for the whole process;
+    the tool paths must do it around every Session-touching region."""
+    return contextlib.redirect_stdout(sys.stderr)
 
 
 def _diagnose_file(path: str) -> str:
@@ -58,11 +69,13 @@ def _clean_file(
     try:
         from analyst_agent import repl
 
-        session = _make_session()
+        with _quiet():  # construction and load() print to stdout, the RPC wire
+            session = _make_session()
         try:
-            summary = repl.run_clean_once(
-                session, path, name=name, policy=policy, decide=decide
-            )
+            with _quiet():
+                summary = repl.run_clean_once(
+                    session, path, name=name, policy=policy, decide=decide
+                )
             summary["policy"] = policy
             return summary
         finally:
@@ -111,8 +124,9 @@ def _open_data(path: str) -> dict:
         import time
         import uuid
 
-        session = _make_session()
-        session.load(path)
+        with _quiet():  # construction and load() print to stdout, the RPC wire
+            session = _make_session()
+            session.load(path)
         datasets = getattr(session, "datasets", None) or []
         if not datasets:
             session.close()
