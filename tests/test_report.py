@@ -119,6 +119,33 @@ def test_save_writes_rnnn_json_and_md(tmp_path):
     assert data["fixes"][3]["attempts"] == 3
 
 
+def test_the_report_carries_a_per_column_rollup_of_what_moved():
+    """P5 R7: a clean run should end with a scannable answer to "what changed
+    in MY columns, and by how much" — sourced from the stats the findings
+    already carry. Failed and skipped fixes moved nothing, so they stay out
+    of it."""
+    rec_a = _fix_record(4, "sentinel-missing", ["ibu"], "fixed", 1, [3])
+    rec_a["finding"]["stats"] = {"sentinel_count": 55}
+    rec_b = _fix_record(6, "whitespace-damage", ["ibu"], "fixed", 1, [5])
+    rec_b["finding"]["stats"] = {"count": 12, "values": 40}
+    rec_c = _fix_record(1, "numbers-as-strings", ["abv"], "failed", 3, [7])
+    rec_c["finding"]["stats"] = {"values": 40, "residue_frac": 0.5}
+    report = CleanReport(
+        report_id="r001",
+        session="s01",
+        variable="df",
+        source={},
+        fixes=[rec_a, rec_b, rec_c],
+    )
+
+    md = report.to_markdown()
+
+    assert "per column" in md.lower()
+    rollup = md.lower().split("per column", 1)[1].split("*events")[0]
+    assert "ibu" in rollup and "55" in rollup and "12" in rollup
+    assert "abv" not in rollup, "a failed fix moved nothing"
+
+
 def test_empty_report_renders_with_zero_counts():
     report = CleanReport(report_id="s01-r002", session="s01", variable="df", source={})
     assert report.counts() == {

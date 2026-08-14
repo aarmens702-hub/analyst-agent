@@ -25,9 +25,41 @@ PROMPT = "❯ "
 GATE_PROMPT = "[r]un / [j]eject / [s]kip: "
 
 
+# the last multi-line error, recallable via /trace; one driver by design
+_LAST_TRACE: list[str] = []
+
+
+def _manifest(session) -> str:
+    """R5: what is actually in effect, before the first prompt. The line that
+    matters most is the last one — how many skills will modify data without
+    asking. Tolerant reads throughout: a SessionLike double without a library
+    still gets a manifest."""
+    from analyst_agent import llm
+
+    info = llm.model_info()
+    sandbox = (
+        "docker --network none"
+        if getattr(session, "docker", False)
+        else "subprocess (no network isolation)"
+    )
+    entries = getattr(getattr(session, "library", None), "entries", None) or {}
+    states: dict[str, int] = {}
+    for entry in entries.values():
+        state = entry.get("state", "unknown")
+        states[state] = states.get(state, 0) + 1
+    proven = states.get("proven", 0)
+    skills = ", ".join(f"{n} {s}" for s, n in sorted(states.items())) or "none"
+    return (
+        f"model {info['model']} ({info['provider']}) · sandbox: {sandbox}\n"
+        f"skills: {skills} — {proven} proven skill(s) will run unattended "
+        "on AUTO-grade findings"
+    )
+
+
 def run_repl(session, auto_run: bool = False, input_fn=input, print_fn=print) -> None:
     """Drive a session from the terminal until /quit, EOF, or interrupt."""
     print_fn(BANNER)
+    print_fn(_manifest(session))
     try:
         while True:
             line = input_fn(PROMPT).strip()
@@ -40,6 +72,9 @@ def run_repl(session, auto_run: bool = False, input_fn=input, print_fn=print) ->
             # loaded datasets, and their kernel after a failed command.
             # Interrupts still exit — they are the operator leaving, not a
             # turn failing.
+            if line == "/trace":
+                print_fn(_LAST_TRACE[0] if _LAST_TRACE else "no stored traceback")
+                continue
             try:
                 if line.split()[:1] == ["/load"]:
                     _load(session, line, print_fn)
@@ -82,7 +117,17 @@ def _drive(gen, auto_run: bool, input_fn, print_fn) -> None:
             elif isinstance(event, ArtifactSaved):
                 print_fn(f"chart saved: {event.path}")
             elif isinstance(event, Notice):
-                print_fn(f"· {event.kind}: {event.text}")
+                text = event.text
+                if "\n" in text and event.kind in ("error", "llm_error", "kernel_died"):
+                    # R6: one line now, the flood behind /trace. Hiding the
+                    # traceback entirely would trade a flood for a silence.
+                    _LAST_TRACE[:] = [text]
+                    first, rest = text.split("\n", 1)
+                    text = (
+                        f"{first} (+{rest.count(chr(10)) + 1} more lines · "
+                        "/trace shows all)"
+                    )
+                print_fn(f"· {event.kind}: {text}")
             elif isinstance(event, CardReady):
                 print_fn(event.card.to_markdown())
                 return

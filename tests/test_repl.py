@@ -499,6 +499,55 @@ def test_the_repl_survives_an_unexpected_failure_and_still_closes(tmp_path) -> N
     assert any("kernel died" in str(p) for p in printed), "and say what happened"
 
 
+def test_startup_names_the_model_sandbox_and_unattended_skills() -> None:
+    """P5 R5/AC4: a new user cannot currently discover that proven skills run
+    unattended on AUTO findings without typing /skills and knowing what
+    'proven' means. For a project whose claim is that everything is
+    checkable, silent-by-default is the wrong default — the startup line
+    names the model, the sandbox, and exactly how many skills may modify
+    data without asking."""
+    from types import SimpleNamespace
+
+    session = FakeSession()
+    session.docker = False
+    session.library = SimpleNamespace(
+        entries={
+            "fix-a": {"state": "proven"},
+            "fix-b": {"state": "probation"},
+            "fix-c": {"state": "proven"},
+        }
+    )
+    printed: list = []
+    run_repl(session, input_fn=scripted_input("/quit"), print_fn=printed.append)
+
+    text = "\n".join(str(p) for p in printed)
+    assert "deepseek" in text or "claude" in text, "the provider is named"
+    assert "subprocess" in text, "the sandbox mode is named"
+    assert "1 probation" in text and "2 proven" in text
+    assert "unattended" in text, "the silent-modification warning is the point"
+
+
+def test_a_multiline_error_prints_one_line_and_trace_recalls_it() -> None:
+    """P5 R6: repl printed event.text unconditionally, so a pandas traceback
+    flooded the terminal. An error renders as its first line with a count;
+    the full text stays available behind /trace, because hiding it entirely
+    would trade a flood for a silence."""
+    trace = "ValueError: boom\n" + "\n".join(f"  frame {i}" for i in range(30))
+    session = FakeSession(script=[Notice("error", trace)])
+    printed: list = []
+    run_repl(
+        session,
+        input_fn=scripted_input("why did it fail", "/trace", "/quit"),
+        print_fn=printed.append,
+    )
+
+    lines = [str(p) for p in printed]
+    notice = next(ln for ln in lines if "ValueError: boom" in ln and "error" in ln)
+    assert "frame" not in notice, "the notice itself must be one line"
+    assert "/trace" in notice, "and it must say where the rest went"
+    assert sum("frame 29" in ln for ln in lines) == 1, "/trace shows everything, once"
+
+
 def test_one_failed_turn_does_not_end_the_repl() -> None:
     """The test above cannot see whether the loop survived: its scripted /quit
     is simply never consumed when the loop dies early, so it passes either

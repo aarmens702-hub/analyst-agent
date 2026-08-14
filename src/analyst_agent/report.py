@@ -82,6 +82,9 @@ class CleanReport:
                     "kernel."
                 ),
             ]
+        rollup = _per_column(self.fixes)
+        if rollup:
+            lines += ["", "**per column, what moved**", *rollup]
         if self.outputs:
             lines += [
                 "",
@@ -107,3 +110,32 @@ class CleanReport:
             self.to_markdown() + "\n", encoding="utf-8"
         )
         return json_path
+
+
+def _moved_cells(stats: dict):
+    """How many cells a fix moved, from whichever count the finding carries.
+    None when the disease's stats expose no cell count — a blank beats a
+    guess."""
+    for key in ("sentinel_count", "count", "packed", "collapsed"):
+        if isinstance(stats.get(key), int):
+            return stats[key]
+    if "residue_frac" in stats and "values" in stats:
+        return round(stats["residue_frac"] * stats["values"])
+    return None
+
+
+def _per_column(fixes: list) -> list[str]:
+    """R7: the scannable answer to 'what changed in MY columns'. Only fixes
+    that verified moved anything; failed and skipped stay out."""
+    moved: dict[str, list[str]] = {}
+    for rec in fixes:
+        if rec["status"] != "fixed":
+            continue
+        finding = rec["finding"]
+        cells = _moved_cells(finding.get("stats", {}))
+        note = f"d{finding['disease']:02d} {finding['slug']}" + (
+            f" ({cells} cells)" if cells else ""
+        )
+        for col in finding.get("columns") or ["(whole table)"]:
+            moved.setdefault(col, []).append(note)
+    return [f"- `{col}`: " + " · ".join(notes) for col, notes in sorted(moved.items())]
