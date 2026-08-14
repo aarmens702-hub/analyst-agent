@@ -809,3 +809,39 @@ def test_d03_treats_a_naive_and_zoned_mix_as_two_formats() -> None:
     found = detect_one(pd.DataFrame({"t": values}), 3, ["t"])
     assert found is not None
     assert "2 date formats" in found["evidence"], found["evidence"]
+
+
+NON_UNIQUE_INDEXES = {
+    "one-label": lambda n: pd.Index([0] * n),
+    "low-cardinality": lambda n: pd.Index([i % 4 for i in range(n)]),
+    "string-key": lambda n: pd.Index(["USD", "EUR"] * (n // 2)),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(NON_UNIQUE_INDEXES))
+def test_findings_do_not_depend_on_the_frames_index(shape) -> None:
+    """set_index() on a low-cardinality column — currency, category, a date
+    bucket — is the standard first move on a transaction table. Label-aligned
+    boolean masks then pay a non-unique lookup per row and detection goes
+    quadratic: measured >90s on 2,000 rows sharing one label, and nothing
+    catches a hang the way detect_all's per-detector except catches a crash.
+    The invariant: same data, same findings, comparable time, any index."""
+    from time import perf_counter
+
+    # 2,000 is calibrated, not arbitrary: at n=1,000 the low-cardinality shape
+    # sits inside the 5s bound even unfixed (multiplicity 250 is not deep
+    # enough into the quadratic), so the test would pass while the bug lives.
+    n = 2000
+    data = {
+        "material": ["Steel", "steel", "STEEL", "Alum", "alum"] * (n // 5),
+        "price": [f"${v}.00" for v in range(n)],
+    }
+    baseline = detect_all(pd.DataFrame(data), "txn")
+    assert 1 in _diseases(baseline) and 7 in _diseases(baseline)
+
+    started = perf_counter()
+    result = detect_all(pd.DataFrame(data, index=NON_UNIQUE_INDEXES[shape](n)), "txn")
+    elapsed = perf_counter() - started
+
+    assert result == baseline
+    assert elapsed < 5, f"{elapsed:.1f}s at {n:,} rows — label alignment is quadratic"

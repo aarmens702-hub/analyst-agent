@@ -1451,6 +1451,22 @@ def _d22(df, cols) -> list:
 # --- public API -------------------------------------------------------------
 
 
+def _flat(df):
+    """The same frame on a positional index when labels repeat.
+
+    Detectors filter with label-aligned boolean masks; on a non-unique index
+    pandas pays a non-unique lookup per row and detection goes quadratic —
+    14s at 2,000 rows sharing four labels, never returning at 100k. And
+    set_index() on a low-cardinality column is the standard first move on a
+    transaction table, so this is an entry-point concern, not a caller bug.
+    Shallow copy: the blocks are shared, only the axis is replaced."""
+    if df.index.is_unique:
+        return df
+    flat = df.copy(deep=False)
+    flat.index = pd.RangeIndex(len(flat))
+    return flat
+
+
 def detect_all(df, name: str = "df") -> dict:
     """Run every single-frame signal. Returns findings plus the ids that ran
     and found nothing — absence is a checked claim, not a silence (R1) — plus
@@ -1459,6 +1475,7 @@ def detect_all(df, name: str = "df") -> dict:
     make a systematically broken signal invisible forever."""
     if df is None or len(df) == 0 or df.shape[1] == 0:
         return {"findings": [], "clear": list(SINGLE_FRAME), "broken": {}}
+    df = _flat(df)
     findings, broke, broken = [], set(), {}
     try:
         for disease in SINGLE_FRAME:
@@ -1488,6 +1505,7 @@ def detect_one(df, disease: int, columns) -> dict | None:
         )
     if df is None or len(df) == 0 or df.shape[1] == 0:
         return None
+    df = _flat(df)
     wanted = [str(c) for c in (columns or [])]
     scoped = _indices(df, columns) or None
     # No except here, deliberately. This is verification layer 1 — verify.py

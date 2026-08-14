@@ -100,6 +100,14 @@ handled fine; neither half reproduces at HEAD. A hang is worse than a crash
 here: `detect_all`'s per-detector `except` catches a crash and reports it in
 `broken`, and nothing catches a hang.
 
+**Fixed 2026-08-13.** `detect_all` and `detect_one` re-index a shallow copy
+when labels repeat (`_flat`), covering all nine mask sites at the two entry
+points that dispatch detectors; `detect_family` reads only columns and dtypes
+and needs nothing. The invariant test parameterises over the non-unique index
+shapes a transaction workflow produces and holds findings equal to the
+RangeIndex baseline inside a 5s bound — red at 14.0s before the fix,
+milliseconds after.
+
 ---
 
 ## B. Review findings still open (13)
