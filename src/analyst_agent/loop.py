@@ -50,17 +50,12 @@ EXEC_RE = re.compile(r"<execute>(.*?)</execute>", re.DOTALL)
 ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 
 LOAD_TEMPLATE = """\
-import pandas as pd
+from analyst_agent.diagnose import load as _load_file
 from analyst_agent.profile import profile_df
-try:
-    {name} = pd.read_csv({path!r}, encoding="utf-8-sig")
-except UnicodeDecodeError:
-    # a real Windows export (HM Treasury spend files carry a literal £ at
-    # byte 0xA3) must load, and the switch must be said out loud — the same
-    # contract as diagnose.load
-    {name} = pd.read_csv({path!r}, encoding="cp1252")
-    {name}.attrs["encoding"] = "cp1252"
-    print("warning: not utf-8, read as cp1252 — check accented text survived")
+{name} = _load_file({path!r})
+_enc = {name}.attrs.get("encoding")
+if _enc not in (None, "utf-8-sig"):
+    print("warning: not utf-8, read as " + _enc + " — check accented text survived")
 print(profile_df({name}, {name!r}))
 """
 

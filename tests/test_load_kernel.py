@@ -32,3 +32,34 @@ def test_a_windows_encoded_export_loads_into_the_kernel(tmp_path) -> None:
         )
     finally:
         session.close()
+
+
+def test_the_agent_loads_with_the_same_policy_diagnose_does(tmp_path) -> None:
+    """LOAD_TEMPLATE was a second, weaker copy of the loader: no delimiter
+    sniff (a semicolon CSV became one column) and pandas' default NA handling
+    (read_csv coerced 'N/A' to NaN at load time, silently repairing d04's
+    evidence before diagnosis ever ran — so diagnose and a live /clean of the
+    same file disagreed about sentinel counts). One loader, one policy: the
+    kernel cell now calls diagnose.load."""
+    csv = tmp_path / "eu.csv"
+    csv.write_text("region;amount\nnorth;12\nsouth;N/A\neast;9\nwest;N/A\n")
+
+    session = Session(
+        workspace=tmp_path / "ws",
+        data_dir=tmp_path,
+        transport_argv=SUBPROCESS_ARGV,
+        skills_dir=tmp_path / "skills",
+    )
+    try:
+        session.load(str(csv), "eu")
+        result = None
+        for ev in session.client.execute(
+            "assert eu.shape[1] == 2, f'sniff failed: {list(eu.columns)}'\n"
+            "assert (eu['amount'] == 'N/A').sum() == 2, 'N/A must survive load'\n"
+            "'ok'",
+            timeout_s=60,
+        ):
+            result = ev
+        assert result.status == "ok", result.error
+    finally:
+        session.close()

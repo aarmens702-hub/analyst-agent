@@ -370,6 +370,16 @@ _WS_EXOTIC = {c for c in _WS_DAMAGE if c != 0x20}
 # one vectorised pass instead of a per-character Python loop: the loop was
 # measured 23-89x slower and re-ran inside every d06 verify cell
 _WS_EXOTIC_RE = re.compile("[" + "".join(map(chr, sorted(_WS_EXOTIC))) + "]")
+# every signature _ws_tidy would repair, in one compiled pass: leading or
+# trailing whitespace, an internal run of two-plus, any whitespace that is not
+# a plain space (NBSP and friends are \s), and the zero-widths (which are not).
+# This is the full-column confirmation behind a probe-negative — ~21ms per
+# 300k rows — so a sampled silence never becomes a CLEAR claim.
+_WS_ANY_DAMAGE_RE = re.compile(
+    r"^\s|\s$|\s{2,}|[^\S ]|["
+    + "".join(re.escape(chr(c)) for c in sorted(_ZERO_WIDTH_NOISE))
+    + "]"
+)
 
 
 def _ws_tidy(values):
@@ -756,7 +766,9 @@ def _d06(df, cols) -> list:
         if values is None or len(values) < 5:
             continue
         probe = _probe(values)
-        if not bool((probe != _ws_tidy(probe)).any()):
+        if not bool((probe != _ws_tidy(probe)).any()) and not bool(
+            values.str.contains(_WS_ANY_DAMAGE_RE).any()
+        ):
             continue
         cleaned = _ws_tidy(values)
         dirty = values[values != cleaned]
@@ -1322,6 +1334,21 @@ def _pack_kind(values):
     return None, 0.0
 
 
+_PACK_DELIMITERS = {"comma": ",", "pipe": "|", "semicolon": ";"}
+
+
+def _pack_count(values, kind: str) -> int:
+    """The full-column count behind the claim _pack_kind sampled. The kind is
+    decided on a probe for speed; the number in the evidence is measured where
+    it is asserted — one vectorised pass either way."""
+    if kind == "latlon_pair":
+        return int(values.str.match(LATLON_PAIR).sum())
+    if kind == "json":
+        return int(values.str.match(JSON_ISH).sum())
+    delimiter = _PACK_DELIMITERS[kind.removesuffix("_list")]
+    return int((values.str.count(re.escape(delimiter)) >= 1).sum())
+
+
 def _sibling_groups(df, targets):
     groups: dict = {}
     for i in targets:
@@ -1344,13 +1371,14 @@ def _d17(df, cols) -> list:
         kind, confidence = _pack_kind(values)
         if kind is None:
             continue
+        packed = _pack_count(values, kind)
         out.append(
             _finding(
                 17,
                 [_name(df, i)],
-                f"{len(values)} values pack several fields into one cell ({kind}); "
-                f"samples: {_samples(values)}",
-                {"kind": kind, "values": len(values)},
+                f"{packed}/{len(values)} values pack several fields into one "
+                f"cell ({kind}); samples: {_samples(values)}",
+                {"kind": kind, "values": len(values), "packed": packed},
                 "AUTO",
                 confidence,
             )

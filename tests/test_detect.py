@@ -848,6 +848,38 @@ def test_evidence_stays_one_line_for_every_line_breaker() -> None:
         assert "before" in finding["evidence"] and "after" in finding["evidence"]
 
 
+def test_d06_damage_between_probe_strides_is_still_found() -> None:
+    """_probe consults every k-th row, and the gate turned its silence into
+    "checked and clean" — a probabilistic CLEAR whose odds depended on where
+    the damage happened to sit. The probe may fast-path the common case, but
+    it never gets to decide the claim: a probe-negative is confirmed on the
+    full column (one compiled-regex pass, ~21ms per 300k rows) before d06 is
+    allowed into the clear list."""
+    values = ["Professional Services"] * 12_000
+    values[1] = "Professional  Services"  # doubled space, off every stride
+
+    found = detect_one(pd.DataFrame({"desc": values}), 6, ["desc"])
+
+    assert found is not None, "sampled silence became a false clear"
+    assert "1/12000" in found["evidence"] or "1/12,000" in found["evidence"], found[
+        "evidence"
+    ]
+
+
+def test_d17_counts_are_measured_where_they_are_claimed() -> None:
+    """_pack_kind decides the kind on a probe, and the evidence then asserted
+    that every value packs ("19992 values pack ...") — a full-column claim
+    from sampled evidence. The count in the evidence must be the measured
+    full-column count, with the denominator beside it."""
+    values = [f"a|b|c{i}" for i in range(85)] + [f"plain {i}" for i in range(15)]
+
+    found = detect_one(pd.DataFrame({"tags": values}), 17, ["tags"])
+
+    assert found is not None
+    assert "85/100" in found["evidence"], found["evidence"]
+    assert found["stats"]["packed"] == 85
+
+
 def test_the_unicode_space_table_matches_the_unicode_database() -> None:
     """_UNICODE_SPACES is a literal so importing detect stops scanning all
     1,114,112 codepoints — ~60ms on every kernel start and crash replay. A

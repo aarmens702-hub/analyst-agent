@@ -287,7 +287,11 @@ def test_load_records_lineage_profile_and_replay(session, tmp_path):
     ds = session.datasets[0]
     assert ds["variable"] == "tiny"
     assert ds["sha256"] == hashlib.sha256(csv.read_bytes()).hexdigest()
-    assert session.loads and "read_csv" in session.loads[0][1]
+    # the replay record must reload THIS file into THIS variable; how it reads
+    # it is the loader's business (the cell delegates to diagnose.load, so the
+    # sniff/NA/encoding policy cannot drift from the free report's)
+    assert session.loads and str(csv) in session.loads[0][1]
+    assert "tiny = " in session.loads[0][1]
     assert any("2 rows × 2 cols" in str(m["content"]) for m in session.history)
     assert session.origins["tiny"] == ds["loaded_event"]
 

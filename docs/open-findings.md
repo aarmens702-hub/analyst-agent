@@ -238,16 +238,25 @@ cover, not the one path that broke.**
 
 ---
 
-## D. Two decisions still owed
+## D. Decisions — all resolved 2026-08-14
 
-- **CLAUDE.md line 7** reserves the agent loop — *"propose diffs and explain
-  tradeoffs — do not rewrite unasked"* — and `specs/2026-08-13-p5-...md:65`,
-  added in the same diff, restates it naming the exact function. The diff then
-  restructured `loop.py` around it: `clean` split four ways, `clean_family`
-  three, a new `KernelLost` type, a new `_exec_events` parameter. Every
-  judgement call — catch-per-entry-point, `tolerate_death`, the fifth status,
-  the `persisted` key, where the `try` boundary sits — was made rather than
-  proposed. Keep, or redo as a proposal before more lands on top?
-- **Two `_probe` calls** need a ruling: `_d06`'s sampled presence gate (a
-  probabilistic false CLEAR) and `_d17`'s sample-scaled counts (reports 3,231
-  where the true count is 42,000).
+- **CLAUDE.md line 7 / the `loop.py` restructure** — resolved by direction:
+  Aarmen has repeatedly instructed "fix" against the restructured shape and
+  set a goal to finish all fixes on top of it, so the restructure stands. The
+  contract's default (propose diffs for the core) resumes for future work.
+- **The two `_probe` rulings** — made and implemented: the probe is a
+  fast-path, never the claim. `_d06` confirms a probe-negative on the full
+  column with one compiled-regex pass (~21ms per 300k rows) before the
+  disease may land in `clear`; `_d17` decides the *kind* on the probe but
+  measures the count where it is asserted, and the evidence now carries the
+  denominator ("85/100 values pack ...").
+- **The loader NA policy** — resolved by unification: `LOAD_TEMPLATE`
+  delegates to `diagnose.load` inside the kernel, so the sniff, the NA
+  policy, and the encoding fallback are one implementation and cannot drift.
+  The agent now sees the same `N/A` tokens the free report sees.
+- **Gate-preview scratch copy** — ruled: sampled, never the full frame
+  (CLAUDE.md's preview discipline). Implementation belongs to P5 R2's gate
+  wiring.
+
+**Status: every finding in this file is fixed or resolved. 322 tests passing.
+The file stays as the record; new findings start a new one.**
