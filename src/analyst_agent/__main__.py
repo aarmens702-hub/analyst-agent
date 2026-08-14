@@ -50,8 +50,10 @@ def main() -> int:
             return 1
         return 0
 
-    if not os.environ.get("DEEPSEEK_API_KEY"):
-        print("DEEPSEEK_API_KEY is not set — put it in .env or export it.")
+    provider = os.environ.get("ANALYST_PROVIDER", "deepseek")
+    key = "ANTHROPIC_API_KEY" if provider == "claude" else "DEEPSEEK_API_KEY"
+    if not os.environ.get(key):
+        print(f"{key} is not set — put it in .env or export it.")
         return 1
 
     try:

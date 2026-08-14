@@ -48,6 +48,21 @@ def test_the_cli_runs_without_an_api_key(tmp_path, monkeypatch, capsys) -> None:
     assert "numbers-as-strings" in capsys.readouterr().out
 
 
+def test_the_key_gate_matches_the_provider(monkeypatch, capsys) -> None:
+    """R10 follow-through: with ANALYST_PROVIDER=claude, holding a DeepSeek
+    key must not satisfy the gate, and the message must name the key the
+    session would actually use."""
+    monkeypatch.setenv("ANALYST_PROVIDER", "claude")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "not-the-right-provider")
+    monkeypatch.setattr("sys.argv", ["analyst-agent"])
+
+    from analyst_agent.__main__ import main
+
+    assert main() == 1
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().out
+
+
 def test_a_windows_encoded_export_still_gets_a_report(tmp_path) -> None:
     """HM Treasury's real March 2026 spend CSV carries a literal £ sign in
     Windows-1252; utf-8 dies at byte 0xa3 before a single detector runs — an
