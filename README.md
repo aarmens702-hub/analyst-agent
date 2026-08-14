@@ -32,10 +32,12 @@ sends a steering note back, `[s]kip` (clean mode) leaves a finding unfixed.
 `--auto-run` skips gates for development. `--docker` runs the kernel inside a
 no-network container instead of a subprocess.
 
-There is also a browser UI over the same session:
+For orchestration — other agents, scripts, CI — there is a headless one-shot
+mode with an approval policy safe for unattended use (only AUTO-grade fixes
+run; anything needing judgement is reported, not decided):
 
 ```bash
-uv run streamlit run src/analyst_agent/app.py
+uv run python -m analyst_agent clean data/messy.csv --json
 ```
 
 ## How it works

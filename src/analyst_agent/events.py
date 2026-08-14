@@ -25,6 +25,10 @@ class GateRequest:
     # R3: the rendered consequence of running this cell on a sampled scratch
     # copy — empty when previews are off or the preview itself failed loudly
     preview: str = ""
+    # the finding's grade (AUTO/GATE/HUMAN), so a headless driver can apply
+    # the human's pre-authorisation instead of deciding on their behalf;
+    # empty for QUERY gates, "HUMAN" for skill admissions
+    grade: str = ""
 
 
 @dataclass(frozen=True)

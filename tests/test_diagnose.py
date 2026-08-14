@@ -48,6 +48,48 @@ def test_the_cli_runs_without_an_api_key(tmp_path, monkeypatch, capsys) -> None:
     assert "numbers-as-strings" in capsys.readouterr().out
 
 
+def test_the_clean_subcommand_is_headless_and_machine_readable(
+    monkeypatch, capsys
+) -> None:
+    """`analyst-agent clean <file> --json` is the orchestration surface: no
+    prompts, chatter on stderr, one JSON object on stdout. The session runs
+    with previews off (nobody reads them) and the auto policy (judgement
+    calls deferred, never decided)."""
+    import json
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        "sys.argv", ["analyst-agent", "clean", "data/messy.csv", "--json"]
+    )
+    session_kw: dict = {}
+
+    class FakeSession:
+        def __init__(self, **kw):
+            session_kw.update(kw)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("analyst_agent.loop.Session", FakeSession)
+    monkeypatch.setattr(
+        "analyst_agent.repl.run_clean_once",
+        lambda session, path, name=None, policy="auto": {
+            "file": path,
+            "policy": policy,
+            "needs_human": ["fix 2/3 · merge variants"],
+        },
+    )
+    from analyst_agent.__main__ import main
+
+    assert main() == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out.strip().splitlines()[-1])
+    assert payload["file"] == "data/messy.csv"
+    assert payload["policy"] == "auto"
+    assert session_kw.get("preview") is False
+
+
 def test_resume_flag_reaches_the_session(monkeypatch) -> None:
     """P5 R9's last mile: --resume s16 must construct the Session with
     resume='s16'. Everything past the constructor is covered by the real

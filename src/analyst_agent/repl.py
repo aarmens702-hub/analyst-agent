@@ -221,3 +221,60 @@ def _why(session, line: str, print_fn) -> None:
             (n for n in dag["nodes"] if n.endswith(wanted) or n == wanted), wanted
         )
     print_fn(provenance.to_markdown(dag, node_id))
+
+
+def policy_decision(event: GateRequest, policy: str) -> GateDecision:
+    """The human's pre-authorisation, applied by grade. An orchestrator must
+    never approve a judgement call on a person's behalf, so anything that is
+    not AUTO is skipped and reported rather than decided."""
+    if policy == "all" or event.grade == "AUTO":
+        return GateDecision("run")
+    return GateDecision("skip")
+
+
+def run_clean_once(session, path: str, name: str | None = None, policy: str = "auto"):
+    """Headless one-shot clean, for agents and scripts (no gate operator).
+
+    Loads the file, drives the clean under `policy_decision`, and returns a
+    machine-readable summary: what ran, what was deferred to a human, and
+    where the durable artifacts landed. Tolerant of SessionLike doubles, like
+    every other driver in this module.
+    """
+    session.load(path, name)
+    datasets = getattr(session, "datasets", None) or []
+    var = datasets[-1]["variable"] if datasets else name
+    if not var:
+        return {"file": path, "error": "load failed; nothing to clean"}
+
+    needs_human: list[str] = []
+    turn = session.clean(var)
+    try:
+        event = next(turn)
+        while True:
+            answer = None
+            if isinstance(event, GateRequest):
+                answer = policy_decision(event, policy)
+                if answer.action == "skip":
+                    needs_human.append(event.title or event.code.splitlines()[0])
+            event = turn.send(answer)
+    except StopIteration:
+        pass
+
+    summary = {"file": path, "variable": var, "needs_human": needs_human}
+    session_dir = getattr(session, "session_dir", None)
+    reports = sorted(session_dir.glob("clean_reports/*.json")) if session_dir else []
+    if reports:
+        report = json.loads(reports[-1].read_text())
+        summary["report"] = str(reports[-1])
+        summary["fixes"] = [
+            {
+                "disease": rec["finding"]["disease"],
+                "slug": rec["finding"]["slug"],
+                "grade": rec["finding"]["grade"],
+                "status": rec["status"],
+            }
+            for rec in report["fixes"]
+        ]
+        summary["outputs"] = report.get("outputs", {})
+        summary["skills_admitted"] = report.get("skills_admitted", [])
+    return summary

@@ -548,6 +548,26 @@ def test_a_multiline_error_prints_one_line_and_trace_recalls_it() -> None:
     assert sum("frame 29" in ln for ln in lines) == 1, "/trace shows everything, once"
 
 
+def test_headless_policy_runs_auto_grade_and_defers_judgement() -> None:
+    """Orchestration mode: another agent (or a cron job) drives a clean with
+    nobody at the gate. The policy is the human's pre-authorisation, by
+    grade — AUTO runs, GATE and HUMAN are skipped and *reported*, because an
+    orchestrator must never approve a judgement call on a person's behalf."""
+    from analyst_agent.repl import run_clean_once
+
+    gates = [
+        GateRequest("fix_a", 1, title="fix 1/3 · trailing space", grade="AUTO"),
+        GateRequest("fix_b", 1, title="fix 2/3 · merge variants", grade="GATE"),
+        GateRequest("fix_c", 1, title="fix 3/3 · pick a side", grade="HUMAN"),
+    ]
+    session = FakeSession(script=gates)
+    summary = run_clean_once(session, "data/x.csv", name="x")
+
+    assert [d.action for d in session.decisions] == ["run", "skip", "skip"]
+    assert len(summary["needs_human"]) == 2
+    assert "merge variants" in summary["needs_human"][0]
+
+
 def test_the_gate_preview_is_printed_under_the_code_box() -> None:
     """R3's last mile: the loop computes the consequence, the terminal must
     actually show it, or the operator is back to executing pandas in their

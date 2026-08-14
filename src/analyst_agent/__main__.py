@@ -39,11 +39,23 @@ def main() -> int:
         metavar="FILE",
         help="report what is wrong with a file and exit; no model, no API key",
     )
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument(
-        "--json", action="store_true", help="machine-readable diagnose output"
+        "--clean",
+        metavar="FILE",
+        help="headless one-shot clean: auto policy, judgement calls deferred",
+    )
+    parser.add_argument("--name", help="variable name for the loaded file (clean mode)")
+    parser.add_argument(
+        "--policy",
+        choices=["auto", "all"],
+        default="auto",
+        help="auto: run only AUTO-grade fixes; all: approve every gate",
     )
     if sys.argv[1:2] == ["diagnose"]:
         sys.argv = [sys.argv[0], "--diagnose", *sys.argv[2:]]
+    if sys.argv[1:2] == ["clean"]:
+        sys.argv = [sys.argv[0], "--clean", *sys.argv[2:]]
     args = parser.parse_args()
 
     if args.diagnose:
@@ -74,6 +86,40 @@ def main() -> int:
             " and src/analyst_agent/events.py (SessionLike)"
         )
         return 1
+
+    if args.clean:
+        # the orchestration surface: chatter to stderr, one JSON object (or a
+        # short text summary) to stdout, no prompts anywhere
+        import contextlib
+        import json as _json
+
+        from analyst_agent.repl import run_clean_once
+
+        with contextlib.redirect_stdout(sys.stderr):
+            session = Session(
+                workspace=args.workspace,
+                data_dir=args.data_dir,
+                docker=args.docker,
+                preview=False,  # headless: nobody reads a preview
+            )
+            try:
+                summary = run_clean_once(
+                    session, args.clean, name=args.name, policy=args.policy
+                )
+                summary["policy"] = args.policy
+            finally:
+                session.close()
+        if args.json:
+            print(_json.dumps(summary))
+        else:
+            fixes = summary.get("fixes", [])
+            done = sum(1 for f in fixes if f["status"] == "fixed")
+            print(f"{args.clean}: {done}/{len(fixes)} findings fixed")
+            for title in summary.get("needs_human", []):
+                print(f"  needs a human: {title}")
+            if summary.get("report"):
+                print(f"  report: {summary['report']}")
+        return 0 if not summary.get("error") else 1
 
     from analyst_agent.repl import run_repl
 

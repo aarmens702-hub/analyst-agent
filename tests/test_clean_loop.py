@@ -921,6 +921,32 @@ def test_a_family_slice_knows_which_file_it_came_from(session, monkeypatch):
     assert session._source_sha(var), "a slice must resolve to the file it came from"
 
 
+def test_gate_events_carry_the_finding_grade(session, monkeypatch):
+    """The headless policy driver authorises by grade, so the gate event must
+    carry it — parsing it back out of the title would be the kind of string
+    coupling that breaks silently. Admission gates are always HUMAN: skills
+    joining the library is governance, and governance is never unattended."""
+    monkeypatch.setattr(llm, "generate", gen([FIX_A, GOOD_PROPOSAL]))
+    FakeClient.script = [
+        diag([finding(grade="GATE")]),
+        baseline(),
+        [ok()],  # fix
+        [ok()],  # verify
+        case(),
+        baseline(),
+        [ok()],  # admission cell
+        [ok()],  # skill's own test
+        saved(),
+    ]
+    events = drive(session.clean("df"))
+
+    gates = [e for e in events if isinstance(e, GateRequest)]
+    fix_gates = [g for g in gates if g.title.startswith("fix")]
+    admit_gates = [g for g in gates if g.title.startswith("admit")]
+    assert fix_gates and fix_gates[0].grade == "GATE"
+    assert admit_gates and admit_gates[0].grade == "HUMAN"
+
+
 def test_a_verified_fix_is_snapshotted_before_the_next_one_runs(session, monkeypatch):
     """R8: _restart_and_replay replays only the original load cells, so every
     verified fix applied since the load died with the kernel. After each fix

@@ -1002,7 +1002,9 @@ class Session:
 
             attempts += 1
             pv = yield from self._preview(var, body)
-            decision = yield GateRequest(body, attempts, title=title, preview=pv)
+            decision = yield GateRequest(
+                body, attempts, title=title, preview=pv, grade=finding["grade"]
+            )
             if not isinstance(decision, GateDecision):
                 decision = GateDecision("run")
             evs.append(
@@ -1193,7 +1195,9 @@ class Session:
 
             if not silent:
                 pv = yield from self._preview(var, code)
-                decision = yield GateRequest(code, 1, title=title, preview=pv)
+                decision = yield GateRequest(
+                    code, 1, title=title, preview=pv, grade=finding["grade"]
+                )
                 if not isinstance(decision, GateDecision):
                     decision = GateDecision("run")
                 evs.append(
@@ -1390,6 +1394,8 @@ class Session:
                     f"reproduces the case it came from"
                 ),
                 preview=effect,
+                # admission is governance, and governance is never unattended
+                grade="HUMAN",
             )
             if not isinstance(decision, GateDecision):
                 decision = GateDecision("run")
