@@ -46,3 +46,19 @@ def test_the_cli_runs_without_an_api_key(tmp_path, monkeypatch, capsys) -> None:
 
     assert main() == 0
     assert "numbers-as-strings" in capsys.readouterr().out
+
+
+def test_a_windows_encoded_export_still_gets_a_report(tmp_path) -> None:
+    """HM Treasury's real March 2026 spend CSV carries a literal £ sign in
+    Windows-1252; utf-8 dies at byte 0xa3 before a single detector runs — an
+    encoding disease the loader itself was manufacturing into a crash. The
+    fallback must be *loud*: a silently switched encoding is the exact
+    found-nothing/didn't-check conflation this project exists to kill."""
+    path = tmp_path / "spend.csv"
+    rows = "Supplier,Amount\n" + "\n".join(f"Vendor {i},£{i}25.00" for i in range(30))
+    path.write_bytes(rows.encode("cp1252"))
+
+    report = diagnose.report(path)
+
+    assert "30 rows" in report
+    assert "cp1252" in report, "the fallback must be reported, not silent"

@@ -32,17 +32,32 @@ def load(path) -> pd.DataFrame:
     which silently repairs one of the diseases before it can be reported.
     Delimiter is sniffed, because a .csv is not always comma-separated — the
     Vancouver exports are semicolons, and guessing wrong turns thirty columns
-    into one.
+    into one. Encoding falls back utf-8 -> cp1252, because a real Windows
+    export (HM Treasury's spend files carry a literal £, byte 0xA3) otherwise
+    dies before a single detector runs — but the fallback is stamped on the
+    frame so render() can say it out loud: a silently switched encoding is a
+    claim the report never made.
     """
     path = Path(path)
     if path.suffix.lower() in {".parquet", ".pq"}:
         return pd.read_parquet(path)
-    head = path.read_text(encoding="utf-8-sig", errors="replace")[:8192]
+    sample = path.read_bytes()[:8192]
+    try:
+        # a multibyte char cut at the 8KB boundary is not evidence against
+        # utf-8; a failure anywhere earlier is
+        head, encoding = sample.decode("utf-8-sig"), "utf-8-sig"
+    except UnicodeDecodeError as exc:
+        if exc.start >= len(sample) - 3:
+            head, encoding = sample[: exc.start].decode("utf-8-sig"), "utf-8-sig"
+        else:
+            head, encoding = sample.decode("cp1252", errors="replace"), "cp1252"
     counts = {sep: head.count(sep) for sep in (",", ";", "\t", "|")}
     sep = max(counts, key=counts.get) if any(counts.values()) else ","
-    return pd.read_csv(
-        path, sep=sep, encoding="utf-8-sig", keep_default_na=False, low_memory=False
+    frame = pd.read_csv(
+        path, sep=sep, encoding=encoding, keep_default_na=False, low_memory=False
     )
+    frame.attrs["encoding"] = encoding
+    return frame
 
 
 def report(path, as_json: bool = False) -> str:
@@ -67,6 +82,16 @@ def render(path, frame: pd.DataFrame, result: dict) -> str:
     lines = [
         f"{path} — {len(frame):,} rows × {len(frame.columns)} columns",
         "",
+    ]
+    if frame.attrs.get("encoding") not in (None, "utf-8-sig"):
+        lines += [
+            (
+                f"  ⚠  not utf-8: read as {frame.attrs['encoding']} "
+                "(a Windows-era export; check accented text survived)"
+            ),
+            "",
+        ]
+    lines += [
         f"  {len(fixable)} fixable · {len(flagged)} flagged · "
         f"{len(result['clear'])} signals clear"
         + (f" · {len(broken)} could not run" if broken else ""),
