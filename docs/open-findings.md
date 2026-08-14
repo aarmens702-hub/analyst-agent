@@ -144,8 +144,8 @@ over all 7 kernel touch points.
 |---|---|
 | `detect.py:339` | The zero-width design is unenforceable. A fix turning `Bud<ZWSP>weiser` into `Bud weiser` **passes verification** — the signal stopped firing, which is all layer 1 checks. It is then frozen as a case and can be generalised into a skill that runs unattended on AUTO-grade findings. |
 | `detect.py:1487` | Removing that `except` stopped manufacturing proof but added no attribution: inside `verify_cell` a detector *crash* is indistinguishable from a *bad fix*. `library.record(success=False)` twice retires a working skill into `skills/retired/`. |
-| `loop.py:506` | `_slice_var` is not injective — `tax-2007`, `tax_2007`, `tax 2007`, `tax.2007` all collapse to `tax_tax_2007`. Wrong sha in the lineage, wrong dataset credited to the promotion rule, second slice's frame silently overwritten. |
-| `loop.py:613` | `run["cleaned"].append` is unconditional, so `family_*.json` lists slices whose report is 100% `aborted` and whose parquet was never written — and `_save_family` sums their row counts into the headline. |
+| ~~`_slice_var` not injective~~ | **Fixed 2026-08-14**: an unconditional short digest of the raw slice key keeps distinct slices distinct ("only when lossy" is itself a collision surface). Test demands four colliding spellings produce four identifiers, deterministically. |
+| ~~`run["cleaned"]` unconditional~~ | **Fixed 2026-08-14**: `clean()` returns whether it ran to completion; the family loop only counts slices that did. The honest fake this needed exposed an existing family test whose bind cells never carried the slice variable — its "cleaned" slices had always early-returned, masked by the unconditional append. |
 
 ### Recovery path — consolidated once, still incomplete
 
@@ -192,9 +192,19 @@ over all 7 kernel touch points.
   are the admission gate's to run, in-kernel, never the host suite's.
 - Skill artifacts use a `fix` name injected by the admission harness, so host
   lint rules structurally cannot apply: `skills/` joined ruff's exclude list.
-- `diff.py:116` — `_clip` truncates to 60 chars **before** `inline()` diffs, so any change past char 59 renders with no markers at all. The module's stated purpose, inverted.
-- `detect.py:1456` — `broken[...]` is the one string in the pipeline with no sanitiser and no length bound; a pandas message with an embedded newline splits a report bullet in half.
-- `detect.py:336` — 60ms full-Unicode scan at import (~92% of the module's import self-time, paid on every kernel start and every replay) to buy two codepoints already named in `ZERO_WIDTH`; and `map(lambda)` replacing vectorised `str.contains`, measured 23–89× slower, re-run inside every verify cell.
+- ~~`_clip` truncates before the diff~~ **Fixed 2026-08-14**: diff first, then
+  bound the rendering — unchanged runs squeeze to their ends, marked runs cap
+  at 60, and a change past the matcher's own 2,000-char bound is *said*
+  ("change beyond preview bound") instead of omitted. Test plants the edit at
+  character 70 and demands markers.
+- ~~`broken[...]` unsanitised~~ **Fixed 2026-08-14**: same collapse and cap as
+  `_finding`'s evidence. Test raises a multi-line, 900-char exception through a
+  detector and demands one bounded line.
+- ~~Unicode scan + `map(lambda)`~~ **Fixed 2026-08-14**: `_UNICODE_SPACES` is a
+  literal (import self-time 65ms → 2.7ms) with a parity test that recomputes
+  the Zs category from `unicodedata` — the scan moved from every kernel start
+  into the suite. The per-character lambda became one vectorised
+  `str.contains` on a character class built from the same table.
 
 ---
 

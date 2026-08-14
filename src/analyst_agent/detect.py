@@ -346,7 +346,14 @@ def _tidy(values, fold: bool = False):
 # pandas cannot close the gap: on Arrow-backed strings .str.replace uses RE2,
 # whose \s is ASCII-only, so U+202F and U+2007 — exactly what Canadian
 # government exports use for digit grouping — were neither normalised nor seen.
-_UNICODE_SPACES = {c for c in range(0x110000) if unicodedata.category(chr(c)) == "Zs"}
+# Unicode's Zs category as a literal: the comprehension this replaces scanned
+# all 1,114,112 codepoints at import — ~60ms, ~92% of this module's import
+# self-time, paid again on every kernel start and crash replay. The suite
+# recomputes the category from unicodedata and fails if a Unicode update ever
+# moves it.
+_UNICODE_SPACES = frozenset(
+    [0x0020, 0x00A0, 0x1680] + list(range(0x2000, 0x200B)) + [0x202F, 0x205F, 0x3000]
+)
 # Invisible and meaningless: delete rather than space, so repairing
 # 'Bud<ZWSP>weiser' yields 'Budweiser' and not a split word.
 _ZERO_WIDTH_NOISE = {0x200B, 0xFEFF}
@@ -360,6 +367,9 @@ _WS_DAMAGE = {c: " " for c in _UNICODE_SPACES} | {c: None for c in _ZERO_WIDTH_N
 # harmless no-op — but counting with it made every value holding an ordinary
 # space read as exotic, and the evidence said so out loud.
 _WS_EXOTIC = {c for c in _WS_DAMAGE if c != 0x20}
+# one vectorised pass instead of a per-character Python loop: the loop was
+# measured 23-89x slower and re-ran inside every d06 verify cell
+_WS_EXOTIC_RE = re.compile("[" + "".join(map(chr, sorted(_WS_EXOTIC))) + "]")
 
 
 def _ws_tidy(values):
@@ -755,7 +765,7 @@ def _d06(df, cols) -> list:
             continue
         # counted from the same table the repair uses, so the number in the
         # evidence cannot drift from what the fix would actually touch
-        exotic = int(values.map(lambda v: any(ord(c) in _WS_EXOTIC for c in v)).sum())
+        exotic = int(values.str.contains(_WS_EXOTIC_RE).sum())
         out.append(
             _finding(
                 6,
@@ -1590,7 +1600,11 @@ def detect_all(df, name: str = "df") -> dict:
                 findings.extend(REGISTRY[disease](df, None))
             except Exception as exc:  # noqa: BLE001 - one brittle signal must never sink the run
                 broke.add(disease)
-                broken[str(disease)] = f"{type(exc).__name__}: {exc}"
+                # same collapse and cap as _finding's evidence: this string is
+                # rendered raw as a report bullet, and a third-party exception
+                # carries whatever line breaks and repr lengths it likes
+                reason = EVIDENCE_LINEBREAKS.sub(" ", f"{type(exc).__name__}: {exc}")
+                broken[str(disease)] = reason[:240]
     finally:
         _VIEWS.clear()
     findings.sort(key=lambda f: (f["disease"], f["columns"]))

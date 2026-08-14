@@ -71,6 +71,21 @@ def test_a_long_repeated_value_still_marks_only_what_moved() -> None:
     assert marked < 20, f"{marked} characters marked as moved; expected a handful"
 
 
+def test_a_change_past_the_clip_boundary_still_shows_markers() -> None:
+    """_clip truncated both values to 60 chars BEFORE inline() diffed them, so
+    any change past character 59 rendered as one truncated line in which
+    nothing appears to change — no delete, no insert, no hint. A gate preview
+    of a notes field or a packed address whose edit sits in the tail told the
+    operator the fix does nothing. Diff first, then bound the rendering."""
+    before = "x" * 70 + " oz"
+    after = "x" * 70
+
+    block = diff.column_change("ounces", 2410, 2410, [(before, after)])
+
+    assert "[- oz-]" in block, block
+    assert max(len(line) for line in block.splitlines()) < 110, block
+
+
 def test_a_preview_stays_a_preview() -> None:
     """CLAUDE.md: 'Never put raw dataset rows in a prompt — schema, stats, and
     truncated samples only.' Only the sample COUNT was bounded, so a free-text

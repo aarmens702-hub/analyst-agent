@@ -77,15 +77,38 @@ def inline(before: str, after: str) -> str:
 
 
 SAMPLE_LIMIT = 3
-VALUE_CHARS = 60  # per value, matching detect._samples' truncation discipline
+VALUE_CHARS = 60  # per marked run, matching detect._samples' truncation discipline
+CONTEXT_CHARS = 24  # per unchanged run: enough to orient, not a data dump
+DIFF_BOUND = 2000  # chars of each value the matcher sees; past it, we say so
 
 
-def _clip(value) -> str:
-    """One line, bounded. A preview renders samples, never cell contents — and
-    a newline inside a value would otherwise split the sample and push the
-    trailing summary lines into the wrong place."""
-    text = " ".join(str(value).splitlines())
-    return text if len(text) <= VALUE_CHARS else text[: VALUE_CHARS - 1] + "…"
+def _render_change(before, after) -> str:
+    """One bounded line with only the moved part marked.
+
+    Diff first, THEN clip: clipping both values to 60 chars before diffing
+    rendered any change past character 59 as a line in which nothing appears
+    to change — the exact output this module exists to prevent. Unchanged runs
+    are squeezed to their ends, marked runs are capped, and a change the
+    matcher's own bound hides is said out loud rather than omitted. Newlines
+    collapse so one sample stays one line."""
+    before_line = " ".join(str(before).splitlines())
+    after_line = " ".join(str(after).splitlines())
+    parts: list[str] = []
+    marked = False
+    for op, text in word_segments(before_line[:DIFF_BOUND], after_line[:DIFF_BOUND]):
+        if op == "equal":
+            if len(text) > CONTEXT_CHARS:
+                text = text[:11] + "…" + text[-11:]
+            parts.append(text)
+            continue
+        marked = True
+        if len(text) > VALUE_CHARS:
+            text = text[: VALUE_CHARS - 1] + "…"
+        wrap = DELETE_WRAP if op == "delete" else INSERT_WRAP
+        parts.append(f"{wrap[0]}{text}{wrap[1]}")
+    if not marked and before_line != after_line:
+        parts.append(" ⋯ (change beyond preview bound)")
+    return "".join(parts)
 
 
 def column_change(
@@ -113,7 +136,7 @@ def column_change(
         # bound the work, not the distinct output: a column of 2.4M identical
         # changes must not run 2.4M matcher passes to render one line
         shown += 1
-        rendered = f"  {inline(_clip(before), _clip(after))}"
+        rendered = f"  {_render_change(before, after)}"
         if rendered not in seen:
             seen.append(rendered)
         if shown >= limit:

@@ -848,6 +848,39 @@ def test_evidence_stays_one_line_for_every_line_breaker() -> None:
         assert "before" in finding["evidence"] and "after" in finding["evidence"]
 
 
+def test_the_unicode_space_table_matches_the_unicode_database() -> None:
+    """_UNICODE_SPACES is a literal so importing detect stops scanning all
+    1,114,112 codepoints — ~60ms on every kernel start and crash replay. A
+    literal is only safe while it matches the running Python's Unicode
+    database, so this recomputation is that scan, moved from every import
+    into the suite."""
+    import unicodedata
+
+    zs = {c for c in range(0x110000) if unicodedata.category(chr(c)) == "Zs"}
+    assert detect._UNICODE_SPACES == zs
+
+
+def test_a_broken_detectors_reason_stays_one_bounded_line() -> None:
+    """`broken` was the one string in the pipeline with no sanitiser and no
+    length bound. A detector crash is an arbitrary third-party exception, and
+    pandas messages routinely embed newlines and long index reprs — rendered
+    raw as a markdown bullet, the reason split the report line in half:
+    verbatim the failure EVIDENCE_LINEBREAKS was added to stop. Same collapse,
+    same cap, for every line-breaking character an exception can carry."""
+
+    def boom(df, cols):
+        raise ValueError("cannot do it\nHint: reindex\u2028the axis\r\n" + "x" * 900)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(detect.REGISTRY, 7, boom)
+        result = detect_all(pd.DataFrame({"a": ["x"] * 9}))
+
+    reason = result["broken"]["7"]
+    assert len(reason.splitlines()) == 1, repr(reason)
+    assert "cannot do it" in reason and "Hint" in reason
+    assert len(reason) <= 300, f"{len(reason)} chars for one report bullet"
+
+
 def test_d06_exotic_count_is_the_number_of_invisible_characters() -> None:
     """Ground truth computed here, without importing detect's own tables — a
     test that recomputes a number using the code under test only proves the
