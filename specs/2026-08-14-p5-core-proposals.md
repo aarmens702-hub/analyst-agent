@@ -126,6 +126,12 @@ plumbing once the method exists.
 
 ## R12 — the remote lineage node
 
+**LANDED 2026-08-14** (AC8): kernel probe carries attrs['remote'] up,
+_stamp_registry grounds it like a load, provenance renders 'as of <fetch>
+· content sha256 <hash>'. Re-fetch to new content = second node, both kept.
+
+*(original proposal below)*
+
 `ingest.load_url` already stamps `frame.attrs["remote"]` with URI, fetch time,
 row count, content hash. The provenance side (yours): when `_stamp_registry`
 sees a new variable whose frame carries `attrs["remote"]`, the source node is
@@ -138,6 +144,13 @@ implying immutability. Re-fetch to a different hash: a new node, both kept.
 ---
 
 ## R13 — compaction
+
+**LANDED 2026-08-14** (AC9): past COMPACT_AT_CHARS the pre-tail history
+becomes one summary block via the intent check's scoped call; dataset
+profile blocks survive verbatim; a failed summary keeps the history.
+**P5 is now 13/13 — every requirement in the spec is landed and tested.**
+
+*(original proposal below)*
 
 As specced: `self.history` past a threshold → keep the last N turns verbatim,
 summarise older turns into one structured block via

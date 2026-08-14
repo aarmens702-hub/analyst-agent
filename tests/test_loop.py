@@ -453,3 +453,46 @@ def test_a_remote_frame_becomes_a_lineage_entry_when_it_appears(session):
 
     session._stamp_registry([refetched], 11)
     assert len([d for d in session.datasets if d["variable"] == "feed"]) == 2
+
+
+def test_a_long_session_compacts_instead_of_dying(session, monkeypatch):
+    """P5 R13/AC9: one oversized history made every later turn in the session
+    fail identically until the process was killed. Past the threshold, older
+    turns are summarised into one block by the same scoped-generation
+    primitive the intent check uses; the dataset profile blocks survive
+    verbatim, the recent tail stays, and the session keeps answering."""
+    monkeypatch.setattr("analyst_agent.loop.COMPACT_AT_CHARS", 2_000)
+    profile = "<dataset variable='df'>\ncols: a, b\n</dataset>"
+    session.history.append({"role": "user", "content": profile})
+    for i in range(30):
+        session.history.append(
+            {"role": "user", "content": f"question {i} " + "x" * 120}
+        )
+        session.history.append(
+            {"role": "assistant", "content": f"answer {i} " + "y" * 120}
+        )
+    monkeypatch.setattr(
+        llm,
+        "generate",
+        scripted_generate(
+            [
+                "thirty earlier turns: questions about x, answers in y",
+                "<answer>still working</answer>",
+            ]
+        ),
+    )
+
+    events = drive(session.run_turn("are you alive?"))
+
+    assert card_from(events).answer == "still working"
+    total = sum(len(str(m["content"])) for m in session.history)
+    assert total < 4_000, f"history did not shrink: {total} chars"
+    assert any(m["content"] == profile for m in session.history), (
+        "the dataset profile must survive compaction verbatim"
+    )
+    assert any("thirty earlier turns" in str(m["content"]) for m in session.history), (
+        "the summary block must replace what was dropped"
+    )
+    assert any("question 29" in str(m["content"]) for m in session.history), (
+        "the recent tail stays verbatim"
+    )

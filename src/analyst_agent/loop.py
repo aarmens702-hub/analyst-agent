@@ -39,6 +39,11 @@ SKILL_ATTEMPT_CAP = 3
 EXEC_TIMEOUT_S = 120
 OBS_CLIP = 2000
 VALUE_PREVIEW = 300
+# R13: only QUERY turns accumulate (clean builds throwaway per-finding lists),
+# and one oversized history used to fail every later turn until the process
+# was killed. Past the threshold, everything but the tail is summarised.
+COMPACT_AT_CHARS = 60_000
+COMPACT_KEEP_TURNS = 8  # trailing messages kept verbatim
 
 
 class KernelLost(RuntimeError):
@@ -209,9 +214,59 @@ class Session:
         print(profile)
         print(f"loaded {src} → {name} (ev {ev_id})")
 
+    def _compact_history(self):
+        """R13: keep the session answerable forever. Dataset profile blocks
+        are protected verbatim — the model's view of the data is not
+        negotiable — the recent tail stays as-is, and everything older
+        becomes one summary block written by the same scoped call the intent
+        check uses. A failed summarisation keeps the history: better a slow
+        session than a lobotomised one."""
+        total = sum(len(str(m.get("content", ""))) for m in self.history)
+        if total < COMPACT_AT_CHARS:
+            return
+        protected: list[dict] = []
+        rest: list[dict] = []
+        for message in self.history:
+            content = str(message.get("content", "")).lstrip()
+            (protected if content.startswith("<dataset ") else rest).append(message)
+        if len(rest) <= COMPACT_KEEP_TURNS:
+            return
+        old, recent = rest[:-COMPACT_KEEP_TURNS], rest[-COMPACT_KEEP_TURNS:]
+        digest = "\n\n".join(
+            f"[{m.get('role', '?')}] {str(m.get('content', ''))[:1500]}" for m in old
+        )
+        try:
+            summary = yield from self._generate_scoped(
+                [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Summarise the earlier conversation below into one "
+                            "compact block for your own future reference: the "
+                            "questions asked, the answers given with their key "
+                            "numbers, and any decisions made. No preamble.\n\n" + digest
+                        ),
+                    }
+                ],
+                stream=False,
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed summary must not kill the turn
+            yield Notice("compaction", f"skipped ({type(exc).__name__}: {exc})")
+            return
+        block = {
+            "role": "user",
+            "content": f"<history-summary>\n{summary.strip()}\n</history-summary>",
+        }
+        self.history = protected + [block] + recent
+        yield Notice(
+            "compaction",
+            f"history compacted: {len(old)} messages became one summary block",
+        )
+
     def run_turn(self, question: str):
         q_ev = self.transcript.append("user", text=question)
         self.history.append({"role": "user", "content": question})
+        yield from self._compact_history()
         cells: list[dict] = []
         exec_evs: list[int] = []
         flags = {
