@@ -1,0 +1,166 @@
+# Open findings — 2026-08-13
+
+Two sources, kept in one list because they interact: a max-effort review of
+`origin/main...HEAD` (15 findings, 10 finder angles plus a gap sweep), and a
+run of `diagnose` against a synthetic transaction file (`scripts/make_transactions.py`).
+
+Every item here was reproduced by running it. **The suite was green for all of
+them** — 276 passing, 0 failing. That is the finding behind the findings.
+
+---
+
+## A. The detection engine reports its hardest cases as clean
+
+Found by pointing `diagnose` at a transaction file. This is the one that
+decides whether the finance demo is worth showing.
+
+### A1 — the homogeneity gate runs backwards *(design work, not a patch)*
+
+`_d01` requires ≥90% of values to match one money pattern before it will look.
+So a column gets **quieter as it gets more damaged**:
+
+```
+  0/600 values in a 2nd money format -> d01 fires
+ 60/600                              -> d01 fires
+120/600                              -> d01 SILENT
+240/600                              -> d01 SILENT
+```
+
+On the transaction file, `balance` (uniformly `$X,XXX.XX`, the easy case) fires
+at `match_frac=1.00`. `amount` — the same disease five ways over, `$1,281.08` /
+`2,447.35` / `-27,29` / `USD -174.89` / `1681.74` — sits at `0.555` and is
+silent. It is reported in `clear`.
+
+Worse on dates: `_date_scan` gates on ≥90% family coverage and **both d02 and
+d03 sit behind it**, so d03 — whose entire subject is *multiple date formats in
+one column* — is switched off by the column having multiple date formats.
+
+```
+posted_at families: {'iso': 0.25, 'slash': 0.25}   covered=0.50  (needs 0.90)
+-> d02 AND d03 both skipped, and 2-3 appears in "checked and clean"
+```
+
+11 detectors share the threshold shape. The fix is not a threshold tweak:
+heterogeneity has to *raise* the signal rather than suppress it, which means
+splitting "is this column of kind K" from "does this column agree with itself".
+
+This is the project's own stated line — *"absence is a checked claim here, not
+a silence"* — failing on the case that matters most.
+
+### A2 — ISO 8601 is not in `DATE_FAMILIES` *(cheap)*
+
+```
+2024-01-10 14:30:00          -> ['iso']
+2024-04-13T14:33:00Z         -> NO FAMILY CLAIMS IT
+2024-04-13T14:33:00+00:00    -> NO FAMILY CLAIMS IT
+2024-04-13T14:33:00.123Z     -> NO FAMILY CLAIMS IT
+1712000020                   -> NO FAMILY CLAIMS IT
+```
+
+The `T`/`Z` form is the machine timestamp format in transaction feeds. Missing
+pattern, not a threshold — and it is half of why the date scan fell below 0.90
+above, so it partly relieves A1 for free.
+
+### A3 — duplicate index → quadratic hang *(cheap, high value)*
+
+```
+n=2000 rows, varying distinct index labels
+  2000 distinct (multiplicity    1) ->   0.023s
+   100 distinct (multiplicity   20) ->   0.018s
+    10 distinct (multiplicity  200) ->   0.876s
+     4 distinct (multiplicity  500) ->  13.745s
+     1 distinct (multiplicity 2000) ->  >90s, never returned
+```
+
+Hot spot is `check_bool_indexer` → `get_indexer_non_unique`: every `values[mask]`
+is a **label-aligned** boolean mask, so pandas does a non-unique lookup per row.
+9 sites in `detect.py`. Normalising the index once at the entry point fixes all
+of them:
+
+```
+duplicate index      :  13.804s
+same data, RangeIndex:   0.004s   -> 3,676x faster
+```
+
+Trigger is `set_index()` on a low-cardinality column — `currency`, `category`,
+`account_type`, a date bucket. Standard first move on a transaction table.
+
+**Pre-existing, not a regression** — `origin/main` takes 15.8s on the same
+frame. The review reported this as a `ValueError` crash that `origin/main`
+handled fine; neither half reproduces at HEAD. A hang is worse than a crash
+here: `detect_all`'s per-detector `except` catches a crash and reports it in
+`broken`, and nothing catches a hang.
+
+---
+
+## B. Review findings still open (13)
+
+Two of the review's 15 are fixed — `loop.py:410` (inner `except KernelLost`
+swallowed the exception so `_recover` never fired) and `loop.py:391` (the `try`
+started one line too late, so a death at diagnosis wrote no report). Both were
+the two halves of one bug, consolidated in `6cd99f4` behind a test parameterised
+over all 7 kernel touch points.
+
+### Data integrity
+
+| Where | What |
+|---|---|
+| `detect.py:339` | The zero-width design is unenforceable. A fix turning `Bud<ZWSP>weiser` into `Bud weiser` **passes verification** — the signal stopped firing, which is all layer 1 checks. It is then frozen as a case and can be generalised into a skill that runs unattended on AUTO-grade findings. |
+| `detect.py:1487` | Removing that `except` stopped manufacturing proof but added no attribution: inside `verify_cell` a detector *crash* is indistinguishable from a *bad fix*. `library.record(success=False)` twice retires a working skill into `skills/retired/`. |
+| `loop.py:506` | `_slice_var` is not injective — `tax-2007`, `tax_2007`, `tax 2007`, `tax.2007` all collapse to `tax_tax_2007`. Wrong sha in the lineage, wrong dataset credited to the promotion rule, second slice's frame silently overwritten. |
+| `loop.py:613` | `run["cleaned"].append` is unconditional, so `family_*.json` lists slices whose report is 100% `aborted` and whose parquet was never written — and `_save_family` sums their row counts into the headline. |
+
+### Recovery path — consolidated once, still incomplete
+
+- `_restart_and_replay` (`loop.py:1500`) never calls `_stamp_registry`, so after a recover the next `/clean df` says *"unknown variable 'df' — /load it first"* forever. **This got worse from the consolidation**: `_recover()` now runs on every death path instead of one, so the dead-registry state is reachable everywhere. Fix these two together, not in isolation.
+- `loop.py:413` — the in-flight finding is backfilled as `aborted (0 attempts)` even when its gate-approved fix cell already mutated the frame; on a *timeout* `verify.revert_cell` never runs, so the kernel keeps an unverified mutation the report denies exists.
+- `loop.py:406` — `admitted` is discarded on death, so a human-approved skill can exist on disk and be invisible to `candidates()` permanently (`library.save()` never runs).
+- `loop.py:570` — `yield from` inside a generator's `finally` raises `RuntimeError: generator ignored GeneratorExit` on Ctrl-C at a gate prompt.
+
+### Operator-facing
+
+- `repl.py:56` — the blanket `except Exception` sits **outside** the `while`, so one failed turn ends the session and `__main__.main()` still returns 0. Its test passes either way: the scripted `/quit` is never consumed.
+- `diff.py:116` — `_clip` truncates to 60 chars **before** `inline()` diffs, so any change past char 59 renders with no markers at all. The module's stated purpose, inverted.
+- `detect.py:1456` — `broken[...]` is the one string in the pipeline with no sanitiser and no length bound; a pandas message with an embedded newline splits a report bullet in half.
+- `detect.py:336` — 60ms full-Unicode scan at import (~92% of the module's import self-time, paid on every kernel start and every replay) to buy two codepoints already named in `ZERO_WIDTH`; and `map(lambda)` replacing vectorised `str.contains`, measured 23–89× slower, re-run inside every verify cell.
+
+---
+
+## C. The pattern worth naming
+
+Roughly a third of the review's list is damage from the *previous* round of
+fixes. The mechanism, from the earlier retrospective:
+
+> **Silence is spelled the same as success.** Every defect is a thing that did
+> not happen being recorded as a thing that happened cleanly. The architecture
+> prevents this for the *dataset* — `clear` is a checked claim — while every
+> internal seam encodes "found nothing" and "did not check" identically.
+
+A1 is that same defect, now inside the detection engine's own thresholds rather
+than in the plumbing.
+
+The contributing cause is where tests point. A test written against the
+*reproduction* ("a death in the fix loop writes a report") passes forever while
+five sibling paths stay broken. A test written against the *invariant* ("a
+death at **any** kernel touch point tells the operator, writes a report, and
+restarts"), parameterised over all seven, failed 7/7 on first run — including
+both paths that already had green tests.
+
+**Rule going forward: parameterise over every path the invariant claims to
+cover, not the one path that broke.**
+
+---
+
+## D. Two decisions still owed
+
+- **CLAUDE.md line 7** reserves the agent loop — *"propose diffs and explain
+  tradeoffs — do not rewrite unasked"* — and `specs/2026-08-13-p5-...md:65`,
+  added in the same diff, restates it naming the exact function. The diff then
+  restructured `loop.py` around it: `clean` split four ways, `clean_family`
+  three, a new `KernelLost` type, a new `_exec_events` parameter. Every
+  judgement call — catch-per-entry-point, `tolerate_death`, the fifth status,
+  the `persisted` key, where the `try` boundary sits — was made rather than
+  proposed. Keep, or redo as a proposal before more lands on top?
+- **Two `_probe` calls** need a ruling: `_d06`'s sampled presence gate (a
+  probabilistic false CLEAR) and `_d17`'s sample-scaled counts (reports 3,231
+  where the true count is 42,000).
