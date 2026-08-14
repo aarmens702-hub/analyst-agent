@@ -68,6 +68,13 @@ Skippable under `--auto-run` since nobody reads it.
 
 ## R8 wiring — two call sites
 
+**LANDED 2026-08-14.** Per-fix snapshots (the AC5 version), death-tolerant,
+with scripted suites opting out via `snapshots=False`. AC5 green against the
+real kernel: a SIGKILL after a verified fix on a frame that was never
+file-loaded, restored whole from the snapshot alone.
+
+*(original proposal below)*
+
 The snapshot routine is shipped (`snapshot.py`, tested). Wiring:
 
 ```python
@@ -97,6 +104,13 @@ loses at most the tail fixes.
 ---
 
 ## R9 — resume
+
+**LANDED 2026-08-14.** `Session(resume=...)` / `--resume s16`; load events
+now carry path/sha/variable so the transcript alone rebuilds the session;
+profiles lead the rebuilt history; numbering continues from disk. AC6 green
+against the real kernel. QUERY observations deliberately not reconstructed.
+
+*(original proposal below)*
 
 `Session.resume(session_id)` as the spec wrote it: rebuild `history`,
 `datasets`, `loads` from `transcript.jsonl` (Transcript already reopens and
