@@ -23,3 +23,6 @@ workspace/
 # each run into a diff of incrementing counters.
 skills/ledger.json
 skills/retired/
+
+# the Loop application is personal, not repo content
+takehome/
