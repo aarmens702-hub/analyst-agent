@@ -174,6 +174,17 @@ over all 7 kernel touch points.
   requires the turn *after* a failure to actually run — the old test's scripted
   `/quit` was never consumed, so it passed either way.
 
+### Noticed during the loader fix, not yet addressed
+
+- `LOAD_TEMPLATE` reads with pandas' default NA handling, while
+  `diagnose.load` deliberately sets `keep_default_na=False` — so in agent
+  mode, `read_csv` coerces `N/A`/`NA` to NaN at load time and silently repairs
+  part of d04's evidence before diagnosis ever runs. The free `diagnose`
+  report and a live `/clean` of the same file can legitimately disagree about
+  sentinel counts. Fixing it means deciding dtype policy for QUERY mode
+  (keep_default_na=False strings every column that carries one token), so it
+  is a design call, not a patch.
+
 ### Found by the live run (2026-08-14, both fixed by config)
 
 - Admitted skills each ship `scripts/test_fix.py`; two same-basename files
