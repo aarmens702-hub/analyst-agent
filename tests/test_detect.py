@@ -778,3 +778,34 @@ def test_d06_exotic_count_is_the_number_of_invisible_characters() -> None:
 
     assert f["stats"]["exotic"] == invisible == 5
     assert "5 with NBSP" in f["evidence"], f["evidence"]
+
+
+MACHINE_STAMPS = {
+    "zulu": "2024-04-{day:02d}T14:33:00Z",
+    "numeric-offset": "2024-04-{day:02d}T14:33:00+00:00",
+    "fractional-zoned": "2024-04-{day:02d}T14:33:00.123Z",
+    "fractional-naive": "2024-04-{day:02d}T14:33:00.123456",
+    "space-separated-offset": "2024-04-{day:02d} 14:33:00+00:00",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(MACHINE_STAMPS))
+def test_d02_claims_every_machine_timestamp_shape(shape) -> None:
+    """The T/Z form is *the* timestamp format in machine-written exports —
+    transaction feeds, API dumps, Postgres — and no family claimed it, so a
+    column of nothing but export timestamps was reported "checked and clean".
+    Parameterised over every zone-suffix and fraction shape the wild produces,
+    not the one that surfaced the gap."""
+    values = [MACHINE_STAMPS[shape].format(day=i % 27 + 1) for i in range(40)]
+    found = detect_one(pd.DataFrame({"posted_at": values}), 2, ["posted_at"])
+    assert found is not None, f"{shape} timestamps were reported clean"
+
+
+def test_d03_treats_a_naive_and_zoned_mix_as_two_formats() -> None:
+    """Zoned is deliberately a separate family from naive iso: the two cannot
+    land in one datetime64 without a decision, so the mix is d03's subject —
+    the case a single wider 'iso' pattern would have silently absorbed."""
+    values = ["2024-04-13 14:33:00", "2024-04-13T14:33:00Z"] * 20
+    found = detect_one(pd.DataFrame({"t": values}), 3, ["t"])
+    assert found is not None
+    assert "2 date formats" in found["evidence"], found["evidence"]

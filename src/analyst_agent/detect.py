@@ -122,7 +122,20 @@ JSON_ISH = re.compile(r"^\s*[\[{][\s\S]*[\]}]\s*$")
 SIBLING_COLUMN = re.compile(r"^(?P<prefix>.+?)[ _-]?(?P<num>\d)$")
 
 DATE_FAMILIES = (
-    ("iso", re.compile(r"^\d{4}-\d{1,2}-\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?)?$")),
+    (
+        "iso",
+        re.compile(r"^\d{4}-\d{1,2}-\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?)?$"),
+    ),
+    # RFC 3339 zone suffixes, either separator. Zoned is a separate family
+    # from naive iso because the two cannot land in one datetime64 without a
+    # decision — the mix is d03's subject, not a d02 column with a long tail.
+    (
+        "iso-zoned",
+        re.compile(
+            r"^\d{4}-\d{1,2}-\d{1,2}[ T]\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?"
+            r"\s?([Zz]|[+-]\d{2}:?\d{2})$"
+        ),
+    ),
     ("slash", re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4}$")),
     ("dash", re.compile(r"^\d{1,2}-\d{1,2}-\d{2,4}$")),
     ("dot", re.compile(r"^\d{1,2}\.\d{1,2}\.\d{2,4}$")),

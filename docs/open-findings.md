@@ -61,6 +61,15 @@ The `T`/`Z` form is the machine timestamp format in transaction feeds. Missing
 pattern, not a threshold — and it is half of why the date scan fell below 0.90
 above, so it partly relieves A1 for free.
 
+**Fixed 2026-08-13.** `iso` now takes fractional seconds; a new `iso-zoned`
+family claims RFC 3339 zone suffixes on either separator. Zoned is deliberately
+a separate family: a naive/zoned mix cannot land in one datetime64 without a
+decision, so the mix fires d03 rather than being absorbed into one wide
+pattern. Epoch integers stay unclaimed pending A1 — a bare-integer column
+needs a "date-shaped at all" kind gate before ten digits may mean a timestamp.
+On the fixture, `posted_at` coverage moves 0.50 → 0.75: still below the 0.90
+gate, so A2 alone does not un-silence it. A1 finishes the job.
+
 ### A3 — duplicate index → quadratic hang *(cheap, high value)*
 
 ```
