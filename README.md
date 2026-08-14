@@ -140,3 +140,10 @@ Specs live in `specs/` — P0 core, P1 clean mode, P2 skill harness, P2.5 family
 mode. Research and positioning:
 `../mailo/coop-project/analyst-agent-brief.md` and
 `analyst-agent-build-research.md`.
+
+## Publishing status
+
+Publish-ready, not published. `uv build` produces a verified sdist and wheel
+carrying both console entry points; `docs/PUBLISHING.md` is the 30-minute
+runbook. The single blocker is a human decision: choosing the license (MIT
+recommended). Everything after that is mechanical.

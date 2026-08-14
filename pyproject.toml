@@ -7,6 +7,23 @@ authors = [
     { name = "aarmens702-hub", email = "aarmens702@gmail.com" }
 ]
 requires-python = ">=3.12"
+# license deliberately unset: choosing one (MIT recommended) is a human
+# decision — see docs/PUBLISHING.md, it is the single publish blocker
+keywords = [
+    "data-cleaning",
+    "data-quality",
+    "agent",
+    "mcp",
+    "llm",
+    "provenance",
+    "pandas",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
 dependencies = [
     "anthropic>=0.122.0",
     "ipykernel>=7.3.0",
@@ -19,6 +36,10 @@ dependencies = [
     "pyarrow>=25.0.1",
     "python-dotenv>=1.2.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/aarmens702-hub/analyst-agent"
+Repository = "https://github.com/aarmens702-hub/analyst-agent"
 
 [project.scripts]
 analyst-agent = "analyst_agent:main"
