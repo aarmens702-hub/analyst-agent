@@ -1096,12 +1096,16 @@ class Session:
 
             result, _, _, ev_id = yield from self._exec_events(code, quiet=True)
             evs.append(ev_id)
+            uncheckable = ""
             if result.status == "ok":
                 self._stamp_registry(result.registry, ev_id)
                 vres, _, _, v_ev = yield from self._exec_events(
                     verify.verify_cell(var, finding, baseline_cols), quiet=True
                 )
                 evs.append(v_ev)
+                evalue = (vres.error or {}).get("evalue", "") if vres.error else ""
+                if evalue.startswith("uncheckable:"):
+                    uncheckable = evalue
                 if vres.status == "ok":
                     self.library.record(
                         entry["name"], success=True, dataset=sha, events=evs
@@ -1128,6 +1132,17 @@ class Session:
                 verify.revert_cell(var), quiet=True
             )
             evs.append(rev_ev)
+            if uncheckable:
+                # the check itself crashed: that is evidence about the
+                # detector, not the skill — scoring it retires working skills
+                # on someone else's bug. The revert above still ran, because
+                # a fix that could not be checked is not verified.
+                yield Notice(
+                    "skill",
+                    f"{entry['name']} not scored — the check crashed "
+                    f"({uncheckable.removeprefix('uncheckable: ')}); reverted",
+                )
+                continue
             self.library.record(entry["name"], success=False, dataset=sha, events=evs)
             self.library.save()
             state = self.library.entries[entry["name"]]["state"]

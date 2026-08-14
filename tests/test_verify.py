@@ -86,6 +86,25 @@ def _loop_line(code: str) -> str:
     return next(ln for ln in code.splitlines() if ln.startswith("for _c in "))
 
 
+def test_a_detector_crash_reads_as_uncheckable_not_as_a_failed_fix():
+    """Inside verify, a detector crash was indistinguishable from a fix that
+    did not work: the cell just errored, the revert ran, and the skill ledger
+    took the hit — two crashes in one run retired a working skill on someone
+    else's bug. The cell must name the difference so the loop can decline to
+    score it. Could-not-check still fails the cell: unverified is unverified.
+
+    This one executes (unlike the string-contract tests below): the crash
+    fires on the detect_one line, before the cell touches any kernel-only
+    names, and the invariant is behavioral."""
+    import pytest
+
+    code = verify_cell("df", _finding(disease=99), BASELINE_COLS)
+    namespace = {"df": pd.DataFrame({"a": ["x", "y"]})}
+
+    with pytest.raises(RuntimeError, match="^uncheckable: ValueError"):
+        exec(compile(code, "<v-crash>", "exec"), namespace)  # noqa: S102
+
+
 def test_verify_cell_reruns_detector_and_holds_rows_constant():
     code = verify_cell("df", _finding(), BASELINE_COLS)
     assert "detect_one" in code

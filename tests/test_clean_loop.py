@@ -882,6 +882,37 @@ def test_a_family_slice_knows_which_file_it_came_from(session, monkeypatch):
     assert session._source_sha(var), "a slice must resolve to the file it came from"
 
 
+def test_a_detector_crash_is_not_charged_to_the_skill(stocked, monkeypatch):
+    """verify_cell raises 'uncheckable: ...' when the detector itself crashes.
+    Charging that to the skill retired working skills on someone else's bug —
+    two findings of one disease in a single family run was enough to move a
+    proven skill to the graveyard. The fix is still reverted (unverified is
+    unverified) and the model is consulted as usual, but the ledger records
+    nothing: retirement evidence must be about the skill."""
+    monkeypatch.setattr(llm, "generate", gen([FIX_A]))
+    stocked.library.register("fix-sentinel-missing", disease=4)
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # skill apply cell runs
+        [err("uncheckable: ValueError: boom")],  # verify: the detector crashed
+        [ok(value="'reverted'")],
+        [ok()],  # the model's fix
+        [ok()],  # verifies
+        case(),
+        baseline(),
+        saved(),
+    ]
+    drive(stocked.clean("df"), decisions=[GateDecision("run"), GateDecision("run")])
+
+    entry = stocked.library.entries["fix-sentinel-missing"]
+    assert entry["failures"] == 0, "a crash is the detector's bug, not the skill's"
+    assert entry["recent"] == [], entry["recent"]
+    rep = report_of(stocked)
+    assert rep["fixes"][0]["status"] == "fixed"
+    assert rep["fixes"][0]["origin"] == "model"
+
+
 def test_an_aborted_slice_is_not_counted_as_cleaned(session, monkeypatch):
     """clean() swallows KernelLost internally, and the family loop appended to
     run["cleaned"] unconditionally after it — so family_<name>.json listed
