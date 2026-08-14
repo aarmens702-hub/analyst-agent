@@ -31,6 +31,74 @@ def fake_client(stream):
     )
 
 
+def claude_event(text=None, thinking=None, kind="content_block_delta"):
+    """A double for one anthropic stream event: only `.type` and
+    `.delta.{type,text}` are ever read by the claude path."""
+    if text is not None:
+        delta = SimpleNamespace(type="text_delta", text=text)
+    else:
+        delta = SimpleNamespace(type="thinking_delta", thinking=thinking or "")
+    return SimpleNamespace(type=kind, delta=delta)
+
+
+def fake_claude_client(stream, calls=None):
+    """A client double for anthropic's messages.create(**kw)."""
+
+    def create(**kw):
+        if calls is not None:
+            calls.append(kw)
+        return stream
+
+    return SimpleNamespace(messages=SimpleNamespace(create=create))
+
+
+def test_the_provider_switch_selects_claude_behind_the_same_seam(monkeypatch):
+    """R10: generate(messages) -> Iterator[str] is the whole contract, and a
+    provider env switch must be the only difference a caller can observe.
+    model_info() hard-coded "deepseek", so every answer card produced through
+    the Claude half would have carried a false provenance stamp."""
+    monkeypatch.setenv("ANALYST_PROVIDER", "claude")
+    monkeypatch.delenv("ANALYST_MODEL", raising=False)
+    calls: list = []
+    stream = iter([claude_event(text="hel"), claude_event(text="lo")])
+    monkeypatch.setattr(
+        llm, "_get_claude_client", lambda: fake_claude_client(stream, calls)
+    )
+
+    result = list(
+        llm.generate(
+            [
+                {"role": "system", "content": "be terse"},
+                {"role": "user", "content": "hi"},
+            ]
+        )
+    )
+
+    assert result == ["hel", "lo"]
+    info = llm.model_info()
+    assert info["provider"] == "claude"
+    assert info["model"].startswith("claude-")
+    # anthropic takes system as a top-level param, not a message role
+    assert calls[0]["system"] == "be terse"
+    assert all(m["role"] != "system" for m in calls[0]["messages"])
+
+
+def test_claude_thinking_deltas_are_heartbeats_not_text(monkeypatch):
+    """Same contract as DeepSeek's reasoning_content: thinking never reaches
+    the tag parser, but an empty chunk says the stream is alive."""
+    monkeypatch.setenv("ANALYST_PROVIDER", "claude")
+    stream = iter(
+        [
+            claude_event(thinking="pondering..."),
+            claude_event(text="done"),
+            SimpleNamespace(type="message_stop"),
+        ]
+    )
+    monkeypatch.setattr(llm, "_get_claude_client", lambda: fake_claude_client(stream))
+
+    assert list(llm.generate([{"role": "user", "content": "hi"}])) == ["", "done"]
+
+
 def test_content_chunks_pass_through_unchanged(monkeypatch):
     stream = iter([chunk(content="hel"), chunk(content="lo")])
     monkeypatch.setattr(llm, "_get_client", lambda: fake_client(stream))
