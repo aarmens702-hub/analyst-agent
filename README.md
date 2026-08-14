@@ -40,6 +40,39 @@ run; anything needing judgement is reported, not decided):
 uv run python -m analyst_agent clean data/messy.csv --json
 ```
 
+## MCP server
+
+Any MCP client (Claude Desktop, Claude Code, Cursor) can drive analyst-agent
+as native tools. Local config:
+
+```json
+{
+  "mcpServers": {
+    "analyst-agent": {
+      "command": "uv",
+      "args": ["--directory", "/absolute/path/to/analyst-agent", "run", "analyst-agent-mcp"],
+      "env": { "DEEPSEEK_API_KEY": "sk-..." }
+    }
+  }
+}
+```
+
+Claude Code takes the same block in `.mcp.json`; set `ANALYST_PROVIDER=claude`
+plus `ANTHROPIC_API_KEY` to swap the model.
+
+| tool | purpose |
+| --- | --- |
+| `diagnose_file` | the 22-check report on a file: free, keyless, read-only |
+| `clean_file` | headless clean: judgement calls deferred and reported, never decided |
+| `open_data` | load a file into a persistent kernel, get a session id and profile |
+| `ask` | answer a question over an open session, with executed checks and lineage |
+| `why` | the provenance chain for an open session |
+| `close_session` | shut the session's kernel |
+
+Gates in MCP mode follow the same policy as headless mode: AUTO-grade fixes
+run, judgement calls come back in `needs_human`, and the calling agent never
+decides them.
+
 ## How it works
 
 The LLM never sees your data. It sees a schema/stats profile and a live

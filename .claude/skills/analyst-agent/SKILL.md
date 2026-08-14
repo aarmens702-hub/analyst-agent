@@ -52,6 +52,14 @@ shows a preview of its consequence before the gate:
 uv run python -m analyst_agent          # then: /clean <var>, /why, /skills
 ```
 
+## If the MCP server is configured
+
+When the analyst-agent MCP tools (`diagnose_file`, `clean_file`, `open_data`,
+`ask`, `why`, `close_session`) are available in the session, prefer them over
+shelling out. The contract is identical: diagnose first, clean second, relay
+`needs_human` verbatim. The shell path above remains the fallback inside this
+repo.
+
 ## Rules
 
 - Never claim the data is clean beyond what the report says. Quote counts

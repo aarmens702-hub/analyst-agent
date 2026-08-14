@@ -5,6 +5,13 @@ built publishable-shaped (PyPI + registry listings are packaging work later,
 not redesign). Architecture ruling: wrapper now — the inner agent keeps
 writing fixes — with the toolkit ("verified hands for any agent") named as v2.
 
+**LANDED 2026-08-14.** Built by two forked agents in parallel (server +
+tests; docs + skill) with the parent finishing the registration layer after
+the implementation fork stalled at 90%. Ported to MCP SDK 2.0 (MCPServer,
+not 1.x FastMCP). All four ACs green, 338 tests passing, and the live stdio
+handshake verified: six tools listed over the wire, diagnose_file returning
+real findings through a spawned server.
+
 ## What (WRAP)
 
 A stdio MCP server, `analyst-agent-mcp`, exposing analyst-agent to any MCP
