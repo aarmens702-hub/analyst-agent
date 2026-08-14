@@ -156,7 +156,12 @@ over all 7 kernel touch points.
   a whole second clean through the recovered session, parameterised over all
   seven death points — red 7/7 before the fix.
 - `loop.py:413` — the in-flight finding is backfilled as `aborted (0 attempts)` even when its gate-approved fix cell already mutated the frame; on a *timeout* `verify.revert_cell` never runs, so the kernel keeps an unverified mutation the report denies exists.
-- `loop.py:406` — `admitted` is discarded on death, so a human-approved skill can exist on disk and be invisible to `candidates()` permanently (`library.save()` never runs).
+- ~~`admitted` discarded on death~~ **Fixed 2026-08-14**: the admitted list
+  lives in the clean's state dict and the ledger is saved the moment each
+  admission is granted, not at the end of the pass — a death during the next
+  candidate's cells can no longer orphan a human-approved skill. Test kills the
+  kernel inside skill B's admission and demands both the ledger entry and the
+  report record for skill A.
 - ~~`loop.py:570` — `yield from` inside a generator's `finally`~~ **Fixed
   2026-08-14**: the family summary write is now a pure function called from the
   `finally` (never yields), and the human-facing summary line is yielded only on

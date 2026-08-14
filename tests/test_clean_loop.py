@@ -572,6 +572,56 @@ def test_family_drift_summary_never_dumps_rows(session, monkeypatch):
     assert "missing note" in text
 
 
+GOOD_PROPOSAL = (
+    "<name>fix-sentinel-missing</name>\n"
+    "<description>Replace missing-data tokens with NaN. Use when a column "
+    "holds 'N/A' or 'unknown' as if they were real values.</description>\n"
+    "<fix>\ndef fix(df, columns):\n    out = df.copy()\n"
+    "    for c in columns:\n        if c in out.columns:\n"
+    "            out[c] = out[c].replace(['N/A', 'n/a'], None)\n    return out\n"
+    "</fix>\n"
+    "<test>\nimport pandas as pd\ndef test_fix_clears_the_token():\n"
+    "    out = fix(pd.DataFrame({'x': ['N/A', '5']}), ['x'])\n"
+    "    assert out['x'].isna().sum() == 1\n</test>"
+)
+PROPOSAL_B = GOOD_PROPOSAL.replace("fix-sentinel-missing", "fix-sentinel-missing-b")
+
+
+def test_a_death_during_a_later_admission_keeps_the_earlier_skill(session, monkeypatch):
+    """A human approved skill A at its gate: the folder was written and the
+    in-memory library registered it. Then the kernel died inside skill B's
+    admission cell — and because the ledger was only saved at the END of the
+    skill pass, skill A existed on disk but was invisible to candidates() in
+    every later session, with no record it was ever admitted. Admission must
+    be durable the moment the human grants it."""
+    monkeypatch.setattr(llm, "generate", gen([FIX_A, FIX_B, GOOD_PROPOSAL, PROPOSAL_B]))
+    FakeClient.script = [
+        diag([finding(), finding(columns=["b"])]),
+        baseline(),
+        [ok()],  # fix A
+        [ok()],  # verify A
+        case(),
+        baseline(),
+        [ok()],  # fix B
+        [ok()],  # verify B
+        case(),
+        baseline(),
+        saved(),
+        [ok()],  # skill A: admission cell reproduces the frozen case
+        [ok()],  # skill A: its own test passes -> gate -> admitted
+        dead_kernel(),  # skill B: the admission cell kills the kernel
+    ]
+    drive(session.clean("df"))
+
+    ledger = session.skills_dir / "ledger.json"
+    assert ledger.exists(), "the ledger must be saved the moment A is admitted"
+    assert "fix-sentinel-missing" in json.loads(ledger.read_text())
+    rep = report_of(session)
+    assert "fix-sentinel-missing" in rep["skills_admitted"], (
+        "the report must record the admission the human actually made"
+    )
+
+
 def test_closing_a_family_clean_midway_still_writes_the_summary(session, monkeypatch):
     """Ctrl-C at a gate prompt closes the abandoned generator, and CPython's
     GC closes it after CardReady or a UI rerun parks it. Yielding from inside

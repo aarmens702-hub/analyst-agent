@@ -438,7 +438,7 @@ class Session:
             if rec["status"] == "fixed":
                 baseline_cols = yield from self._snapshot_baseline(var)
 
-        state["admitted"] = yield from self._skill_pass(var, state["records"])
+        yield from self._skill_pass(var, state["records"], state["admitted"])
         if any(r["status"] == "fixed" for r in state["records"]):
             outputs, stats, out_ev = yield from self._write_cleaned(
                 var, state["records"]
@@ -1124,7 +1124,7 @@ class Session:
 
         return None
 
-    def _skill_pass(self, var: str, records: list[dict]):
+    def _skill_pass(self, var: str, records: list[dict], admitted: list[str]):
         """After the run, offer each model-authored verified fix as a skill.
 
         Only `origin == "model"` records qualify: a fix a skill produced never
@@ -1138,14 +1138,15 @@ class Session:
             and r.get("origin") == "model"
             and r.get("case", {}).get("path")
         ]
-        admitted: list[str] = []
         for rec in candidates:
             name = yield from self._propose_skill(var, rec)
             if name:
+                # in place and saved immediately, not returned and saved at
+                # the end: a kernel death during the NEXT candidate's cells
+                # must not orphan a skill a human just approved — folder on
+                # disk, invisible to candidates() in every later session
                 admitted.append(name)
-        if admitted:
-            self.library.save()
-        return admitted
+                self.library.save()
 
     def _propose_skill(self, var: str, rec: dict):
         """One candidate through generalise -> execute -> execute -> human."""
