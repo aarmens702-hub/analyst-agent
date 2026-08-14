@@ -110,3 +110,31 @@ def test_the_agent_loads_with_the_same_policy_diagnose_does(tmp_path) -> None:
         assert result.status == "ok", result.error
     finally:
         session.close()
+
+
+def test_the_registry_carries_a_frames_remote_stamp(tmp_path) -> None:
+    """R12's kernel half: load_url stamps frame.attrs['remote'] inside the
+    kernel, and the registry probe must carry it up, or the host can never
+    ground remote data in lineage."""
+    session = Session(
+        workspace=tmp_path / "ws",
+        data_dir=tmp_path,
+        transport_argv=SUBPROCESS_ARGV,
+        skills_dir=tmp_path / "skills",
+    )
+    try:
+        result = None
+        for ev in session.client.execute(
+            "import pandas as pd\n"
+            "feed = pd.DataFrame({'a': [1, 2]})\n"
+            "feed.attrs['remote'] = {'uri': 'https://x/f.csv', 'sha256': 'ab' * 32,\n"
+            "                        'fetched_at': '2026-08-14T21:00:00+00:00'}\n"
+            "'stamped'",
+            timeout_s=60,
+        ):
+            result = ev
+        assert result.status == "ok", result.error
+        (entry,) = [e for e in result.registry if e["name"] == "feed"]
+        assert entry.get("remote", {}).get("sha256") == "ab" * 32
+    finally:
+        session.close()

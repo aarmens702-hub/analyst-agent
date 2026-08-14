@@ -64,16 +64,34 @@ def _add_card(card: dict, add, link) -> None:
         variable_id = f"var:{dataset.get('variable')}"
         add(_node(variable_id, VARIABLE, dataset.get("variable", "?")))
         if dataset.get("sha256"):
-            source_id = f"src:{dataset['sha256']}"
-            add(
-                _node(
-                    source_id,
-                    SOURCE,
-                    dataset.get("path", "?"),
-                    sha256=dataset["sha256"],
-                    checks_passed=True,  # raw bytes are the axiom, not a claim
+            remote = dataset.get("remote")
+            if remote:
+                # R12: a remote object can be overwritten, so the node claims
+                # less — trusted as of this fetch, content hash of what
+                # actually arrived. A re-fetch to a different hash is a new
+                # node, and both are kept.
+                source_id = f"remote:{dataset['sha256']}"
+                add(
+                    _node(
+                        source_id,
+                        SOURCE,
+                        remote.get("uri", dataset.get("path", "?")),
+                        sha256=dataset["sha256"],
+                        fetched_at=remote.get("fetched_at", ""),
+                        checks_passed=True,  # the hash of what arrived is a fact
+                    )
                 )
-            )
+            else:
+                source_id = f"src:{dataset['sha256']}"
+                add(
+                    _node(
+                        source_id,
+                        SOURCE,
+                        dataset.get("path", "?"),
+                        sha256=dataset["sha256"],
+                        checks_passed=True,  # raw bytes are the axiom, not a claim
+                    )
+                )
             link(variable_id, source_id)
         link(claim_id, variable_id)
 
@@ -207,6 +225,13 @@ def to_markdown(dag: dict, claim_id: str | None = None) -> str:
             state = {True: "✓", False: "✗", None: "·"}[node.get("checks_passed")]
             origin = node.get("origin", "")
             by = f" (by {origin})" if origin.startswith("skill:") else ""
-            lines.append(f"    {state} {node['kind']}: {node['label']}{by}")
+            asof = ""
+            if node.get("fetched_at"):
+                # R12: remote sources are trusted as of the fetch, not forever
+                asof = (
+                    f" — as of {node['fetched_at']} · "
+                    f"content sha256 {node.get('sha256', '')[:12]}"
+                )
+            lines.append(f"    {state} {node['kind']}: {node['label']}{by}{asof}")
         lines.append("")
     return "\n".join(lines)

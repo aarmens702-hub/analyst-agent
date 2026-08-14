@@ -148,3 +148,37 @@ def test_to_markdown_reads_as_a_chain_a_person_can_follow(tmp_path) -> None:
     assert "✓ trusted" in text
     assert "which brewery has the most beers?" in text
     assert "source: data/beers.csv" in text
+
+
+def test_a_remote_source_is_trusted_as_of_its_fetch_not_forever(tmp_path) -> None:
+    """R12: an S3 object can be overwritten and a query differs tomorrow, so a
+    remote source records more and claims less. Its node is remote:, not src:,
+    and the rendering says "as of <fetch time>" with the content hash of what
+    actually arrived — a re-fetch to a different hash is a new node, not an
+    error."""
+    session = tmp_path / "s01"
+    write_card(
+        session,
+        "s01-c001",
+        [{"expr": "len(result) == 2", "passed": True}],
+        [
+            {
+                "path": "https://example.org/feed.csv",
+                "sha256": "feedbeef" * 8,
+                "variable": "feed",
+                "remote": {
+                    "uri": "https://example.org/feed.csv",
+                    "fetched_at": "2026-08-14T21:00:00+00:00",
+                },
+            }
+        ],
+    )
+    dag = provenance.build(session)
+
+    remote_id = "remote:" + "feedbeef" * 8
+    assert remote_id in dag["nodes"], sorted(dag["nodes"])
+    assert dag["nodes"][remote_id]["fetched_at"] == "2026-08-14T21:00:00+00:00"
+
+    rendered = provenance.to_markdown(dag)
+    assert "as of 2026-08-14T21:00:00+00:00" in rendered
+    assert "content sha256 feedbeeffeed" in rendered

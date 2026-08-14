@@ -1680,12 +1680,37 @@ class Session:
         for entry in registry:
             name = entry["name"]
             key = (entry.get("type"), str(entry.get("shape") or entry.get("len")))
+            changed = (
+                name not in self._registry_prev or self._registry_prev[name] != key
+            )
             if name not in self._registry_prev:
                 self.origins[name] = ev_id
                 delta.append(f"+ {name} ({key[0]} {key[1]})")
             elif self._registry_prev[name] != key:
                 self.origins[name] = ev_id
                 delta.append(f"~ {name} ({key[0]} {key[1]})")
+            remote = entry.get("remote")
+            if changed and remote and remote.get("sha256"):
+                # R12: a frame load_url stamped in-kernel grounds like a load,
+                # so cards and /why reach it. Same content re-stamped is not a
+                # duplicate; new content is a second entry, and both are kept.
+                already = any(
+                    d.get("variable") == name and d.get("sha256") == remote["sha256"]
+                    for d in self.datasets
+                )
+                if not already:
+                    self.datasets.append(
+                        {
+                            "path": remote.get("uri", ""),
+                            "sha256": remote["sha256"],
+                            "variable": name,
+                            "loaded_event": ev_id,
+                            "remote": {
+                                "uri": remote.get("uri", ""),
+                                "fetched_at": remote.get("fetched_at", ""),
+                            },
+                        }
+                    )
         self._registry_prev = {
             e["name"]: (e.get("type"), str(e.get("shape") or e.get("len")))
             for e in registry

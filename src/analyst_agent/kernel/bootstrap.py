@@ -29,6 +29,11 @@ def _analyst_registry_json():
         if isinstance(_val, _types.ModuleType) or callable(_val):
             continue
         _entry = {"name": _name, "type": type(_val).__name__}
+        _remote = getattr(_val, "attrs", {})
+        if isinstance(_remote, dict) and isinstance(_remote.get("remote"), dict):
+            # R12: a frame load_url stamped must ground in lineage, so the
+            # stamp rides the registry up to the host
+            _entry["remote"] = _remote["remote"]
         _shape = getattr(_val, "shape", None)
         if _shape is not None:
             _entry["shape"] = list(_shape)
