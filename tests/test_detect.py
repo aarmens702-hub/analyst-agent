@@ -77,6 +77,94 @@ def test_d01_id_like_digit_strings_are_not_flagged() -> None:
     assert 1 not in _diseases(detect_all(df))
 
 
+MONEY_STYLES = (
+    lambda v: f"${v:,.2f}",  # symbol
+    lambda v: f"{v:,.2f}",  # thousands comma
+    lambda v: f"{v:.2f}".replace(".", ","),  # European decimal comma
+    lambda v: f"USD {v:.2f}",  # ISO code prefix
+    lambda v: f"{v:.2f}",  # bare float as text
+)
+
+
+@pytest.mark.parametrize("k", [1, 2, 3, 4, 5])
+def test_d01_gets_louder_not_quieter_as_money_formats_mix(k) -> None:
+    """A1: the old gate demanded 90% of values match ONE pattern, so a column
+    got quieter as it got more damaged — five money formats each at ~20%
+    meant silence, and the report filed the worst column under "checked and
+    clean". The invariant is monotonicity: every added format must keep the
+    signal firing (and escalate the grade once the decimal-comma/thousands-
+    comma conflict makes single values ambiguous), never mute it."""
+    import random
+
+    rng = random.Random(7)
+    values = [MONEY_STYLES[rng.randrange(k)](1000 + i * 3) for i in range(600)]
+
+    found = detect_one(pd.DataFrame({"amount": values}), 1, ["amount"])
+
+    assert found is not None, f"{k} money formats -> silence; the gate ran backwards"
+    assert found["grade"] == ("GATE" if k >= 3 else "AUTO"), found["grade"]
+    if k >= 2:
+        assert len(found["stats"]["families"]) >= 2, found["stats"]
+
+
+DATE_STYLES = (
+    lambda i: f"2024-0{i % 9 + 1}-1{i % 9} 14:3{i % 6}:00",  # iso, space sep
+    lambda i: f"0{i % 9 + 1}/1{i % 9}/2024",  # slash
+    lambda i: f"2024-0{i % 9 + 1}-1{i % 9}T14:3{i % 6}:00Z",  # iso-zoned
+    lambda i: f"171{i % 9}0000{i % 9}0",  # epoch seconds — no family claims these
+)
+
+
+@pytest.mark.parametrize("k", [2, 3, 4])
+def test_d03_fires_on_a_format_mix_even_with_an_unclaimed_tail(k) -> None:
+    """A1, date side: d03's entire subject is "multiple date formats in one
+    column", yet the scan gated on >=90% single-family coverage — the disease
+    switched off its own detector. With k=4 an unclaimed epoch tail drops
+    coverage to 0.75 and the old gate went silent; the mix must fire and the
+    unclaimed share must be named, because a reader deciding whether to trust
+    the column needs both numbers."""
+    import random
+
+    rng = random.Random(7)
+    values = [DATE_STYLES[rng.randrange(k)](i) for i in range(600)]
+
+    found = detect_one(pd.DataFrame({"posted_at": values}), 3, ["posted_at"])
+
+    assert found is not None, f"{k} date formats -> silence; the gate ran backwards"
+    if k == 4:
+        assert "no known" in found["evidence"], found["evidence"]
+
+
+def test_a_half_money_column_is_a_judgement_call_not_a_clean_bill() -> None:
+    """The money mirror of the date case below, pinning the same third
+    outcome on _d01's own middle branch."""
+    values = [f"${i}.00" for i in range(24)] + [
+        f"awaiting invoice {i}" for i in range(36)
+    ]
+
+    found = detect_one(pd.DataFrame({"amount": values}), 1, ["amount"])
+
+    assert found is not None, "40% money reported as silence"
+    assert found["grade"] == "HUMAN"
+    assert "60%" in found["evidence"], found["evidence"]
+
+
+def test_a_half_date_column_is_a_judgement_call_not_a_clean_bill() -> None:
+    """A1's third outcome. 60% iso dates + 40% free text is neither "dates as
+    strings, fix it" nor "checked and clean" — the old two-outcome gate could
+    only say the second, which was a lie. The middle zone must surface as a
+    HUMAN-graded finding naming both numbers."""
+    values = [f"2024-03-{i % 28 + 1:02d}" for i in range(36)] + [
+        f"pending review {i}" for i in range(24)
+    ]
+
+    found = detect_one(pd.DataFrame({"updated": values}), 2, ["updated"])
+
+    assert found is not None, "60% dates reported as silence"
+    assert found["grade"] == "HUMAN"
+    assert "40%" in found["evidence"], found["evidence"]
+
+
 def test_d02_dates_as_strings_single_format() -> None:
     dirty = pd.DataFrame({"signup_date": [f"2021-03-{d:02d}" for d in range(1, 21)]})
     res = detect_all(dirty)

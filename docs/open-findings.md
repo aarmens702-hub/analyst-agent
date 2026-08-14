@@ -47,6 +47,26 @@ splitting "is this column of kind K" from "does this column agree with itself".
 This is the project's own stated line — *"absence is a checked claim here, not
 a silence"* — failing on the case that matters most.
 
+**Fixed 2026-08-13** (option 2, approved by Aarmen). The gate now asks the two
+questions the old threshold conflated: *is this column number/date-shaped at
+all* (the UNION of every family — `NUMBER_FAMILIES` partitions values
+first-match so shares sum to the union) and *does it agree with itself* (the
+per-family breakdown). Three outcomes replace two: one family ≥0.90 fires AUTO
+as before; ≥2 families ≥0.50 union fires with the mix named and the unclaimed
+tail stated, GATE when decimal-comma and thousands-comma coexist (same digits,
+two readings); the [0.30, 0.90) middle is a HUMAN finding naming both numbers,
+never silence. d03 applies its own agreement threshold instead of inheriting
+d02's. Invariant tests are monotonicity itself: k = 1..5 money formats and
+k = 2..4 date formats must fire at every k. The fixture's `amount` now reads
+"5 number formats in one column … the same digits read two ways · fix with a
+human check"; `posted_at` fires d03 with the 25% epoch tail named. One
+interaction the admission tests caught: d01 counting d04's sentinels as
+"match nothing known" reported the same cells twice — d01 now judges
+`_present` values, matching the date scan's existing discipline. Epoch stays
+unclaimed as a family (a bare-integer column needs more than ten digits to
+mean a timestamp); the union design reports it honestly as an unclaimed
+share instead of going quiet.
+
 ### A2 — ISO 8601 is not in `DATE_FAMILIES` *(cheap)*
 
 ```

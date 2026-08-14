@@ -62,3 +62,23 @@ def test_a_windows_encoded_export_still_gets_a_report(tmp_path) -> None:
 
     assert "30 rows" in report
     assert "cp1252" in report, "the fallback must be reported, not silent"
+
+
+def test_the_transaction_fixture_scores_against_its_own_ground_truth(tmp_path) -> None:
+    """scripts/make_transactions.py plants four diseases on purpose so this
+    report can be scored, not admired. The columns that matter most — amount
+    in five money formats, posted_at in four timestamp formats — were the
+    exact two the pre-A1 gate filed under "checked and clean"."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    import make_transactions
+
+    path = make_transactions.write(tmp_path)[0]  # q1, the un-drifted schema
+    report = diagnose.report(path)
+
+    assert "amount" in report, "five money formats must not read as clean"
+    assert "posted_at" in report, "four timestamp formats must not read as clean"
+    assert "merchant" in report
+    assert "N/A" in report or "sentinel" in report

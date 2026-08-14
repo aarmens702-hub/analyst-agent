@@ -386,22 +386,74 @@ def _samples(values, limit: int = SAMPLE_LIMIT) -> str:
 
 # --- 1. numbers as strings --------------------------------------------------
 
+# A1: the old gate demanded that ONE pattern claim >=90% of a column, so the
+# signal got quieter as the damage got worse — five money formats at ~20%
+# each meant silence, and the mixed column landed in "checked and clean".
+# The gate now asks two questions the old threshold conflated: is this column
+# number-shaped at all (the UNION of every family), and does it agree with
+# itself (the per-family breakdown). Heterogeneity raises the finding.
+KIND_FLOOR = 0.30  # below: not that kind of column, stay silent
+MIXED_FLOOR = 0.50  # >=2 families claiming this much: name the conflict
+FULL_COVERAGE = 0.90  # the pre-A1 research threshold, kept for one-shape columns
+
+# Ordered specific-to-broad; _number_families gives each value to the FIRST
+# match, so the shares partition the column and sum to the union.
+NUMBER_FAMILIES = (
+    (
+        "symbol",
+        re.compile(r"^\s*[-+]?\s*[$€£¥]\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*$"),
+    ),
+    ("thousands-comma", re.compile(r"^\s*[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?\s*$")),
+    ("decimal-comma", re.compile(r"^\s*[-+]?\d+,\d{1,2}\s*$")),
+    ("code-prefixed", re.compile(r"^\s*[A-Z]{3}\s?[-+]?\d+(?:[.,]\d+)?\s*$")),
+    (
+        "accounting",
+        re.compile(r"^\s*\((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)\s*$"),
+    ),
+    ("bare", re.compile(r"^\s*[-+]?\d+(?:\.\d+)?\s*$")),
+    ("unit-suffix", NUMERIC_WITH_UNIT),  # 12.0 oz, 15 kg, 98% — the broad legacy shape
+)
+
+
+def _number_families(values) -> dict:
+    """Per-family shares where the first matching family claims the value."""
+    remaining = pd.Series(True, index=values.index)
+    shares = {}
+    for name, pattern in NUMBER_FAMILIES:
+        hit = remaining & values.str.match(pattern)
+        share = float(hit.mean())
+        if share > 0:
+            shares[name] = share
+            remaining &= ~hit
+    return shares
+
 
 @register(1)
 def _d01(df, cols) -> list:
     out = []
     for i in _targets(df, cols):
-        values = _text(df, i)
+        # _present, not _text: missing-data sentinels are d04's cells to name.
+        # Counting them here as "match nothing known" reports the same values
+        # twice and pushes sentinel-heavy numeric columns into the HUMAN zone.
+        values = _present(df, i)
         if values is None or len(values) < 8:
             continue
-        if float(_probe(values).str.match(NUMERIC_WITH_UNIT).mean()) < 0.90:
-            continue
-        match_frac = float(values.str.match(NUMERIC_WITH_UNIT).mean())
-        if match_frac < 0.90:
+        if sum(_number_families(_probe(values)).values()) < KIND_FLOOR:
             continue
         direct = pd.to_numeric(values, errors="coerce").notna().mean()
         if direct > 0.95:  # already parses as-is: stored as text, no residue
             continue
+        shares = _number_families(values)
+        union = sum(shares.values())
+        families = {name: s for name, s in shares.items() if s >= 0.05}
+        if union < KIND_FLOOR or not families:
+            continue
+        # the one genuinely ambiguous mix: '2,447' is 2447 under a thousands
+        # comma and 2.447 under a decimal comma — same digits, two readings,
+        # so the fix needs a human eye on the convention split
+        ambiguous = "decimal-comma" in families and (
+            "thousands-comma" in families or "symbol" in families
+        )
         pulled = values.str.extract(LEADING_NUMBER)
         numeric = pd.to_numeric(
             (pulled[0].fillna("") + pulled[1].fillna("")).str.replace(
@@ -410,25 +462,54 @@ def _d01(df, cols) -> list:
             errors="coerce",
         )
         extract_frac = float(numeric.notna().mean())
-        if extract_frac < 0.99:
-            continue
-        dirty = values[values.str.strip() != numeric.astype(str).str.strip()]
-        out.append(
-            _finding(
-                1,
-                [_name(df, i)],
-                f"{len(values) - int(direct * len(values))}/{len(values)} values carry "
-                f"currency/unit residue; samples: {_samples(dirty)}",
-                {
-                    "values": len(values),
-                    "match_frac": match_frac,
-                    "parse_frac": extract_frac,
-                    "residue_frac": 1.0 - float(direct),
-                },
-                "AUTO",
-                min(match_frac, extract_frac),
+        stats = {
+            "values": len(values),
+            "families": families,
+            "union": round(union, 3),
+            "parse_frac": extract_frac,
+            "residue_frac": 1.0 - float(direct),
+        }
+        ranked = sorted(families.items(), key=lambda kv: -kv[1])
+        mixed = len(families) >= 2
+        if union >= FULL_COVERAGE or (mixed and union >= MIXED_FLOOR):
+            if mixed:
+                evidence = (
+                    f"{len(families)} number formats in one column ("
+                    + ", ".join(f"{name} {s:.0%}" for name, s in ranked)
+                    + ")"
+                    + (
+                        f"; {1 - union:.0%} match no known shape"
+                        if union < 0.98
+                        else ""
+                    )
+                    + (
+                        "; decimal comma and thousands comma both present — "
+                        "the same digits read two ways"
+                        if ambiguous
+                        else ""
+                    )
+                )
+                grade = "GATE" if ambiguous else "AUTO"
+                confidence = union * (0.85 if ambiguous else 0.95)
+            else:
+                dirty = values[values.str.strip() != numeric.astype(str).str.strip()]
+                evidence = (
+                    f"{len(values) - int(direct * len(values))}/{len(values)} values "
+                    f"carry currency/unit residue; samples: {_samples(dirty)}"
+                )
+                grade = "AUTO"
+                confidence = min(union, extract_frac)
+        else:
+            # the zone the old gate spelled as silence: enough of the column
+            # is number-shaped that "clean" would be a lie, not enough that
+            # any automatic fix is defensible
+            evidence = (
+                f"{union:.0%} of values look like amounts across "
+                f"{len(families)} shape(s); {1 - union:.0%} match nothing known"
             )
-        )
+            grade = "HUMAN"
+            confidence = round(union, 3)
+        out.append(_finding(1, [_name(df, i)], evidence, stats, grade, confidence))
     return out
 
 
@@ -455,17 +536,21 @@ def _slot_ambiguity(values) -> bool:
 
 
 def _date_scan(df, cols):
+    """A1: the scan feeds both d02 (one format) and d03 (a mix), so it gates
+    only on the column being date-shaped at all — each detector applies its
+    own agreement threshold. Gating here on single-family coverage switched
+    d03 off in exactly the columns it names. Dirty date columns still carry a
+    tail no format claims (Raha flights: 94%), which is why the detectors'
+    thresholds sit below 1.0."""
     for i in _targets(df, cols):
         values = _present(df, i)
         if values is None or len(values) < 8:
             continue
-        # 0.90, not the research's 0.95: dirty date columns carry a tail of
-        # one-off manglings that no single format claims (Raha flights: 94%).
-        if sum(_date_families(_probe(values)).values()) < 0.90:
+        if sum(_date_families(_probe(values)).values()) < KIND_FLOOR:
             continue
         families = {f: s for f, s in _date_families(values).items() if s >= 0.05}
         covered = sum(families.values())
-        if not families or covered < 0.90:
+        if not families or covered < KIND_FLOOR:
             continue
         yield i, values, families, covered
 
@@ -477,6 +562,23 @@ def _d02(df, cols) -> list:
         if len(families) != 1:
             continue
         family = next(iter(families))
+        if covered < FULL_COVERAGE:
+            # A1's third outcome: too date-shaped for "clean", too mixed with
+            # the unclaimable for an automatic parse — a person decides
+            out.append(
+                _finding(
+                    2,
+                    [_name(df, i)],
+                    (
+                        f"{covered:.0%} of values are {family}-format dates; "
+                        f"{1 - covered:.0%} match nothing known"
+                    ),
+                    {"values": len(values), "family": family, "coverage": covered},
+                    "HUMAN",
+                    covered,
+                )
+            )
+            continue
         out.append(
             _finding(
                 2,
@@ -495,7 +597,7 @@ def _d02(df, cols) -> list:
 def _d03(df, cols) -> list:
     out = []
     for i, values, families, covered in _date_scan(df, cols):
-        if len(families) < 2:
+        if len(families) < 2 or covered < MIXED_FLOOR:
             continue
         slotted = values[
             values.str.match(re.compile(r"^\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}$"))
@@ -508,6 +610,11 @@ def _d03(df, cols) -> list:
                 [_name(df, i)],
                 f"{len(families)} date formats in one column "
                 f"({', '.join(f'{f} {s:.0%}' for f, s in ranked)})"
+                + (
+                    f"; {1 - covered:.0%} match no known family"
+                    if covered < 0.98
+                    else ""
+                )
                 + ("; day/month order is ambiguous" if ambiguous else ""),
                 {
                     "values": len(values),
