@@ -10,6 +10,20 @@ blocks they consume already exist and are tested.
 
 ## R3/R4 — the gate shows consequence, on a sampled scratch copy
 
+**LANDED 2026-08-14** (approved by Aarmen). As proposed, plus one discovery
+the proposal missed: a preview executes model code *before* the human
+approves it, and the scratch copy protects only the data — a cell that
+SIGKILLs the kernel or opens files would do so unapproved (found live when
+the sigkill recovery test died inside its own preview). `preview_screen`
+now AST-checks the cell first: anything importing beyond
+pandas/numpy/re/json-tier modules, calling open/exec/eval, or reaching for
+dunders degrades the gate to code-only with the reason named. Previews ride
+`GateRequest.preview` at the QUERY, fix, and skill gates; the admission gate
+shows the skill's effect on the frozen case; `--auto-run` skips them.
+336 tests passing, including live preview cells against the real kernel.
+
+*(original proposal below, kept for the record)*
+
 **Ruling already made** (open-findings D): the preview runs on a *sample*,
 never the full frame — CLAUDE.md's preview discipline, and a 300k-row frame
 copied per gate is real memory.

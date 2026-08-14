@@ -122,8 +122,13 @@ def session(tmp_path, monkeypatch):
     FakeClient.script, FakeClient.executed = [], []
     # skills_dir must be per-test: the default is the repo's live library,
     # and a test that writes a skill there leaks into every later test
+    # previews off by default here: every scripted flow would otherwise need
+    # one extra kernel-cell entry per gate. Tests about previews turn it on.
     s = Session(
-        workspace=tmp_path / "ws", data_dir=tmp_path, skills_dir=tmp_path / "skills"
+        workspace=tmp_path / "ws",
+        data_dir=tmp_path,
+        skills_dir=tmp_path / "skills",
+        preview=False,
     )
     s._registry_prev = {"df": ("DataFrame", "[4, 2]")}
     s._registry = list(REG)
@@ -622,6 +627,39 @@ def test_a_death_during_a_later_admission_keeps_the_earlier_skill(session, monke
     )
 
 
+def test_the_admission_gate_shows_the_skills_effect_on_the_frozen_case(
+    session, monkeypatch
+):
+    """R4: a human approving a skill saw only its source. The same renderer
+    that serves fix gates now shows what the generalised fix does to the
+    frozen case it must reproduce — effect, not just code."""
+    session.preview = True
+    monkeypatch.setattr(llm, "generate", gen([FIX_A, GOOD_PROPOSAL]))
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [StreamOut("stdout", "a: 2 of 4 cells change\n"), ok()],  # fix preview
+        [ok()],  # the fix
+        [ok()],  # verify
+        case(),
+        baseline(),
+        [ok()],  # admission cell reproduces the case (skill pass runs pre-write)
+        [ok()],  # the skill's own test
+        [ok()],  # bind the frozen case for the preview
+        [StreamOut("stdout", "x: 1 of 2 cells change\n"), ok()],  # case preview
+        saved(),  # the parquet write comes after the skill pass
+    ]
+    events = drive(session.clean("df"))
+
+    admit_gates = [
+        e
+        for e in events
+        if isinstance(e, GateRequest) and e.title.startswith("admit skill")
+    ]
+    assert admit_gates, [e.title for e in events if isinstance(e, GateRequest)]
+    assert "1 of 2 cells change" in admit_gates[0].preview
+
+
 def test_closing_a_family_clean_midway_still_writes_the_summary(session, monkeypatch):
     """Ctrl-C at a gate prompt closes the abandoned generator, and CPython's
     GC closes it after CardReady or a UI rerun parks it. Yielding from inside
@@ -880,6 +918,30 @@ def test_a_family_slice_knows_which_file_it_came_from(session, monkeypatch):
     registered = {d["variable"] for d in session.datasets}
     assert var in registered, registered
     assert session._source_sha(var), "a slice must resolve to the file it came from"
+
+
+def test_the_gate_carries_a_preview_of_the_consequence(session, monkeypatch):
+    """R3/AC2: the gate showed only code, so the operator executed pandas in
+    their head. Before each gate the fix runs against a sampled scratch copy
+    in-kernel and the rendered consequence rides the GateRequest."""
+    session.preview = True
+    monkeypatch.setattr(llm, "generate", gen([FIX_A]))
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [StreamOut("stdout", "a: 2 of 4 cells change\n"), ok()],  # the preview cell
+        [ok()],  # the fix itself
+        [ok()],  # verify
+        case(),
+        baseline(),
+        saved(),
+    ]
+    events = drive(session.clean("df"))
+
+    gate = next(e for e in events if isinstance(e, GateRequest))
+    assert "2 of 4 cells change" in gate.preview
+    rep = report_of(session)
+    assert rep["fixes"][0]["status"] == "fixed"
 
 
 def test_the_in_flight_finding_keeps_its_events_when_the_kernel_dies(

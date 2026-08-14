@@ -548,6 +548,24 @@ def test_a_multiline_error_prints_one_line_and_trace_recalls_it() -> None:
     assert sum("frame 29" in ln for ln in lines) == 1, "/trace shows everything, once"
 
 
+def test_the_gate_preview_is_printed_under_the_code_box() -> None:
+    """R3's last mile: the loop computes the consequence, the terminal must
+    actually show it, or the operator is back to executing pandas in their
+    head."""
+    gate = GateRequest(
+        "df = fix(df)", 1, title="fix 1/1", preview="amount: 2 of 4 cells change"
+    )
+    session = FakeSession(script=[gate])
+    printed: list = []
+    run_repl(
+        session,
+        input_fn=scripted_input("clean it up", "r", "/quit"),
+        print_fn=printed.append,
+    )
+
+    assert any("2 of 4 cells change" in str(p) for p in printed), printed
+
+
 def test_one_failed_turn_does_not_end_the_repl() -> None:
     """The test above cannot see whether the loop survived: its scripted /quit
     is simply never consumed when the loop dies early, so it passes either

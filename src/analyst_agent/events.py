@@ -22,6 +22,9 @@ class GateRequest:
     code: str
     iteration: int
     title: str = ""
+    # R3: the rendered consequence of running this cell on a sampled scratch
+    # copy — empty when previews are off or the preview itself failed loudly
+    preview: str = ""
 
 
 @dataclass(frozen=True)

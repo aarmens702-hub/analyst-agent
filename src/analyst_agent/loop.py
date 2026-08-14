@@ -91,7 +91,11 @@ class Session:
         docker: bool = False,
         transport_argv: list | None = None,
         skills_dir: str = "skills",
+        preview: bool = True,
     ) -> None:
+        # R3: gates show consequence computed on a sampled scratch copy;
+        # drivers that auto-approve can turn it off, since nobody reads it
+        self.preview = preview
         self.workspace_root = Path(workspace)
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         self.session_id = self._next_session_id()
@@ -233,7 +237,9 @@ class Session:
                 break
 
             iters += 1
-            decision = yield GateRequest(body, iters)
+            frames = [e["name"] for e in self._registry if e.get("type") == "DataFrame"]
+            pv = yield from self._preview(frames, body)
+            decision = yield GateRequest(body, iters, preview=pv)
             if not isinstance(decision, GateDecision):
                 decision = GateDecision("run")
             gate_ev = self.transcript.append(
@@ -459,6 +465,26 @@ class Session:
             state["evs"].append(out_ev)
 
         yield from self._save_report(state)
+
+    def _preview(self, names, cell_source: str):
+        """R3: consequence before consent, on sampled scratch copies inside
+        the kernel. Best effort at both layers — a preview that cannot run
+        degrades the gate to code-only with a reason, never blocks it."""
+        if not self.preview:
+            return ""
+        # the screen runs first: a preview executes model code BEFORE the
+        # human approves it, and the scratch copy protects only the data —
+        # anything reaching the process, files, or network waits for the gate
+        reason = verify.preview_screen(cell_source)
+        if reason:
+            return f"(preview skipped: {reason})"
+        result, stream, _, _ev = yield from self._exec_events(
+            verify.preview_cell(names, cell_source), quiet=True, tolerate_death=True
+        )
+        if result.status != "ok":
+            evalue = (result.error or {}).get("evalue", result.status)
+            return f"(preview unavailable: {evalue})"
+        return stream.strip()
 
     def _recover(self, lost: "KernelLost") -> None:
         """Restart after a death, so the session is not poisoned for good.
@@ -884,7 +910,8 @@ class Session:
                 continue
 
             attempts += 1
-            decision = yield GateRequest(body, attempts, title=title)
+            pv = yield from self._preview(var, body)
+            decision = yield GateRequest(body, attempts, title=title, preview=pv)
             if not isinstance(decision, GateDecision):
                 decision = GateDecision("run")
             evs.append(
@@ -1074,7 +1101,8 @@ class Session:
             )
 
             if not silent:
-                decision = yield GateRequest(code, 1, title=title)
+                pv = yield from self._preview(var, code)
+                decision = yield GateRequest(code, 1, title=title, preview=pv)
                 if not isinstance(decision, GateDecision):
                     decision = GateDecision("run")
                 evs.append(
@@ -1243,14 +1271,34 @@ class Session:
                 )
                 continue
 
-            preview = f"# {skill.name}\n# {skill.description}\n\n{skill.fix_source}"
+            source_view = f"# {skill.name}\n# {skill.description}\n\n{skill.fix_source}"
+            # R4: the approving human sees the skill's effect on the frozen
+            # case, not only its source — same renderer as every other gate
+            effect = ""
+            if self.preview and rec["case"].get("path"):
+                bind = (
+                    "import pandas as pd\n"
+                    f"_case_preview = pd.read_parquet({rec['case']['path']!r})\n"
+                    "'bound'"
+                )
+                bres, _, _, _bev = yield from self._exec_events(
+                    bind, quiet=True, tolerate_death=True
+                )
+                if bres.status == "ok":
+                    apply_src = (
+                        f"{skill.fix_source}\n"
+                        f"_case_preview = fix(_case_preview, "
+                        f"{finding.get('columns', [])!r})\n"
+                    )
+                    effect = yield from self._preview(["_case_preview"], apply_src)
             decision = yield GateRequest(
-                preview,
+                source_view,
                 1,
                 title=(
                     f"admit skill {skill.name} · d{finding['disease']} · "
                     f"reproduces the case it came from"
                 ),
+                preview=effect,
             )
             if not isinstance(decision, GateDecision):
                 decision = GateDecision("run")

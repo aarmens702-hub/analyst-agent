@@ -67,6 +67,137 @@ def _row_invariant(var: str, finding: dict) -> str:
     )
 
 
+PREVIEW_ROWS = 200  # the ruling from open-findings D: sampled, never the frame
+
+PREVIEW_TEMPLATE = """\
+import pandas as pd
+from analyst_agent import diff as _diff
+
+_pv_names = {names}
+_pv_before = {{
+    _v: globals()[_v].head({rows}).copy()
+    for _v in _pv_names
+    if isinstance(globals().get(_v), pd.DataFrame)
+}}
+_pv_ns = {{"pd": pd}}
+_pv_ns.update({{_v: _f.copy() for _v, _f in _pv_before.items()}})
+try:
+    exec(compile({fix_source!r}, "<preview>", "exec"), _pv_ns)
+except Exception as _exc:
+    print(f"(preview unavailable: {{type(_exc).__name__}}: {{_exc}})")
+else:
+    _lines = []
+    for _v, _b in _pv_before.items():
+        _after = _pv_ns.get(_v)
+        if not isinstance(_after, pd.DataFrame):
+            _lines.append(f"{{_v}}: no longer a DataFrame after this cell")
+            continue
+        _lines.append(
+            f"{{_v}}: preview on {{len(_b):,}} of {{len(globals()[_v]):,}} rows"
+        )
+        if len(_after) != len(_b):
+            _lines.append(f"  rows: {{len(_b):,}} -> {{len(_after):,}}")
+            continue
+        _a2 = _after.reset_index(drop=True)
+        _b2 = _b.reset_index(drop=True)
+        _untouched = []
+        _changed_any = False
+        for _c in _b2.columns:
+            if _c not in _a2.columns:
+                _lines.append(f"  column dropped: {{_c!r}}")
+                _changed_any = True
+                continue
+            _mask = _b2[_c].astype(str) != _a2[_c].astype(str)
+            _n = int(_mask.sum())
+            if _n == 0:
+                _untouched.append(_c)
+                continue
+            _changed_any = True
+            _pairs = list(
+                zip(
+                    _b2[_c][_mask].head(3).astype(str),
+                    _a2[_c][_mask].head(3).astype(str),
+                )
+            )
+            _lines.append(_diff.column_change(_c, _n, len(_b2), _pairs))
+            if str(_b2[_c].dtype) != str(_a2[_c].dtype):
+                _lines.append(f"  dtype: {{_b2[_c].dtype}} -> {{_a2[_c].dtype}}")
+        if _untouched:
+            _lines.append(f"  {{len(_untouched)}} column(s) untouched")
+        if not _changed_any:
+            _lines.append("  no cells change in the sampled rows")
+    print("\\n".join(_lines))
+"""
+
+
+# the only modules a cell may touch and still be previewed: previews run
+# BEFORE the human approves, so anything reaching beyond dataframes (files,
+# processes, sockets) must wait for the gate
+PREVIEW_ALLOWED_IMPORTS = frozenset(
+    {
+        "pandas",
+        "numpy",
+        "re",
+        "json",
+        "math",
+        "statistics",
+        "datetime",
+        "collections",
+        "itertools",
+        "functools",
+        "unicodedata",
+    }
+)
+_PREVIEW_FORBIDDEN_CALLS = frozenset(
+    {"open", "exec", "eval", "compile", "__import__", "input", "breakpoint"}
+)
+
+
+def preview_screen(source: str) -> str:
+    """Why this cell must not be previewed, or "" when it is safe to.
+
+    The scratch copy protects the data; it cannot protect the process. A cell
+    that imports os, opens files, or reaches for dunders runs only after the
+    human says so — the preview degrades to code-only with this reason."""
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        return f"cell does not parse: {exc.msg}"
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            module = (
+                node.module if isinstance(node, ast.ImportFrom) else node.names[0].name
+            )
+            root = (module or "").split(".")[0]
+            if root not in PREVIEW_ALLOWED_IMPORTS:
+                return f"cell imports {root!r}, which reaches beyond dataframes"
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in _PREVIEW_FORBIDDEN_CALLS
+        ):
+            return f"cell calls {node.func.id}()"
+        if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+            return "cell reaches for dunder attributes"
+    return ""
+
+
+def preview_cell(names, fix_source: str, rows: int = PREVIEW_ROWS) -> str:
+    """R3: what approving this cell would do, computed on sampled scratch
+    copies inside the kernel. The live variables are untouched by construction
+    — the cell executes in a namespace where each name is bound to a copy —
+    so AC3 holds without a revert. A cell that errors on the samples
+    (including its own asserts) degrades to a one-line reason. `names` may be
+    one variable or several: QUERY cells touch whatever they like."""
+    if isinstance(names, str):
+        names = [names]
+    return PREVIEW_TEMPLATE.format(
+        names=repr(list(names)), rows=rows, fix_source=fix_source
+    )
+
+
 def verify_cell(var: str, finding: dict, baseline_columns: list[str]) -> str:
     """Layer-1 verification: signal clear + row invariant + untouched columns.
 

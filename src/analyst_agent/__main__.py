@@ -72,7 +72,12 @@ def main() -> int:
     from analyst_agent.repl import run_repl
 
     session = Session(
-        workspace=args.workspace, data_dir=args.data_dir, docker=args.docker
+        workspace=args.workspace,
+        data_dir=args.data_dir,
+        docker=args.docker,
+        # previews cost one kernel cell per gate and nobody reads them when
+        # every gate auto-approves
+        preview=not args.auto_run,
     )
     run_repl(session, auto_run=args.auto_run)
     return 0

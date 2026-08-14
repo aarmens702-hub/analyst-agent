@@ -111,6 +111,8 @@ def _drive(gen, auto_run: bool, input_fn, print_fn) -> None:
                 if event.title:
                     print_fn(f"── {event.title} ──")
                 _print_code_box(event.code, event.iteration, print_fn)
+                if event.preview:
+                    print_fn(event.preview)
                 answer = GateDecision("run") if auto_run else _gate_decision(input_fn)
             elif isinstance(event, StreamText):
                 print_fn(event.text, end="")

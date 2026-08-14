@@ -86,6 +86,68 @@ def _loop_line(code: str) -> str:
     return next(ln for ln in code.splitlines() if ln.startswith("for _c in "))
 
 
+def test_preview_cell_shows_consequence_without_touching_the_frame():
+    """R3: the gate shows the code and asks whether to run it, which makes the
+    operator execute pandas in their head. The preview applies the fix to a
+    sampled scratch copy and renders what would move — and the live frame is
+    untouched by construction, not by revert (AC3). A fix that errors on the
+    sample degrades to a one-line reason instead of blocking the gate."""
+    import contextlib
+    import io
+
+    fix_source = (
+        "def fix_amount(df):\n"
+        "    out = df.copy()\n"
+        "    out['amount'] = out['amount'].str.replace(',', '', regex=False)\n"
+        "    return out\n"
+        "df = fix_amount(df)\n"
+    )
+    frame = pd.DataFrame({"amount": ["1,200", "3,400"], "note": ["a", "b"]})
+    namespace = {"df": frame}
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        exec(  # noqa: S102
+            compile(verify.preview_cell("df", fix_source), "<pv>", "exec"), namespace
+        )
+    rendered = out.getvalue()
+
+    assert namespace["df"] is frame, "the live variable must not be rebound"
+    assert list(frame["amount"]) == ["1,200", "3,400"], "or mutated"
+    assert "preview on 2 of 2 rows" in rendered
+    assert "amount: 2 of 2 cells change" in rendered
+    assert "untouched" in rendered
+
+    broken = "raise RuntimeError('no such column')\n"
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        exec(  # noqa: S102
+            compile(verify.preview_cell("df", broken), "<pv2>", "exec"), namespace
+        )
+    assert "preview unavailable: RuntimeError" in out.getvalue()
+
+
+def test_the_preview_screen_refuses_anything_beyond_dataframes():
+    """A preview executes model code BEFORE the human approves it. The
+    scratch copy protects the data; it cannot protect the process — a cell
+    that SIGKILLs the kernel, opens files, or reaches for dunders would do so
+    unapproved. Discovered live: the sigkill recovery test died inside its
+    own preview. Anything beyond pure dataframe work degrades the gate to
+    code-only, with the reason named."""
+    pure = (
+        "import pandas as pd\n"
+        "def fix(df):\n    return df.copy()\n"
+        "df = fix(df)\n"
+        "assert len(df) > 0\n"
+    )
+    assert verify.preview_screen(pure) == ""
+
+    assert "os" in verify.preview_screen("import os\nos.kill(1, 9)\n")
+    assert "open" in verify.preview_screen("open('/etc/passwd')\n")
+    assert "dunder" in verify.preview_screen("df.__class__.__init__\n")
+    assert "parse" in verify.preview_screen("def broken(:\n")
+
+
 def test_a_detector_crash_reads_as_uncheckable_not_as_a_failed_fix():
     """Inside verify, a detector crash was indistinguishable from a fix that
     did not work: the cell just errored, the revert ran, and the skill ledger
