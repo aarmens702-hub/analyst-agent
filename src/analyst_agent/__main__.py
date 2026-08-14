@@ -24,7 +24,31 @@ def main() -> int:
         action="store_true",
         help="run the kernel in the net-none container (default: subprocess)",
     )
+    # `diagnose` deliberately sits before the API-key check: it runs the
+    # detection engine in-process with no model and no kernel, so needing a
+    # paid credential to be told a CSV holds "N/A" would be the barrier it
+    # exists to remove.
+    parser.add_argument(
+        "--diagnose",
+        metavar="FILE",
+        help="report what is wrong with a file and exit; no model, no API key",
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="machine-readable diagnose output"
+    )
+    if sys.argv[1:2] == ["diagnose"]:
+        sys.argv = [sys.argv[0], "--diagnose", *sys.argv[2:]]
     args = parser.parse_args()
+
+    if args.diagnose:
+        from analyst_agent.diagnose import report
+
+        try:
+            print(report(args.diagnose, as_json=args.json))
+        except (OSError, ValueError) as exc:
+            print(f"could not read {args.diagnose}: {exc}")
+            return 1
+        return 0
 
     if not os.environ.get("DEEPSEEK_API_KEY"):
         print("DEEPSEEK_API_KEY is not set — put it in .env or export it.")
