@@ -1,17 +1,63 @@
 # analyst-agent
 
-An analyst agent that remembers. It cleans messy real-world data in a
-persistent, sandboxed IPython kernel; answers questions over it; and ships
-every answer with the code that produced it, the checks that actually ran, and
-the lineage from raw file to claim. Verified cleaning fixes become governed,
-test-gated skills that replay on data they were never written for.
+**Verified hands for your data.** An AI analyst that cleans messy real-world
+data and answers questions over it, where every result traces back to the raw
+file through checks that actually ran. LLM-authored fixes only count when
+executed verification agrees; every answer ships with its code, its checks, and
+its lineage.
 
-## Quickstart
+## 30 seconds
+
+Point it at a file. No API key, no setup, nothing to trust yet:
+
+```bash
+# from source today; `pip install analyst-agent` once published (see Publishing status)
+uv add git+https://github.com/aarmens702-hub/analyst-agent
+```
+
+```python
+import analyst_agent as aa
+
+report = aa.diagnose("spending.xlsx")   # or a DataFrame you already have
+print(report)
+```
+
+```text
+spending.xlsx — 136 rows × 9 columns
+  ⚠  not utf-8: read as cp1252 (a Windows-era export)
+
+  6 fixable · 2 flagged · 15 signals clear
+
+  d01  numbers-as-strings  [Amount]
+        134/136 values carry currency/unit residue; samples: '26,594.25', '37,224.00'
+        safe to fix automatically · confidence 1.00
+  d07  case-spelling-variants  [Account Code Description]
+        'UK air travel – all classes' ~ 'UK rail travel – all classes'
+        needs a judgement call · confidence 0.90
+  …
+  checked and clean: 2-5, 8-16, 19, 22   (absence here is a check that ran, not a silence)
+```
+
+That is real output on a real UK government spending file. 22 named checks —
+money stored as text, mixed date formats, fake missing values, encoding damage,
+schema drift — and it tells you what it checked and found *clean*, not just what
+it found. The `diagnose` half is pure Python: no model, no kernel, no key.
+
+```python
+df = aa.read("data.csv")        # one reader: csv, tsv, parquet, xlsx, json, jsonl
+aa.write(cleaned, "out.xlsx")   # one writer, format from the extension
+```
+
+Prefer the terminal? `analyst-agent diagnose spending.xlsx` does the same thing.
+
+## The agent
+
+The rest of the project is the part that *changes* your data, and it earns that
+with a stricter contract. Set a model key and run the agent:
 
 ```bash
 uv sync
-echo 'DEEPSEEK_API_KEY=sk-...' > .env       # DeepSeek is the default model
-uv run python scripts/fetch_raha.py          # dev datasets (dirty/clean pairs)
+echo 'DEEPSEEK_API_KEY=sk-...' > .env       # or ANALYST_PROVIDER=claude + ANTHROPIC_API_KEY
 uv run python -m analyst_agent
 ```
 
