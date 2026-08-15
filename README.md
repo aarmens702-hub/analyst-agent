@@ -18,7 +18,7 @@ uv add git+https://github.com/aarmens702-hub/analyst-agent
 ```python
 import analyst_agent as aa
 
-report = aa.diagnose("spending.xlsx")   # or a DataFrame you already have
+report = aa.diagnose("spending.xlsx")  # or a DataFrame you already have
 print(report)
 ```
 
@@ -44,8 +44,8 @@ schema drift — and it tells you what it checked and found *clean*, not just wh
 it found. The `diagnose` half is pure Python: no model, no kernel, no key.
 
 ```python
-df = aa.read("data.csv")        # one reader: csv, tsv, parquet, xlsx, json, jsonl
-aa.write(cleaned, "out.xlsx")   # one writer, format from the extension
+df = aa.read("data.csv")  # one reader: csv, tsv, parquet, xlsx, json, jsonl
+aa.write(cleaned, "out.xlsx")  # one writer, format from the extension
 ```
 
 Prefer the terminal? `analyst-agent diagnose spending.xlsx` does the same thing.
