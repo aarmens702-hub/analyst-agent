@@ -15,7 +15,7 @@ import contextlib
 import json
 import sys
 
-from analyst_agent import diagnose
+from analyst_agent import checkup
 
 
 def _quiet():
@@ -30,7 +30,7 @@ def _quiet():
 def _diagnose_file(path: str) -> str:
     """The free report: no key, no kernel, read-only (R2)."""
     try:
-        return diagnose.report(path, as_json=True)
+        return checkup.report(path, as_json=True)
     except Exception as exc:  # noqa: BLE001 — R6: errors are results, not crashes
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
 

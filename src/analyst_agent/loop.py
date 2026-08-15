@@ -55,7 +55,7 @@ EXEC_RE = re.compile(r"<execute>(.*?)</execute>", re.DOTALL)
 ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 
 LOAD_TEMPLATE = """\
-from analyst_agent.diagnose import load as _load_file
+from analyst_agent.checkup import load as _load_file
 from analyst_agent.profile import profile_df
 {name} = _load_file({path!r})
 _enc = {name}.attrs.get("encoding")

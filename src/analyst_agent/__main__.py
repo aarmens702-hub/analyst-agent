@@ -59,7 +59,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.diagnose:
-        from analyst_agent.diagnose import report
+        from analyst_agent.checkup import report
 
         try:
             print(report(args.diagnose, as_json=args.json))

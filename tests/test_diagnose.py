@@ -7,7 +7,7 @@ the detection engine, is reachable without a model being involved at all.
 
 import pandas as pd
 
-from analyst_agent import diagnose
+from analyst_agent import checkup
 
 
 def write_csv(tmp_path):
@@ -26,7 +26,7 @@ def test_a_report_needs_no_model_no_kernel_and_no_key(tmp_path, monkeypatch) -> 
     """The whole point: a stranger can run this on their own file before
     deciding whether to trust an agent with it."""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    report = diagnose.report(write_csv(tmp_path))
+    report = checkup.report(write_csv(tmp_path))
 
     assert "40 rows" in report and "3 columns" in report
     assert "numbers-as-strings" in report
@@ -139,7 +139,7 @@ def test_a_windows_encoded_export_still_gets_a_report(tmp_path) -> None:
     rows = "Supplier,Amount\n" + "\n".join(f"Vendor {i},£{i}25.00" for i in range(30))
     path.write_bytes(rows.encode("cp1252"))
 
-    report = diagnose.report(path)
+    report = checkup.report(path)
 
     assert "30 rows" in report
     assert "cp1252" in report, "the fallback must be reported, not silent"
@@ -157,7 +157,7 @@ def test_the_transaction_fixture_scores_against_its_own_ground_truth(tmp_path) -
     import make_transactions
 
     path = make_transactions.write(tmp_path)[0]  # q1, the un-drifted schema
-    report = diagnose.report(path)
+    report = checkup.report(path)
 
     assert "amount" in report, "five money formats must not read as clean"
     assert "posted_at" in report, "four timestamp formats must not read as clean"
