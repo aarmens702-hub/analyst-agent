@@ -163,3 +163,28 @@ def test_the_transaction_fixture_scores_against_its_own_ground_truth(tmp_path) -
     assert "posted_at" in report, "four timestamp formats must not read as clean"
     assert "merchant" in report
     assert "N/A" in report or "sentinel" in report
+
+
+def test_render_console_styles_findings_without_corrupting_the_facts(tmp_path) -> None:
+    """The terminal report is styled for a person, but the facts must survive:
+    the slug, the columns, and the counts are all still there in the captured
+    output. rich degrades to plain text off a TTY, so a pipe or a test sees no
+    escape codes — which is what keeps --json and piped output clean."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from analyst_agent import checkup
+
+    path = write_csv(tmp_path)
+    frame = checkup.load(path)
+    result = checkup.detect_all(frame, "beers.csv")
+    buffer = StringIO()
+    checkup.render_console(path, frame, result, console=Console(file=buffer, width=90))
+
+    out = buffer.getvalue()
+    assert "beers.csv" in out
+    assert "numbers-as-strings" in out
+    assert "ounces" in out
+    assert "fixable" in out and "signals clear" in out
+    assert "\x1b[" not in out, "no ANSI escapes when the console is not a TTY"

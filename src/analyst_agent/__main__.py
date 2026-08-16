@@ -59,10 +59,16 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.diagnose:
-        from analyst_agent.checkup import report
+        from analyst_agent import checkup
 
         try:
-            print(report(args.diagnose, as_json=args.json))
+            if args.json:
+                print(checkup.report(args.diagnose, as_json=True))
+            else:
+                # styled for a terminal; rich degrades to plain text off a TTY
+                frame = checkup.load(args.diagnose)
+                result = checkup.detect_all(frame, os.path.basename(args.diagnose))
+                checkup.render_console(args.diagnose, frame, result)
         except (OSError, ValueError) as exc:
             print(f"could not read {args.diagnose}: {exc}")
             return 1
