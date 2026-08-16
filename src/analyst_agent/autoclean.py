@@ -104,6 +104,11 @@ class CleanSummary:
         self.applied = applied
         self.needs_review = needs_review
 
+    def samples(self, per_fix: int = 3) -> list[dict]:
+        """The before/after receipts for each applied fix — what actually
+        changed, for the notebook renderer and anyone who wants the diff."""
+        return changed_cells(self._before, self._after, self.applied, per_fix)
+
     def to_dict(self) -> dict:
         return {
             "applied": self.applied,
@@ -142,6 +147,90 @@ def _slim(finding: dict, **extra) -> dict:
         "grade": finding["grade"],
         **extra,
     }
+
+
+def changed_cells(
+    before: pd.DataFrame, after: pd.DataFrame, applied: list[dict], per_fix: int = 3
+) -> list[dict]:
+    """The concrete cells each applied fix changed — the receipts for `clean`.
+
+    For every fix in `applied`, up to `per_fix` example cells whose value differs
+    between `before` and `after` in that fix's columns. Rows align because clean
+    never deletes rows (dedup is deferred), so a cell change is well-defined by
+    (column, position). A column present in `before` but gone from `after` is a
+    constant-drop (disease 19): reported as a single `removed` example carrying
+    the dropped constant, not a value pair.
+    """
+    out: list[dict] = []
+    for fix in applied:
+        examples: list[dict] = []
+        for col in fix["columns"]:
+            if col not in before.columns:
+                continue
+            if col not in after.columns:  # column dropped (d19 constant-drop)
+                series = before[col]
+                value = series.iloc[0] if len(series) else None
+                examples.append({"column": col, "removed": True, "value": value})
+                continue
+            b = before[col].to_numpy()
+            a = after[col].to_numpy()
+            for row in range(min(len(b), len(a))):
+                ov, nv = b[row], a[row]
+                # NaN == NaN is False, so guard: both-null is not a change
+                if _same(ov, nv):
+                    continue
+                examples.append({"column": col, "row": row, "old": ov, "new": nv})
+                if len(examples) >= per_fix:
+                    break
+            if len(examples) >= per_fix:
+                break
+        out.append(
+            {
+                "disease": fix["disease"],
+                "slug": fix["slug"],
+                "columns": fix["columns"],
+                "examples": examples,
+            }
+        )
+    return out
+
+
+def _same(a, b) -> bool:
+    """True if two cell values are equal *or* both missing — so a NaN that stays
+    NaN does not read as a change."""
+    a_null, b_null = pd.isna(a), pd.isna(b)
+    if a_null or b_null:
+        return bool(a_null and b_null)
+    return bool(a == b)
+
+
+def styler_diff(before: pd.DataFrame, after: pd.DataFrame, max_rows: int = 200):
+    """A pandas Styler over `after` with every changed cell highlighted green.
+
+    Aligned on the columns the two frames share (a dropped column simply is not
+    shown) and head-capped at `max_rows` — a Styler renders every cell, so the
+    full frame is for eyeballing, not for a million rows.
+
+    Needs jinja2 (every pandas Styler does); the keyless core does not depend on
+    it, so this opt-in view raises pandas' own clear ImportError if it's absent.
+    The inline before/after in the notebook card needs no such dependency.
+    """
+    common = [c for c in after.columns if c in before.columns]
+    a = after[common].head(max_rows)
+    b = before[common].head(max_rows)
+
+    def _mark(_data):
+        marks = a.copy()
+        for col in common:
+            bc, ac = b[col].to_numpy(), a[col].to_numpy()
+            styles = [
+                "background-color: #1e3a32" if not _same(bc[i], ac[i]) else ""
+                for i in range(len(ac))
+            ]
+            marks[col] = styles
+        return marks
+
+    return a.style.apply(_mark, axis=None)
 
 
 def clean(df: pd.DataFrame, policy: str = "auto") -> tuple[pd.DataFrame, CleanSummary]:

@@ -10,6 +10,71 @@ trustworthily, only chat with it.
 import pandas as pd
 
 import analyst_agent as aa
+from analyst_agent.autoclean import changed_cells
+
+
+def test_changed_cells_reports_the_before_and_after_of_a_value_fix() -> None:
+    before = pd.DataFrame({"amount": ["$1,200", "$15"], "note": ["a", "b"]})
+    after = pd.DataFrame({"amount": [1200.0, 15.0], "note": ["a", "b"]})
+    applied = [{"disease": 1, "slug": "numbers-as-strings", "columns": ["amount"]}]
+
+    out = changed_cells(before, after, applied)
+
+    assert len(out) == 1
+    fix = out[0]
+    assert fix["disease"] == 1 and fix["columns"] == ["amount"]
+    pairs = {(e["old"], e["new"]) for e in fix["examples"]}
+    assert ("$1,200", 1200.0) in pairs
+    assert all(e["column"] == "amount" for e in fix["examples"])
+
+
+def test_changed_cells_reports_a_dropped_constant_column_as_removed() -> None:
+    before = pd.DataFrame({"amount": [1.0, 2.0], "constant": ["x", "x"]})
+    after = pd.DataFrame({"amount": [1.0, 2.0]})
+    applied = [{"disease": 19, "slug": "constant-column", "columns": ["constant"]}]
+
+    out = changed_cells(before, after, applied)
+
+    assert out[0]["examples"] == [{"column": "constant", "removed": True, "value": "x"}]
+
+
+def test_changed_cells_is_empty_when_a_fix_changed_nothing() -> None:
+    frame = pd.DataFrame({"note": ["a", "b"]})
+    applied = [{"disease": 6, "slug": "whitespace", "columns": ["note"]}]
+
+    out = changed_cells(frame, frame.copy(), applied)
+
+    assert out[0]["examples"] == []
+
+
+def test_summary_samples_are_the_changed_cells_of_the_applied_fixes() -> None:
+    df = pd.DataFrame({"amount": ["$1,200", "$3,400.50", "$15", "$980"] * 5})
+    _cleaned, summary = aa.clean(df)
+
+    samples = summary.samples()
+
+    assert any(
+        s["disease"] == 1 and any(e.get("new") == 1200.0 for e in s["examples"])
+        for s in samples
+    )
+
+
+def test_styler_diff_returns_a_styler_highlighting_the_changed_cells() -> None:
+    import pytest
+
+    pytest.importorskip("jinja2")  # pandas Styler needs it; diff() is opt-in extra
+    from pandas.io.formats.style import Styler
+
+    from analyst_agent.autoclean import styler_diff
+
+    before = pd.DataFrame({"amount": ["$1,200", "$15"]})
+    after = pd.DataFrame({"amount": [1200.0, 15.0]})
+
+    styled = styler_diff(before, after)
+
+    assert isinstance(styled, Styler)
+    html = styled.to_html()
+    assert "background-color: #1e3a32" in html
 
 
 def test_clean_fixes_the_safe_diseases_and_defers_the_judgement_calls() -> None:
