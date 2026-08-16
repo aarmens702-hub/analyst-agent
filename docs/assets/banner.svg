@@ -1,0 +1,50 @@
+<svg width="1200" height="300" viewBox="0 0 1200 300" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="analyst-agent — verified hands for your data">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="300" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0a3338"/>
+      <stop offset="1" stop-color="#0e6a74"/>
+    </linearGradient>
+    <linearGradient id="seal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7fe0d6"/>
+      <stop offset="1" stop-color="#3fb6ba"/>
+    </linearGradient>
+    <style>
+      .mark { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-weight: 800; letter-spacing: -0.025em; }
+      .tag  { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-weight: 400; }
+      .meta { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 0.02em; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="300" fill="url(#bg)"/>
+
+  <!-- provenance motif: a lineage graph, raw file -> checks -> trusted claim -->
+  <g opacity="0.16" stroke="#bff0ef" stroke-width="2" fill="none">
+    <line x1="980" y1="150" x2="1050" y2="88"/>
+    <line x1="980" y1="150" x2="1050" y2="150"/>
+    <line x1="980" y1="150" x2="1050" y2="212"/>
+    <line x1="1050" y1="88" x2="1120" y2="120"/>
+    <line x1="1050" y1="150" x2="1120" y2="120"/>
+    <line x1="1050" y1="212" x2="1120" y2="180"/>
+    <line x1="1120" y1="120" x2="1120" y2="180"/>
+  </g>
+  <g opacity="0.9">
+    <circle cx="980" cy="150" r="8" fill="#bff0ef" opacity="0.35"/>
+    <circle cx="1050" cy="88" r="6" fill="#bff0ef" opacity="0.3"/>
+    <circle cx="1050" cy="150" r="6" fill="#bff0ef" opacity="0.3"/>
+    <circle cx="1050" cy="212" r="6" fill="#bff0ef" opacity="0.3"/>
+    <circle cx="1120" cy="120" r="9" fill="url(#seal)"/>
+    <circle cx="1120" cy="180" r="6" fill="#bff0ef" opacity="0.3"/>
+  </g>
+
+  <!-- verified seal -->
+  <g transform="translate(96 96)">
+    <circle cx="0" cy="0" r="30" fill="none" stroke="url(#seal)" stroke-width="3"/>
+    <path d="M -13 1 L -4 11 L 15 -12" stroke="url(#seal)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  </g>
+
+  <text x="150" y="112" class="mark" font-size="62" fill="#f3fcfb">analyst-agent</text>
+  <text x="152" y="164" class="tag" font-size="30" fill="#a9dbde">Verified hands for your data.</text>
+
+  <line x1="152" y1="206" x2="700" y2="206" stroke="#2c7079" stroke-width="1.5"/>
+  <text x="152" y="238" class="meta" font-size="16" fill="#7fc3c9">22 DATA-QUALITY CHECKS · EXECUTED VERIFICATION · FULL LINEAGE</text>
+</svg>

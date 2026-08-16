@@ -1,10 +1,19 @@
-# analyst-agent
+<div align="center">
 
-**Verified hands for your data.** An AI analyst that cleans messy real-world
-data and answers questions over it, where every result traces back to the raw
-file through checks that actually ran. LLM-authored fixes only count when
-executed verification agrees; every answer ships with its code, its checks, and
-its lineage.
+<img src="docs/assets/banner.svg" alt="analyst-agent — verified hands for your data" width="100%">
+
+<br>
+
+![tests](https://img.shields.io/badge/tests-359%20passing-2e7d57)
+![python](https://img.shields.io/badge/python-3.12-0c6b74)
+![status](https://img.shields.io/badge/status-publish--ready-2e7d57)
+![license](https://img.shields.io/badge/license-choose%20one-a4680f)
+
+**An AI analyst that cleans messy data and answers questions over it — where every result traces back to the raw file through checks that actually ran.**
+
+[30 seconds](#30-seconds) · [The agent](#the-agent) · [MCP server](#mcp-server) · [How it works](#how-it-works) · [Skills](#skills)
+
+</div>
 
 ## 30 seconds
 
@@ -18,37 +27,29 @@ uv add git+https://github.com/aarmens702-hub/analyst-agent
 ```python
 import analyst_agent as aa
 
-report = aa.diagnose("spending.xlsx")  # or a DataFrame you already have
+report = aa.diagnose("spending.xlsx")   # or a DataFrame you already have
 print(report)
 ```
 
-```text
-spending.xlsx — 136 rows × 9 columns
-  ⚠  not utf-8: read as cp1252 (a Windows-era export)
-
-  6 fixable · 2 flagged · 15 signals clear
-
-  d01  numbers-as-strings  [Amount]
-        134/136 values carry currency/unit residue; samples: '26,594.25', '37,224.00'
-        safe to fix automatically · confidence 1.00
-  d07  case-spelling-variants  [Account Code Description]
-        'UK air travel – all classes' ~ 'UK rail travel – all classes'
-        needs a judgement call · confidence 0.90
-  …
-  checked and clean: 2-5, 8-16, 19, 22   (absence here is a check that ran, not a silence)
-```
+<div align="center">
+<img src="docs/assets/terminal.svg" alt="analyst-agent diagnose output" width="720">
+</div>
 
 That is real output on a real UK government spending file. 22 named checks —
 money stored as text, mixed date formats, fake missing values, encoding damage,
 schema drift — and it tells you what it checked and found *clean*, not just what
 it found. The `diagnose` half is pure Python: no model, no kernel, no key.
 
+Then clean it — deterministically, verified, still no model:
+
 ```python
-df = aa.read("data.csv")  # one reader: csv, tsv, parquet, xlsx, json, jsonl
-aa.write(cleaned, "out.xlsx")  # one writer, format from the extension
+df = aa.read("data.csv")          # one reader: csv, tsv, parquet, xlsx, json, jsonl
+cleaned, summary = aa.clean(df)   # safe fixes applied and re-checked; the rest deferred
+aa.write(cleaned, "out.xlsx")     # one writer, format from the extension
 ```
 
-Prefer the terminal? `analyst-agent diagnose spending.xlsx` does the same thing.
+Prefer the terminal? `analyst-agent diagnose spending.xlsx` prints the same
+report in colour.
 
 ## The agent
 
@@ -118,6 +119,20 @@ plus `ANTHROPIC_API_KEY` to swap the model.
 Gates in MCP mode follow the same policy as headless mode: AUTO-grade fixes
 run, judgement calls come back in `needs_human`, and the calling agent never
 decides them.
+
+## How it compares
+
+We don't out-broad the broad tools. We're the only one that verifies the
+cleaning and keeps an audit trail — the only one you'd trust with a number that
+matters.
+
+| | Ask &amp; chart | Cleans your data | Verifies fixes | Audit trail | Scale |
+| --- | :---: | :---: | :---: | :---: | :---: |
+| pandas-ai | ✓ | ad hoc | — | — | in-memory |
+| Code Interpreter / Julius | ✓ | ad hoc | — | — | in-memory |
+| Great Expectations / dbt | — | — | you write rules | ✓ | warehouse |
+| ydata-profiling | — | — | — | report only | in-memory |
+| **analyst-agent** | *planned* | **verified** | **✓** | **✓** | in-memory |
 
 ## How it works
 
