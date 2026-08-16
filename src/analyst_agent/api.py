@@ -18,7 +18,18 @@ from pathlib import Path
 import pandas as pd
 
 from analyst_agent import checkup as _checkup
+from analyst_agent.autoclean import CleanSummary, clean
 from analyst_agent.detect import SINGLE_FRAME, detect_all
+
+__all__ = [
+    "CleanSummary",
+    "Report",
+    "clean",
+    "diagnose",
+    "read",
+    "read_sql",
+    "write",
+]
 
 
 class Report:

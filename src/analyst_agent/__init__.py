@@ -11,9 +11,26 @@ The LLM-authored cleaning with gates and provenance is the agent surface,
 `python -m analyst_agent` (or the MCP server, `analyst-agent-mcp`).
 """
 
-from analyst_agent.api import Report, diagnose, read, read_sql, write
+from analyst_agent.api import (
+    CleanSummary,
+    Report,
+    clean,
+    diagnose,
+    read,
+    read_sql,
+    write,
+)
 
-__all__ = ["Report", "diagnose", "main", "read", "read_sql", "write"]
+__all__ = [
+    "CleanSummary",
+    "Report",
+    "clean",
+    "diagnose",
+    "main",
+    "read",
+    "read_sql",
+    "write",
+]
 
 
 def main() -> int:
