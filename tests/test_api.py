@@ -25,6 +25,19 @@ def test_diagnose_on_a_dataframe_is_pure_and_keyless() -> None:
     assert "amount" in report.to_json()
 
 
+def test_report_repr_html_renders_the_notebook_card() -> None:
+    """In a notebook, `aa.diagnose(df)` renders as a self-contained HTML card,
+    not the plain-text repr — carrying the name, a finding, and the footer."""
+    df = pd.DataFrame({"amount": ["$1,200", "$3,400.50", "$15", "$980"] * 5})
+
+    html = aa.diagnose(df, name="txns.csv")._repr_html_()
+
+    assert html.startswith("<div")
+    assert "txns.csv" in html
+    assert any(f["slug"] in html for f in aa.diagnose(df).findings)
+    assert "absence is a checked claim" in html
+
+
 def test_read_handles_every_format_and_preserves_sentinels(tmp_path) -> None:
     """One reader across the formats a developer actually has data in — and
     'N/A' survives every path, because the engine can only report a sentinel

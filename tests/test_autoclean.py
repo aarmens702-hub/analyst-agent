@@ -59,6 +59,34 @@ def test_summary_samples_are_the_changed_cells_of_the_applied_fixes() -> None:
     )
 
 
+def test_clean_summary_repr_html_renders_the_notebook_card() -> None:
+    """In a notebook, a clean summary renders as the HTML card — an applied fix
+    marked done and at least one before/after example."""
+    df = pd.DataFrame(
+        {"amount": ["$1,200", "$3,400.50", "$15", "$980"] * 5, "const": ["x"] * 20}
+    )
+    _cleaned, summary = aa.clean(df)
+
+    html = summary._repr_html_()
+
+    assert html.startswith("<div")
+    assert "✓" in html
+    assert "→" in html
+
+
+def test_clean_summary_diff_is_a_styler_of_the_changed_frame() -> None:
+    """`summary.diff()` is the opt-in full-frame highlighted view."""
+    import pytest
+
+    pytest.importorskip("jinja2")
+    from pandas.io.formats.style import Styler
+
+    df = pd.DataFrame({"amount": ["$1,200", "$3,400.50", "$15", "$980"] * 5})
+    _cleaned, summary = aa.clean(df)
+
+    assert isinstance(summary.diff(), Styler)
+
+
 def test_styler_diff_returns_a_styler_highlighting_the_changed_cells() -> None:
     import pytest
 

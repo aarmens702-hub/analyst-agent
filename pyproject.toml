@@ -56,6 +56,9 @@ dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.2",
     "tdd-guard-pytest>=0.1.2",
+    # test-only: exercises CleanSummary.diff()'s pandas Styler. NOT a runtime
+    # dependency — the keyless core and the notebook cards never need jinja2.
+    "jinja2>=3.0",
 ]
 
 [tool.pytest.ini_options]

@@ -11,13 +11,13 @@
 
 **An AI analyst that cleans messy data and answers questions over it — where every result traces back to the raw file through checks that actually ran.**
 
-[30 seconds](#30-seconds) · [The agent](#the-agent) · [MCP server](#mcp-server) · [How it works](#how-it-works) · [Skills](#skills)
+[30 seconds](#30-seconds) · [First 60 seconds](docs/first-60-seconds.md) · [The agent](#the-agent) · [MCP server](#mcp-server) · [How it works](#how-it-works) · [Skills](#skills)
 
 </div>
 
 ## 30 seconds
 
-Point it at a file. No API key, no setup, nothing to trust yet:
+Point it at a file. No API key, no kernel, no Docker — nothing to trust yet:
 
 ```bash
 # from source today; `pip install analyst-agent` once published (see Publishing status)
@@ -27,7 +27,7 @@ uv add git+https://github.com/aarmens702-hub/analyst-agent
 ```python
 import analyst_agent as aa
 
-report = aa.diagnose("spending.xlsx")   # or a DataFrame you already have
+report = aa.diagnose("spending.xlsx")  # or a DataFrame you already have
 print(report)
 ```
 
@@ -43,13 +43,26 @@ it found. The `diagnose` half is pure Python: no model, no kernel, no key.
 Then clean it — deterministically, verified, still no model:
 
 ```python
-df = aa.read("data.csv")          # one reader: csv, tsv, parquet, xlsx, json, jsonl
-cleaned, summary = aa.clean(df)   # safe fixes applied and re-checked; the rest deferred
-aa.write(cleaned, "out.xlsx")     # one writer, format from the extension
+df = aa.read("data.csv")  # one reader: csv, tsv, parquet, xlsx, json, jsonl
+cleaned, summary = aa.clean(df)  # safe fixes applied and re-checked; the rest deferred
+aa.write(cleaned, "out.xlsx")  # one writer, format from the extension
 ```
 
+In a notebook, skip `print` — `report` and `summary` render themselves as
+styled cards, colour-coded by severity. The same import registers a `.aa`
+accessor on every DataFrame, so it reads like `df.describe()`:
+
+```python
+df.aa.diagnose()  # the report, as a card
+cleaned, summary = df.aa.clean()  # the summary, as a card — before/after per fix
+```
+
+Still no model, no kernel, no Docker — the accessor and the cards are part of
+the same keyless half.
+
 Prefer the terminal? `analyst-agent diagnose spending.xlsx` prints the same
-report in colour.
+report in colour. New to the library? [First 60 seconds](docs/first-60-seconds.md)
+walks from install to a cleaned file.
 
 ## The agent
 

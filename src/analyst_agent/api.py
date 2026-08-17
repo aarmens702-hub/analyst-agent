@@ -68,6 +68,13 @@ class Report:
     def __repr__(self) -> str:
         return _checkup.render(self._name, self._frame, self._result)
 
+    def _repr_html_(self) -> str:
+        # lazy so `import analyst_agent` stays cheap and side-effect-free — the
+        # notebook renderer is only needed when a notebook asks for HTML
+        from analyst_agent import notebook as _notebook
+
+        return _notebook.report_html(self._name, self._frame, self._result)
+
 
 def diagnose(data, name: str | None = None) -> Report:
     """Diagnose a DataFrame or a file path against the 22-check engine.

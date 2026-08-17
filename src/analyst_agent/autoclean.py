@@ -138,6 +138,18 @@ class CleanSummary:
             lines.append(f"  · d{r['disease']:02d} {r['slug']} [{where}]{why}")
         return "\n".join(lines)
 
+    def _repr_html_(self) -> str:
+        from analyst_agent import notebook as _notebook
+
+        return _notebook.clean_html(self)
+
+    def diff(self, max_rows: int = 200):
+        """A pandas Styler of the cleaned frame with every changed cell
+        highlighted — the opt-in full-frame view (needs jinja2; see
+        `styler_diff`). The inline before/after in the notebook card needs no
+        such dependency."""
+        return styler_diff(self._before, self._after, max_rows)
+
 
 def _slim(finding: dict, **extra) -> dict:
     return {

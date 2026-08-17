@@ -23,20 +23,23 @@ notebook delight, a published benchmark.
 ## Phase 1 — Transformative install (the wedge + delight)
 
 The single most important phase: make `pip install` pay off in one line, on the
-thing nobody else does well.
+thing nobody else does well. **DONE 2026-08-17** — the whole phase shipped; see
+`specs/2026-08-16-notebook-output-design.md`.
 
 - P1.1 `aa.clean(df) -> (cleaned_df, CleanSummary)` — deterministic fixes for
   AUTO-grade diseases (numbers-as-strings, sentinels, whitespace, constant
   columns, dup rows, single-format dates), no LLM, each verified via `detect_one`
   and reverted if it does not clear; GATE/HUMAN deferred to `summary.needs_review`.
-  Input never mutated. *(in progress)*
+  Input never mutated. **✓ done**
 - P1.2 **Notebook-native output** — `_repr_html_` on `Report` and `CleanSummary`:
-  colored severity, per-column finding/clear strip, before/after samples. This is
-  where the data-science audience is won.
-- P1.3 **pandas accessor** — `df.aa.diagnose()`, `df.aa.clean()`. Zero learning
-  curve, feels native.
-- P1.4 **Styler before/after** — `clean` can return a highlighted view of exactly
-  what changed (P5 spec's cheaper-than-ANSI idea, finally built).
+  a self-contained dark "verified ledger" card (inline-only, survives
+  GitHub/nbconvert), colored by grade, with before→after samples on a clean.
+  **✓ done** (`notebook.py`).
+- P1.3 **pandas accessor** — `df.aa.diagnose()`, `df.aa.clean()`, registered on
+  import with the non-idempotent-warning guard. **✓ done** (`accessor.py`).
+- P1.4 **Styler before/after** — folded into the clean card's inline diff, plus
+  `summary.diff()` returning a highlighted pandas Styler (opt-in; needs jinja2).
+  **✓ done**.
 
 ## Phase 2 — Ingestion everywhere (data lives in more than files)
 

@@ -11,6 +11,8 @@ The LLM-authored cleaning with gates and provenance is the agent surface,
 `python -m analyst_agent` (or the MCP server, `analyst-agent-mcp`).
 """
 
+# importing the accessor module registers the `df.aa` accessor as a side effect
+from analyst_agent import accessor as _accessor  # noqa: F401
 from analyst_agent.api import (
     CleanSummary,
     Report,
