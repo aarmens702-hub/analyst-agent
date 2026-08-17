@@ -38,6 +38,37 @@ def test_report_repr_html_renders_the_notebook_card() -> None:
     assert "absence is a checked claim" in html
 
 
+def test_read_dispatches_a_compressed_csv_through_the_public_api(tmp_path) -> None:
+    """End-to-end: aa.read routes `.csv.gz` to the files reader, decompresses,
+    and the sentinel still survives — the dispatch + compression path wired."""
+    path = tmp_path / "d.csv.gz"
+    pd.DataFrame({"id": ["1", "2"], "val": ["N/A", "30"]}).to_csv(
+        path, index=False, compression="gzip"
+    )
+
+    got = aa.read(path)
+
+    assert list(got.columns) == ["id", "val"]
+    assert (got["val"].astype(str) == "N/A").sum() == 1
+
+
+def test_read_routes_a_db_connection_to_the_sql_reader(tmp_path) -> None:
+    """End-to-end: passing a DBAPI connection + query routes aa.read to the SQL
+    reader and returns the rows — the query-kwarg dispatch branch wired."""
+    import sqlite3
+
+    db = tmp_path / "t.db"
+    con = sqlite3.connect(db)
+    con.execute("create table t (id integer, val text)")
+    con.executemany("insert into t values (?, ?)", [(1, "a"), (2, "b")])
+    con.commit()
+
+    got = aa.read(con, query="select * from t order by id")
+
+    assert list(got["val"]) == ["a", "b"]
+    con.close()
+
+
 def test_read_handles_every_format_and_preserves_sentinels(tmp_path) -> None:
     """One reader across the formats a developer actually has data in — and
     'N/A' survives every path, because the engine can only report a sentinel

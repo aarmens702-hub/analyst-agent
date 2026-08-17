@@ -39,6 +39,12 @@ dependencies = [
     "rich>=15.0.0",
 ]
 
+[project.optional-dependencies]
+# read from more places without bloating the keyless core. Cloud object storage
+# (fsspec: s3/gs/az), Google Sheets, and warehouses are deferred — see the
+# non-goals in specs/2026-08-17-ingestion-design.md.
+sql = ["sqlalchemy>=2.0"]
+
 [project.urls]
 Homepage = "https://github.com/aarmens702-hub/analyst-agent"
 Repository = "https://github.com/aarmens702-hub/analyst-agent"
