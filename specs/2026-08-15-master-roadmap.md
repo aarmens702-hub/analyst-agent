@@ -45,18 +45,24 @@ thing nobody else does well. **DONE 2026-08-17** — the whole phase shipped; se
 
 One `aa.read(source)` that dispatches on extension **or** URI scheme, keeping the
 sentinel-safe/sniff/encoding discipline throughout. Heavy connectors are optional
-extras (`pip install analyst-agent[sql,cloud]`).
+extras (`pip install analyst-agent[sql,cloud]`). **Core DONE 2026-08-17** — a
+`readers/` package (dispatcher + per-source modules); spec
+`specs/2026-08-17-ingestion-design.md`.
 
-- P2.1 Files, expanded: + `.gz/.zip/.bz2` compression, parquet directories,
-  `.feather`, `.orc`.
-- P2.2 Databases via SQLAlchemy: Postgres, MySQL, SQLite, SQL Server, DuckDB —
-  `aa.read("postgresql://…", query=…)`.
-- P2.3 Cloud object storage: `s3://`, `gs://`, `az://` (via fsspec) — extends the
-  existing `load_url` content-hash lineage to these.
-- P2.4 Google Sheets (public + service-account).
-- P2.5 Warehouses as optional extras: Snowflake, BigQuery.
-- P2.6 REST/JSON APIs: `aa.read("https://…json")` with a records path.
-  Every remote source keeps R12's trusted-as-of lineage (URI, fetch time, hash).
+- P2.1 Files, expanded: `.gz/.zip/.bz2/.xz` compression, parquet directories,
+  `.feather`, `.orc`. **✓ done** (`readers/files.py`, no new deps).
+- P2.2 Databases: a DBAPI connection (sqlite, keyless) or a SQLAlchemy URL
+  (`postgresql://…`, optional `[sql]` extra), `query=…`. **✓ done**
+  (`readers/sql.py`).
+- P2.6 REST/JSON APIs: `aa.read("https://…json", records_path=…)` over stdlib
+  urllib, json/csv by content-type then extension. **✓ done**
+  (`readers/remote.py`).
+- P2.3 Cloud object storage (`s3://`, `gs://`, `az://` via fsspec), P2.4 Google
+  Sheets, P2.5 warehouses (Snowflake, BigQuery) — **deferred**: need
+  credentials/network, so they can't be validated offline with the TDD
+  methodology. They become documented optional extras that stamp lineage on
+  whatever DataFrame arrives; we do not rebuild connectors fsspec/MCP already
+  provide.
 
 ## Phase 3 — Query parity + charts (pandas-ai's turf, verified)
 
