@@ -91,29 +91,21 @@ def diagnose(data, name: str | None = None) -> Report:
     return Report(frame, detect_all(frame, label), label)
 
 
-# extension -> reader; csv-family goes through diagnose.load for the smart
-# delimiter sniff, encoding fallback, and keep_default_na=False discipline
-def read(path, **kwargs) -> pd.DataFrame:
-    """Read a file into a DataFrame, format inferred from the extension.
+def read(source, **kwargs) -> pd.DataFrame:
+    """Read data into a DataFrame from a path, a database, or a URL.
 
-    Supported: .csv/.tsv/.txt, .parquet/.pq, .xlsx/.xls, .json, .jsonl/.ndjson.
+    The source is dispatched (see `analyst_agent.readers`):
+    - a local path — csv/tsv/txt, parquet (file or directory), xlsx/xls, json,
+      jsonl/ndjson, feather, orc, optionally .gz/.zip/.bz2 compressed;
+    - a database — a DBAPI connection or a SQLAlchemy URL, with `query=...`;
+    - an http(s) URL — json or csv, `records_path=...` to pluck nested json.
+
     Missing-value tokens ("N/A", "-") are preserved as strings, not silently
     coerced to NaN — the detection engine must see them to report them.
     """
-    p = Path(path)
-    suffix = p.suffix.lower()
-    if suffix in {".csv", ".tsv", ".txt", ".parquet", ".pq"}:
-        return _checkup.load(p)
-    if suffix in {".xlsx", ".xls"}:
-        return pd.read_excel(p, keep_default_na=False, dtype=str, **kwargs)
-    if suffix == ".json":
-        return pd.read_json(p, **kwargs).astype(object)
-    if suffix in {".jsonl", ".ndjson"}:
-        return pd.read_json(p, lines=True, **kwargs).astype(object)
-    raise ValueError(
-        f"unsupported extension {suffix!r} for {p.name}; supported: "
-        ".csv .tsv .parquet .xlsx .xls .json .jsonl"
-    )
+    from analyst_agent import readers
+
+    return readers.read(source, **kwargs)
 
 
 def read_sql(query: str, connection) -> pd.DataFrame:
