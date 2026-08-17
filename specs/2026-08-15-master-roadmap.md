@@ -65,7 +65,13 @@ extras (`pip install analyst-agent[sql,cloud]`).
 - P3.3 Chart output on `ask` — when the question implies a chart, return the figure.
 - P3.4 Multiple dataframes / joins in one `ask`.
 - P3.5 Model-agnostic: an OpenAI provider behind the `generate()` seam (we have
-  DeepSeek + Claude).
+  DeepSeek + Claude). **OpenRouter is the concrete path** — it is an
+  OpenAI-compatible endpoint, so this is one provider (`base_url` +
+  OpenRouter key) that unlocks every model, plus fallback routing. Ship it as an
+  *optional* provider only: native DeepSeek/Claude stay the default trust-path,
+  because routing adds a party to the prompt hop (pin no-logging/provider prefs)
+  and can weaken native prompt-caching economics — both documented, not waved
+  away.
 - P3.6 Speed pass — the library calls must feel instant next to `df.chat()`.
 
 ## Phase 4 — Proof + distribution
