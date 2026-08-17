@@ -139,6 +139,68 @@ notebook flow. No source changes.
 Each agent TDDs its own files red-first (tdd-guard), runs only its own test
 file, and touches nothing shared — so integration is drop-in + wiring.
 
+## Research refinements (2026-08-17, from the GitHub deep-dive)
+
+Folded into the agent scopes below. Sources: a study of ydata-profiling's
+`_repr_html_`, pandas' accessor/Styler internals, and Strike's onboarding.
+
+**Rendering (Agent A) — the notebook-CSS-bleed defence.** Inline styles make our
+card survive GitHub/nbconvert sanitization (ydata's iframe does *not*), but they
+give **no isolation *from* the host notebook's CSS**: Jupyter ships
+`.jp-RenderedHTMLCommon table/th/td/a {…}` rules and inheritance/`!important` can
+bleed *in*. So set `color`, `background`, `font-family`, `font-size`,
+`line-height`, `border`, `text-align`, `padding`, and `box-sizing: border-box`
+**explicitly on the wrapper AND on every `table`/`th`/`td`/`a`** the card emits —
+never rely on inheritance. Add a `max-width` so the card doesn't stretch full
+width in VSCode. No `:hover`/`@media`/`@keyframes` (they need a `<style>` block
+GitHub strips) — the card is static. `_repr_html_` **returns the string**; never
+ydata's `display()` side-effect that returns `None` (it double-renders and
+breaks nbconvert/`IPython.display.HTML`). Keep the before/after diff **hand-rolled
+HTML**, not a Styler (Styler emits a uuid `<style>` block that GitHub strips and
+is slow on big frames).
+
+**Accessor (Agent B) — the non-idempotent-registration guard.** Registration
+warns (`UserWarning`) every time `"aa"` pre-exists — double import, `%autoreload`,
+tests re-importing. Guard it: `if getattr(pd.DataFrame, "aa", None) is None:`
+before registering. Add a `@staticmethod _validate(obj)` and keep `__init__`
+**cheap** — pandas re-instantiates the accessor on *every* `df.aa` access (no
+caching in current pandas), so `__init__` does validate + store the ref only; all
+work happens in `.diagnose()`/`.clean()` with lazy imports.
+
+**Onboarding (Agent C) — the one-liner is the hook.** ydata's proven growth lever
+is "one-line EDA like `df.describe()`". Lead the README with `df.aa.diagnose()`
+returning a `Report` whose `_repr_html_` *is* the card — immediate visual payoff
+in one line. Keep twin entry points (accessor for notebooks, `aa.diagnose()`
+function + CLI for scripts/CI) so headless users never trip the accessor
+registration. Add a "First 60 seconds" path-to-value block and lead with the
+keyless/zero-setup story (we have a genuinely better version than Strike's Echo).
+
+**Rendering hardening (Agent A), from Strike's own CSS/rendering bugs.** Define
+**every** CSS token *inline* — never reference a custom property the card didn't
+define (Strike shipped `--text`/`--bg` against real `--ink`/`--ground` and got
+wrong colors, #1154). Set explicit `color` AND `background` on the root; no
+external fonts, no external URLs, no JS (assume `<script>`/`<style>` are stripped,
+#1128). "Same content, different environment, silently degraded" is the failure
+class (#659) — so the golden-HTML script must be eyeballed in **≥2 renderers**
+(JupyterLab + nbconvert at minimum; VSCode if available), not one.
+
+**Import safety (Agents A & B, and integration).** `import analyst_agent` runs in
+*every* Jupyter cell that uses `_repr_html_` or `df.aa`, so the import must be
+**side-effect-free**: zero network, zero subprocess, zero Docker/kernel probe
+(Strike killed its process with an eager startup Seatbelt probe, #1098; and our
+standing rule is never to launch Docker on this machine). The accessor's
+`__init__.py` side-effect import must stay pure — the notebook/keyless surface
+already is; do not let the accessor drag in the agent/kernel path.
+
+**Post-Phase-1 follow-ups (logged in `docs/research-followups-2026-08-17.md`, not
+in this build):** `aa.load_example()`; `diagnose --json` with documented exit
+codes; a "why not just ydata-profiling / great-expectations" comparison; MCP
+stdout-channel test (zero non-protocol bytes on fd 1); versioned + atomically
+written provenance/skill/session artifacts; one-function secret redaction across
+every egress (incl. saved skills and the HTML card); OpenRouter/OpenAI-compatible
+provider env-indirection + offline `list_models() -> []` + `Retry-After`; and —
+**propose-only, hand-written core** — content-digest skill governance.
+
 ## Priority
 
 P1 (finishes the transformative-install phase; highest adoption leverage).
