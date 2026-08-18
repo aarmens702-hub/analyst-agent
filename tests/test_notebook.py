@@ -62,6 +62,39 @@ def test_report_html_paints_its_own_background_inline():
     assert "background:#14171a" in card
 
 
+def test_report_html_single_escapes_special_char_column_names():
+    """A column named with '&' must escape exactly once — '&amp;', never the
+    double-escaped '&amp;amp;'. _cols_label already escapes each name, so the
+    call sites must not escape the joined label again."""
+    df = pd.DataFrame({"Q&A": ["$1,200", "$3,400.50", "$15", "$980"] * 5})
+
+    card = report_html("t.csv", df, detect_all(df, "t.csv"))
+
+    assert "Q&amp;A" in card
+    assert "Q&amp;amp;A" not in card
+
+
+def test_finding_escapes_an_unexpected_grade_value():
+    """Defensive: grade is always AUTO/GATE/HUMAN in practice, but the renderer's
+    contract is that NO interpolated value reaches the card unescaped."""
+    from analyst_agent.notebook import _finding
+
+    f = {
+        "disease": 1,
+        "slug": "x",
+        "columns": ["c"],
+        "evidence": "e",
+        "grade": "<b>x</b>",
+        "confidence": 1.0,
+        "indicator": False,
+    }
+
+    html = _finding(f)
+
+    assert "<b>x</b>" not in html
+    assert "&lt;b&gt;x&lt;/b&gt;" in html
+
+
 def _clean_summary():
     """A summary with at least one applied fix that changed cells (d01 money)."""
     from analyst_agent.autoclean import clean

@@ -33,7 +33,13 @@ def read_url(url, records_path=None, **kwargs) -> pd.DataFrame:
     if _decide_format(content_type, url) == "json":
         records = json.loads(text)
         for key in records_path.split(".") if records_path else []:
-            records = records[key]
+            try:
+                records = records[key]
+            except (KeyError, TypeError, IndexError) as exc:
+                raise ValueError(
+                    f"records_path {records_path!r} does not fit the JSON from "
+                    f"{url}: no {key!r} at that level"
+                ) from exc
         return pd.DataFrame(records).astype(object)
     return pd.read_csv(io.StringIO(text), keep_default_na=False, dtype=str, **kwargs)
 
@@ -44,12 +50,19 @@ def _fetch(url: str) -> tuple[str, str]:
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(request) as response:
-            text = response.read(MAX_FETCH_BYTES).decode()
+            charset = response.headers.get_content_charset() or "utf-8"
+            text = response.read(MAX_FETCH_BYTES).decode(charset, errors="replace")
             content_type = response.headers.get_content_type()
+    except urllib.error.HTTPError as exc:
+        # a real HTTP status (404/500/…): the server answered, so don't blame the
+        # sandbox — HTTPError is a URLError subclass and must be caught first
+        raise RuntimeError(
+            f"fetch failed for {url}: HTTP {exc.code} {exc.reason}"
+        ) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(
-            f"fetch failed for {url}: {exc.reason} — in the docker sandbox "
-            "(--network none) remote fetches are unreachable by design"
+            f"fetch failed for {url}: {exc.reason} — host unreachable (in the "
+            "docker sandbox, --network none makes remote fetches fail by design)"
         ) from exc
     return text, content_type
 

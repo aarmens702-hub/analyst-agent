@@ -38,16 +38,16 @@ def read_file(path, **kwargs) -> pd.DataFrame:
     if suffix in _COMPRESSION and len(p.suffixes) >= 2:
         inner = p.suffixes[-2].lower()
         if inner in {".csv", ".tsv", ".txt"}:
-            # keep_default_na=False + object dtype so "N/A" survives; pandas
-            # infers the codec from the path so the sentinel discipline holds
-            sep = "\t" if inner == ".tsv" else ","
-            return pd.read_csv(p, sep=sep, keep_default_na=False, dtype=str, **kwargs)
+            # route through checkup.load so a compressed CSV gets the SAME
+            # delimiter sniff, utf-8->cp1252 fallback, and keep_default_na as a
+            # plain one (it decompresses the sample and infers the codec)
+            return _checkup.load(p, **kwargs)
         if inner == ".json":
             return pd.read_json(p, **kwargs).astype(object)
         if inner in {".jsonl", ".ndjson"}:
             return pd.read_json(p, lines=True, **kwargs).astype(object)
     if suffix in _VIA_CHECKUP:
-        return _checkup.load(p)
+        return _checkup.load(p, **kwargs)
     if suffix in {".xlsx", ".xls"}:
         return pd.read_excel(p, keep_default_na=False, dtype=str, **kwargs)
     if suffix == ".json":

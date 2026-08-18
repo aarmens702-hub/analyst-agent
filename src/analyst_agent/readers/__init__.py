@@ -29,6 +29,11 @@ _SQL_SCHEMES = {
     "bigquery",
 }
 
+# object stores we deliberately do NOT read yet (deferred, see the spec's
+# non-goals) — flagged with a clear message instead of falling through to the
+# local-file reader, which would treat "s3://…" as a mangled local path
+_CLOUD_SCHEMES = {"s3", "gs", "gcs", "az", "abfs", "abfss", "adl", "adlfs"}
+
 
 def _scheme(source) -> str:
     if isinstance(source, str) and "://" in source:
@@ -47,6 +52,12 @@ def read(source, *, query=None, **kwargs):
         from analyst_agent.readers import remote
 
         return remote.read_url(source, **kwargs)
+    if scheme in _CLOUD_SCHEMES:
+        raise NotImplementedError(
+            f"cloud storage ({scheme}://) is deferred, not built yet — fetch it "
+            "with fsspec or your cloud client and pass the DataFrame straight to "
+            "aa.diagnose/aa.clean (they stamp lineage on any frame)."
+        )
     if (
         query is not None
         or scheme.split("+")[0] in _SQL_SCHEMES

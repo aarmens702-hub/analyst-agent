@@ -116,10 +116,12 @@ def _finding(finding) -> str:
         + _span("&nbsp;&nbsp;", MUTED)
         + _span(_esc(finding["slug"]), color, bold=True)
         + _span("&nbsp;&nbsp;", MUTED)
-        + _span(_esc(_cols_label(finding["columns"])), TEAL, mono=True)
+        + _span(_cols_label(finding["columns"]), TEAL, mono=True)
     )
     evidence = _span(_esc(finding["evidence"]), MUTED_2)
-    note = _span(GRADE_NOTE.get(finding["grade"], finding["grade"]), color)
+    # _cols_label already escapes each name; grade is enum but escape the
+    # fallback so no interpolated value ever reaches the card unescaped
+    note = _span(GRADE_NOTE.get(finding["grade"], _esc(finding["grade"])), color)
     if finding["indicator"]:
         tail = _span("&nbsp;&nbsp;&#183;&nbsp;&nbsp;flagged, never auto-fixed", MUTED)
     else:
@@ -195,7 +197,7 @@ def _fix_head(mark, mark_color, slug_color, fix) -> str:
         + _span("&nbsp;&nbsp;", MUTED)
         + _span(_esc(fix["slug"]), slug_color, bold=True)
         + _span("&nbsp;&nbsp;", MUTED)
-        + _span(_esc(_cols_label(fix["columns"])), TEAL, mono=True)
+        + _span(_cols_label(fix["columns"]), TEAL, mono=True)
     )
 
 

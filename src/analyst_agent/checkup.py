@@ -25,7 +25,42 @@ GRADE_NOTE = {
 }
 
 
-def load(path) -> pd.DataFrame:
+_SAMPLE_BYTES = 8192
+
+
+def _text_sample(path: Path, n: int = _SAMPLE_BYTES) -> bytes:
+    """Up to `n` *decompressed* bytes for delimiter/encoding sniffing —
+    transparent to .gz/.bz2/.xz/.zip so a compressed CSV sniffs exactly like a
+    plain one instead of reading gzip magic bytes as text."""
+    suffix = path.suffix.lower()
+    if suffix == ".gz":
+        import gzip
+
+        with gzip.open(path, "rb") as fh:
+            return fh.read(n)
+    if suffix == ".bz2":
+        import bz2
+
+        with bz2.open(path, "rb") as fh:
+            return fh.read(n)
+    if suffix == ".xz":
+        import lzma
+
+        with lzma.open(path, "rb") as fh:
+            return fh.read(n)
+    if suffix == ".zip":
+        import zipfile
+
+        with zipfile.ZipFile(path) as zf:
+            members = [m for m in zf.namelist() if not m.endswith("/")]
+            if not members:
+                return b""
+            with zf.open(members[0]) as fh:
+                return fh.read(n)
+    return path.read_bytes()[:n]
+
+
+def load(path, **kwargs) -> pd.DataFrame:
     """Read a file the way the agent would.
 
     keep_default_na=False on purpose: pandas turns "N/A" into NaN by default,
@@ -37,25 +72,35 @@ def load(path) -> pd.DataFrame:
     dies before a single detector runs — but the fallback is stamped on the
     frame so render() can say it out loud: a silently switched encoding is a
     claim the report never made.
+
+    Compression is transparent: .gz/.bz2/.xz/.zip CSVs sniff and read exactly
+    like their plain form (pandas infers the codec from the path). Extra keyword
+    args are forwarded to the pandas reader and override the sniffed defaults.
     """
     path = Path(path)
     if path.suffix.lower() in {".parquet", ".pq"}:
-        return pd.read_parquet(path)
-    sample = path.read_bytes()[:8192]
+        return pd.read_parquet(path, **kwargs)
+    sample = _text_sample(path)
     try:
         # a multibyte char cut at the 8KB boundary is not evidence against
-        # utf-8; a failure anywhere earlier is
+        # utf-8; a failure anywhere earlier is — but only forgive it when the
+        # sample was actually truncated (a short file's bad byte is real cp1252)
         head, encoding = sample.decode("utf-8-sig"), "utf-8-sig"
     except UnicodeDecodeError as exc:
-        if exc.start >= len(sample) - 3:
+        if exc.start >= len(sample) - 3 and len(sample) >= _SAMPLE_BYTES:
             head, encoding = sample[: exc.start].decode("utf-8-sig"), "utf-8-sig"
         else:
             head, encoding = sample.decode("cp1252", errors="replace"), "cp1252"
     counts = {sep: head.count(sep) for sep in (",", ";", "\t", "|")}
     sep = max(counts, key=counts.get) if any(counts.values()) else ","
-    frame = pd.read_csv(
-        path, sep=sep, encoding=encoding, keep_default_na=False, low_memory=False
-    )
+    read_kwargs = {
+        "sep": sep,
+        "encoding": encoding,
+        "keep_default_na": False,
+        "low_memory": False,
+    }
+    read_kwargs.update(kwargs)  # the caller's options win over the sniffed ones
+    frame = pd.read_csv(path, **read_kwargs)
     frame.attrs["encoding"] = encoding
     return frame
 
