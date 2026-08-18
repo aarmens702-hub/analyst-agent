@@ -67,7 +67,10 @@ extras (`pip install analyst-agent[sql,cloud]`). **Core DONE 2026-08-17** — a
 ## Phase 3 — Query parity + charts (pandas-ai's turf, verified)
 
 - P3.1 `aa.diagnose(df).plot()` — a data-quality overview figure (matplotlib,
-  no heavy dep).
+  no heavy dep). **✓ done 2026-08-17** (`charts.py`): one bar per affected column,
+  coloured by worst grade, keyless, returns an Axes (never `show()`). The
+  deterministic slice of Phase 3; the rest (P3.2 `aa.ask`) wraps the hand-written
+  query loop = propose-diffs, not autonomous.
 - P3.2 `aa.ask(df, "question") -> Answer` — a one-liner over the query loop,
   auto-run, returning the answer + code + executed checks + lineage. The
   `df.chat()` equivalent, but verified.
