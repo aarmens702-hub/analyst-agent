@@ -75,6 +75,13 @@ class Report:
 
         return _notebook.report_html(self._name, self._frame, self._result)
 
+    def plot(self, ax=None):
+        """A matplotlib data-quality overview — findings per column, coloured by
+        grade. Returns an Axes (never calls show); keyless, no kernel."""
+        from analyst_agent import charts
+
+        return charts.overview(self._name, self.findings, self.clear, ax=ax)
+
 
 def diagnose(data, name: str | None = None) -> Report:
     """Diagnose a DataFrame or a file path against the 22-check engine.
