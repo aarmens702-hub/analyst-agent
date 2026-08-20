@@ -1,223 +1,198 @@
 <div align="center">
 
-<img src="docs/assets/banner.svg" alt="analyst-agent — verified hands for your data" width="100%">
+<img src="docs/assets/banner.svg" alt="analyst-agent" width="100%">
 
 <br>
 
-![tests](https://img.shields.io/badge/tests-359%20passing-2e7d57)
-![python](https://img.shields.io/badge/python-3.12-0c6b74)
-![status](https://img.shields.io/badge/status-publish--ready-2e7d57)
-![license](https://img.shields.io/badge/license-choose%20one-a4680f)
+**Diagnose and clean a messy dataset in one line. No API key, and every fix is re-checked before it counts.**
 
-**An AI analyst that cleans messy data and answers questions over it — where every result traces back to the raw file through checks that actually ran.**
+![python](https://img.shields.io/badge/python-3.12-0e7a84)
+![tests](https://img.shields.io/badge/tests-409%20passing-2e9d63)
+&nbsp;
+![no api key](https://img.shields.io/badge/no_API_key-0b2b30)
+![sandboxed](https://img.shields.io/badge/sandboxed-0b2b30)
+![verified fixes](https://img.shields.io/badge/verified_fixes-0b2b30)
 
-[30 seconds](#30-seconds) · [First 60 seconds](docs/first-60-seconds.md) · [The agent](#the-agent) · [MCP server](#mcp-server) · [How it works](#how-it-works) · [Skills](#skills)
+[What it does](#what-it-does) · [How it works](#how-it-works) · [The agent](#the-agent) · [MCP server](#mcp-server)
 
 </div>
 
-## 30 seconds
+<div align="center">
+<img src="docs/assets/hero.svg" alt="A terminal session: aa.diagnose finds graded problems in a CSV, aa.clean fixes the safe ones and shows before and after, then prints the verification and lineage." width="740">
+</div>
 
-Point it at a file. No API key, no kernel, no Docker — nothing to trust yet:
+Most tools will chat with your dataframe. None of them check whether the cleaning
+was right. analyst-agent does. It reads a messy table, tells you what is broken,
+fixes the parts that are safe to fix, and re-runs the check on every fix before it
+keeps it. The half that does this needs no API key and no setup.
+
+## Start here
+
+Not on PyPI yet, so install it from the repo:
 
 ```bash
-# from source today; `pip install analyst-agent` once published (see Publishing status)
-uv add git+https://github.com/aarmens702-hub/analyst-agent
+pip install git+https://github.com/aarmens702-hub/analyst-agent
 ```
+
+Then point it at a file or a DataFrame you already have:
 
 ```python
 import analyst_agent as aa
 
-report = aa.diagnose("spending.xlsx")  # or a DataFrame you already have
-print(report)
+report = aa.diagnose("transactions.csv")   # runs 22 checks, no key, no kernel
+report                                     # prints the list, or a card in a notebook
+
+clean, summary = aa.clean(report)          # applies the safe fixes, re-checks each one
+summary.needs_review                       # the ambiguous ones it will not guess on
+aa.write(clean, "clean.parquet")           # your data back out, any format
 ```
 
-<div align="center">
-<img src="docs/assets/terminal.svg" alt="analyst-agent diagnose output" width="720">
-</div>
+`aa.read` handles the formats you actually get data in: csv, tsv, parquet, xlsx,
+json, jsonl, feather, orc, compressed files (`.gz`, `.zip`, `.bz2`), parquet
+folders, a database connection, or a JSON API.
 
-That is real output on a real UK government spending file. 22 named checks —
-money stored as text, mixed date formats, fake missing values, encoding damage,
-schema drift — and it tells you what it checked and found *clean*, not just what
-it found. The `diagnose` half is pure Python: no model, no kernel, no key.
+## What it does
 
-Then clean it — deterministically, verified, still no model:
-
-```python
-df = aa.read("data.csv")  # one reader: csv, tsv, parquet, xlsx, json, jsonl
-cleaned, summary = aa.clean(df)  # safe fixes applied and re-checked; the rest deferred
-aa.write(cleaned, "out.xlsx")  # one writer, format from the extension
-```
-
-In a notebook, skip `print` — `report` and `summary` render themselves as
-styled cards, colour-coded by severity. The same import registers a `.aa`
-accessor on every DataFrame, so it reads like `df.describe()`:
-
-```python
-df.aa.diagnose()  # the report, as a card
-cleaned, summary = df.aa.clean()  # the summary, as a card — before/after per fix
-```
-
-Still no model, no kernel, no Docker — the accessor and the cards are part of
-the same keyless half.
-
-Prefer the terminal? `analyst-agent diagnose spending.xlsx` prints the same
-report in colour. New to the library? [First 60 seconds](docs/first-60-seconds.md)
-walks from install to a cleaned file.
-
-## The agent
-
-The rest of the project is the part that *changes* your data, and it earns that
-with a stricter contract. Set a model key and run the agent:
-
-```bash
-uv sync
-echo 'DEEPSEEK_API_KEY=sk-...' > .env       # or ANALYST_PROVIDER=claude + ANTHROPIC_API_KEY
-uv run python -m analyst_agent
-```
-
-In the REPL:
-
-```
-/load data/raha/beers/dirty.csv beers        load a CSV as a kernel variable
-which brewery has the most beers?            ask anything — code is gated, then runs
-/clean beers                                 diagnose 22 diseases, fix one by one
-/clean-family "data/vancouver/*.csv" tax     harmonize a family, then clean each slice
-/skills                                      the library: what it holds, what it earned
-/why                                         where an answer came from, and if it holds
-/quit
-```
-
-Every model-written cell stops at a gate: `[r]un` executes it, `[j]eject`
-sends a steering note back, `[s]kip` (clean mode) leaves a finding unfixed.
-`--auto-run` skips gates for development. `--docker` runs the kernel inside a
-no-network container instead of a subprocess.
-
-For orchestration — other agents, scripts, CI — there is a headless one-shot
-mode with an approval policy safe for unattended use (only AUTO-grade fixes
-run; anything needing judgement is reported, not decided):
-
-```bash
-uv run python -m analyst_agent clean data/messy.csv --json
-```
-
-## MCP server
-
-Any MCP client (Claude Desktop, Claude Code, Cursor) can drive analyst-agent
-as native tools. Local config:
-
-```json
-{
-  "mcpServers": {
-    "analyst-agent": {
-      "command": "uv",
-      "args": ["--directory", "/absolute/path/to/analyst-agent", "run", "analyst-agent-mcp"],
-      "env": { "DEEPSEEK_API_KEY": "sk-..." }
-    }
-  }
-}
-```
-
-Claude Code takes the same block in `.mcp.json`; set `ANALYST_PROVIDER=claude`
-plus `ANTHROPIC_API_KEY` to swap the model.
-
-| tool | purpose |
-| --- | --- |
-| `diagnose_file` | the 22-check report on a file: free, keyless, read-only |
-| `clean_file` | headless clean: judgement calls deferred and reported, never decided |
-| `open_data` | load a file into a persistent kernel, get a session id and profile |
-| `ask` | answer a question over an open session, with executed checks and lineage |
-| `why` | the provenance chain for an open session |
-| `close_session` | shut the session's kernel |
-
-Gates in MCP mode follow the same policy as headless mode: AUTO-grade fixes
-run, judgement calls come back in `needs_human`, and the calling agent never
-decides them.
-
-## How it compares
-
-We don't out-broad the broad tools. We're the only one that verifies the
-cleaning and keeps an audit trail — the only one you'd trust with a number that
-matters.
-
-| | Ask &amp; chart | Cleans your data | Verifies fixes | Audit trail | Scale |
-| --- | :---: | :---: | :---: | :---: | :---: |
-| pandas-ai | ✓ | ad hoc | — | — | in-memory |
-| Code Interpreter / Julius | ✓ | ad hoc | — | — | in-memory |
-| Great Expectations / dbt | — | — | you write rules | ✓ | warehouse |
-| ydata-profiling | — | — | — | report only | in-memory |
-| **analyst-agent** | *planned* | **verified** | **✓** | **✓** | in-memory |
+- Runs 22 checks on any table and grades each finding: safe to fix, fix with a
+  check, or needs a person.
+- Fixes the safe ones and re-checks every fix. If the check still fires, it
+  throws the fix out and reports it instead of keeping a bad one.
+- Reads from files, compressed files, folders, databases, and JSON APIs, all
+  through one `aa.read`.
+- Shows up as a card in a notebook, and a data-quality chart with `.plot()`.
+- Ships every agent answer with the code it ran, the checks that passed, and
+  where the numbers came from.
+- Saves a fix that worked as a reusable skill, but only after it passes its own
+  test and you say yes.
+- Runs as an MCP server, so Claude Desktop, Cursor, or Claude Code can call it.
+- Has a headless mode for CI, where only the safe fixes run and the rest are
+  reported.
 
 ## How it works
 
-The LLM never sees your data. It sees a schema/stats profile and a live
-variable registry, and writes small code cells against data that stays loaded
-in a persistent kernel (subprocess in dev, `--network none` Docker in sandbox
-mode), reached over an NDJSON stdio protocol. Tracebacks come back as
-observations, so repair is just the next iteration.
+**Two halves.** The keyless half (`diagnose`, `clean`, `read`) is plain Python.
+No key, no kernel, nothing to trust yet. The agent half writes and runs code for
+the harder fixes, but the model never sees your raw rows, only the schema and a
+few samples, and every step waits for your OK.
 
-Three things have to hold before a claim counts:
+**One rule for both.** A fix counts only when the check that found the problem
+stops firing, and the rows and untouched columns still line up. If it does not
+clear, the fix is reverted and sent back to you. Nothing is trusted because a
+rule ran. It is trusted because the signal went quiet.
 
-- **A check mark comes only from an assert that executed.** Nothing is marked
-  verified on the model's say-so.
-- **A cleaning fix counts as verified** only when the detection signal that
-  found the disease re-runs clean, row and untouched-column invariants hold,
-  and the model's own asserts pass. Otherwise it reverts.
-- **An answer is trusted** only if it is reachable from raw bytes with passing
-  checks on every step between. `/why` prints that chain, and says which of the
-  two ways it failed when it fails.
+**A trail on every answer.** An answer is trusted only if you can trace it back
+to the raw bytes through checks that passed at each step. `/why` prints that path,
+and says how it broke when it breaks.
 
-An intent check runs before each answer ships: one narrow call that reads the
-executed code back, states what it actually computed, and diffs that against
-the question. It catches correct code answering the wrong question — the
-failure assertions structurally cannot see.
+Every finding gets one of three grades:
 
-## Skills
+| grade | means | what happens |
+| --- | --- | --- |
+| safe | mechanical, no judgement | fixed and re-checked |
+| check | one plausible fix, worth confirming | fixed, then flagged |
+| person | a real judgement call | reported, never decided for you |
 
-A verified fix does not die with the session. After a clean run, each
-model-authored fix is rewritten as a column-general `fix(df, columns)` and has
-to earn its place:
+## The agent
 
-1. Re-run against the **frozen original case**: it must still trip the detector
-   there, must clear it, and must leave never-broken rows alone.
-2. Its own shipped test must pass.
-3. A human says yes.
-
-Both executions happen inside the sandbox. No LLM judges admission.
-
-Admitted skills start on **probation** — retrieved and applied, but always
-gated. Three successes across **two different datasets** promote a skill to
-**proven**, and a proven skill on an AUTO-grade finding fixes it with no model
-call and no gate. Verification still runs. Two consecutive verification
-failures retire it to `skills/retired/`, and the active library is capped.
-
-Skills are [Agent Skills](https://agentskills.io) `SKILL.md` folders, so the
-library is portable to any tool that speaks the standard:
+The keyless half tells you what is wrong. The agent is the part that fixes the
+hard cases, and it earns that with a stricter contract. Set a model key and run
+it:
 
 ```bash
-uv run python scripts/export_skills.py --out dist/skills
+echo 'DEEPSEEK_API_KEY=sk-...' > .env       # or ANTHROPIC_API_KEY
+python -m analyst_agent
 ```
+
+```
+/load data/messy.csv sales      load a file as a variable
+which region grew the most?     ask in plain english; the code is gated, then runs
+/clean sales                    diagnose, then fix one at a time
+/why                            where an answer came from, and whether it holds
+/skills                         the fixes it has learned and kept
+```
+
+Every line of model-written code stops at a gate. You run it, send a note back,
+or skip it. The kernel is a subprocess by default, or a `--network=none`
+container in sandbox mode.
+
+## MCP server
+
+Any MCP client can drive analyst-agent as tools. The gates follow the same rule
+as headless mode: the safe fixes run, the judgement calls come back for a person,
+and the calling agent never decides them.
+
+| tool | what it does |
+| --- | --- |
+| `diagnose_file` | the 22-check report on a file. free, keyless, read-only |
+| `clean_file` | headless clean; judgement calls are reported, not decided |
+| `open_data` | load a file into a session and get a profile |
+| `ask` | answer a question over a session, with checks and lineage |
+| `why` | the trail behind a session's answers |
+| `close_session` | shut the session down |
+
+## In one sentence
+
+It is the one-line report of ydata-profiling and the plain-english querying of
+pandas-ai, but with no API key and a receipt for every fix.
+
+<details>
+<summary><b>The 22 checks</b></summary>
+
+<br>
+
+Numbers stored as text, mixed date formats, fake missing values (`N/A`, `-`, `null`
+typed into a cell), whitespace and encoding damage, spelling and case variants of
+the same category, duplicate rows, near-duplicate rows, constant columns, columns
+that are almost entirely empty, values that contradict each other, outliers,
+schema drift across a set of files, and more. Each one is a named detector that
+either fires with evidence or reports the column clean. Absence is a checked
+claim, not a silence.
+
+</details>
+
+<details>
+<summary><b>How the agent runs code safely</b></summary>
+
+<br>
+
+The model runs on the host. It drives an IPython kernel that lives inside a
+container (a subprocess in dev, `--network=none` in sandbox mode) over a small
+stdio protocol. Your datasets are variables in that kernel. The model sees the
+schema, some statistics, and truncated samples, never the raw rows. It writes
+short pandas cells; each one stops at a gate; a traceback comes back as the next
+thing it reads and works from. A cleaned dataset is always a copy with its lineage
+recorded. Recursion is capped at one level.
+
+</details>
+
+<details>
+<summary><b>How a fix becomes a reusable skill</b></summary>
+
+<br>
+
+After a clean run, each fix the model wrote is rewritten as a general
+`fix(df, columns)` and has to earn its place. It has to trip the detector on the
+original frozen case, clear it, and leave the never-broken rows alone. Its own
+shipped test has to pass. Then a person says yes. New skills start on probation
+(retrieved and applied, but always gated). Three wins across two different
+datasets promote a skill; two failures in a row retire it. No model decides
+admission; the sandbox and a person do.
+
+</details>
+
+## Where it's at
+
+409 tests pass. The keyless half does no network, subprocess, or Docker work when
+you import it, so it is safe to use in any notebook cell. The agent half needs a
+model key and a kernel. It is not on PyPI yet. The one thing left before
+`pip install analyst-agent` works is choosing a license.
 
 ## Development
 
 ```bash
-uv run pytest                    # full suite (kernel protocol runs containerless)
-uv run pytest -m docker          # container end-to-end (needs Docker running)
+uv run pytest                    # the full suite
+uv run pytest -m docker          # the container tests, opt in
 uv run ruff check --fix . && uv run ruff format .
-uv run python scripts/score_fixes.py <cleaned.parquet> beers   # fix P/R vs truth
-uv run python scripts/ablate_governance.py                     # governed vs not
 ```
 
-Tests are guarded by [tdd-guard](https://github.com/nizos/tdd-guard): one new
-test at a time, red before green.
-
-Specs live in `specs/` — P0 core, P1 clean mode, P2 skill harness, P2.5 family
-mode. Research and positioning:
-`../mailo/coop-project/analyst-agent-brief.md` and
-`analyst-agent-build-research.md`.
-
-## Publishing status
-
-Publish-ready, not published. `uv build` produces a verified sdist and wheel
-carrying both console entry points; `docs/PUBLISHING.md` is the 30-minute
-runbook. The single blocker is a human decision: choosing the license (MIT
-recommended). Everything after that is mechanical.
+Specs live in `specs/`. The design notes for each phase are there, newest last.
