@@ -1,4 +1,4 @@
-"""The public Python API: `import analyst_agent as aa`.
+"""The public Python API: `import crivo as aa`.
 
 This is the surface a developer meets after `pip install` — it must work with
 no key, no kernel, no setup, on a DataFrame they already have. diagnose is the
@@ -7,7 +7,7 @@ hero; read/write are the ingestion and export around it.
 
 import pandas as pd
 
-import analyst_agent as aa
+import crivo as aa
 
 
 def test_diagnose_on_a_dataframe_is_pure_and_keyless() -> None:

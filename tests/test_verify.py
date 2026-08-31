@@ -1,15 +1,15 @@
 """Verify-cell builder tests (spec R9-R10): baseline/revert cells exec'd
 against a real frame; verify_cell checked as a string contract only, because
-the code it generates imports analyst_agent.detect at kernel runtime —
+the code it generates imports crivo.detect at kernel runtime —
 compiling it is fine, executing it here is not."""
 
 import json
 
 import pandas as pd
 
-from analyst_agent import verify
-from analyst_agent.detect import detect_one
-from analyst_agent.verify import (
+from crivo import verify
+from crivo.detect import detect_one
+from crivo.verify import (
     ROW_DELTA_BOUNDED,
     ROW_DELTA_EXACT,
     baseline_cell,
@@ -34,7 +34,7 @@ def _exec_baseline(frame: pd.DataFrame) -> tuple[dict, str]:
     return ns, value
 
 
-# --- baseline / revert: executable without analyst_agent.detect ---
+# --- baseline / revert: executable without crivo.detect ---
 
 
 def test_baseline_cell_snapshots_backup_rows_and_hashes():

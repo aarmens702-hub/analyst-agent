@@ -1,4 +1,4 @@
-"""Tests for `analyst-agent diagnose` — the report you can get for free.
+"""Tests for `crivo diagnose` — the report you can get for free.
 
 Everything else in this project needs an API key, a kernel, and trust. This
 needs a file. It is the only surface where the strongest part of the codebase,
@@ -7,7 +7,7 @@ the detection engine, is reachable without a model being involved at all.
 
 import pandas as pd
 
-from analyst_agent import checkup
+from crivo import checkup
 
 
 def write_csv(tmp_path):
@@ -39,10 +39,10 @@ def test_the_cli_runs_without_an_api_key(tmp_path, monkeypatch, capsys) -> None:
     it is the barrier this subcommand exists to remove."""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.setattr(
-        "sys.argv", ["analyst-agent", "diagnose", str(write_csv(tmp_path))]
+        "sys.argv", ["crivo", "diagnose", str(write_csv(tmp_path))]
     )
 
-    from analyst_agent.__main__ import main
+    from crivo.__main__ import main
 
     assert main() == 0
     assert "numbers-as-strings" in capsys.readouterr().out
@@ -51,7 +51,7 @@ def test_the_cli_runs_without_an_api_key(tmp_path, monkeypatch, capsys) -> None:
 def test_the_clean_subcommand_is_headless_and_machine_readable(
     monkeypatch, capsys
 ) -> None:
-    """`analyst-agent clean <file> --json` is the orchestration surface: no
+    """`crivo clean <file> --json` is the orchestration surface: no
     prompts, chatter on stderr, one JSON object on stdout. The session runs
     with previews off (nobody reads them) and the auto policy (judgement
     calls deferred, never decided)."""
@@ -60,7 +60,7 @@ def test_the_clean_subcommand_is_headless_and_machine_readable(
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
     monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
     monkeypatch.setattr(
-        "sys.argv", ["analyst-agent", "clean", "data/messy.csv", "--json"]
+        "sys.argv", ["crivo", "clean", "data/messy.csv", "--json"]
     )
     session_kw: dict = {}
 
@@ -71,16 +71,16 @@ def test_the_clean_subcommand_is_headless_and_machine_readable(
         def close(self):
             pass
 
-    monkeypatch.setattr("analyst_agent.loop.Session", FakeSession)
+    monkeypatch.setattr("crivo.loop.Session", FakeSession)
     monkeypatch.setattr(
-        "analyst_agent.repl.run_clean_once",
+        "crivo.repl.run_clean_once",
         lambda session, path, name=None, policy="auto": {
             "file": path,
             "policy": policy,
             "needs_human": ["fix 2/3 · merge variants"],
         },
     )
-    from analyst_agent.__main__ import main
+    from crivo.__main__ import main
 
     assert main() == 0
     out = capsys.readouterr().out
@@ -96,7 +96,7 @@ def test_resume_flag_reaches_the_session(monkeypatch) -> None:
     kernel resume test; this pins the plumbing between argv and Session."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
     monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
-    monkeypatch.setattr("sys.argv", ["analyst-agent", "--resume", "s16"])
+    monkeypatch.setattr("sys.argv", ["crivo", "--resume", "s16"])
     seen: dict = {}
 
     class Captures:
@@ -104,10 +104,10 @@ def test_resume_flag_reaches_the_session(monkeypatch) -> None:
             seen.update(kw)
             raise SystemExit  # constructor reached; nothing else should run
 
-    monkeypatch.setattr("analyst_agent.loop.Session", Captures)
+    monkeypatch.setattr("crivo.loop.Session", Captures)
     import pytest as _pytest
 
-    from analyst_agent.__main__ import main
+    from crivo.__main__ import main
 
     with _pytest.raises(SystemExit):
         main()
@@ -121,9 +121,9 @@ def test_the_key_gate_matches_the_provider(monkeypatch, capsys) -> None:
     monkeypatch.setenv("ANALYST_PROVIDER", "claude")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "not-the-right-provider")
-    monkeypatch.setattr("sys.argv", ["analyst-agent"])
+    monkeypatch.setattr("sys.argv", ["crivo"])
 
-    from analyst_agent.__main__ import main
+    from crivo.__main__ import main
 
     assert main() == 1
     assert "ANTHROPIC_API_KEY" in capsys.readouterr().out
@@ -174,7 +174,7 @@ def test_render_console_styles_findings_without_corrupting_the_facts(tmp_path) -
 
     from rich.console import Console
 
-    from analyst_agent import checkup
+    from crivo import checkup
 
     path = write_csv(tmp_path)
     frame = checkup.load(path)

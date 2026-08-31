@@ -3,11 +3,11 @@ surface kernel_died, restart, replay the loads, and let the turn finish."""
 
 import sys
 
-from analyst_agent import llm
-from analyst_agent.events import CardReady, GateDecision, GateRequest, Notice
-from analyst_agent.loop import Session
+from crivo import llm
+from crivo.events import CardReady, GateDecision, GateRequest, Notice
+from crivo.loop import Session
 
-SUBPROCESS_ARGV = [sys.executable, "-m", "analyst_agent.kernel.supervisor"]
+SUBPROCESS_ARGV = [sys.executable, "-m", "crivo.kernel.supervisor"]
 
 
 def scripted_generate(responses):

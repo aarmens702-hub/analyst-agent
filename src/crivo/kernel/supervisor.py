@@ -19,7 +19,7 @@ from importlib import metadata
 
 from jupyter_client import KernelManager
 
-from analyst_agent.kernel.bootstrap import BOOTSTRAP_SOURCE
+from crivo.kernel.bootstrap import BOOTSTRAP_SOURCE
 
 PROTO = 1
 IOPUB_POLL_S = 0.05

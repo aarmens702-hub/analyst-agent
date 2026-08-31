@@ -6,7 +6,7 @@ it is rendering one a person can read at a glance, which means marking the part
 of a value that actually moved rather than two whole values side by side.
 """
 
-from analyst_agent import diff
+from crivo import diff
 
 
 def test_word_segments_marks_only_the_part_that_moved() -> None:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from analyst_agent.transcript import Transcript
+from crivo.transcript import Transcript
 
 
 def test_ids_monotonic_from_1(tmp_path: Path) -> None:

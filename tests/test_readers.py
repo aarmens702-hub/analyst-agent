@@ -7,7 +7,7 @@ import pandas as pd
 def test_readers_read_a_local_csv_keeps_sentinels(tmp_path) -> None:
     """The baseline: a local path still reads, and 'N/A' survives as a string
     the detection engine can see (not silently coerced to NaN)."""
-    from analyst_agent import readers
+    from crivo import readers
 
     path = tmp_path / "d.csv"
     pd.DataFrame({"id": ["1", "2", "3"], "val": ["10", "N/A", "30"]}).to_csv(
@@ -24,7 +24,7 @@ def test_short_cp1252_file_falls_back_to_cp1252(tmp_path) -> None:
     """A short file whose only non-utf-8 byte lands in the last 3 bytes must
     still fall back to cp1252 — the 8KB-boundary forgiveness only applies when
     the sample was actually truncated, not to a genuine short-file bad byte."""
-    from analyst_agent import checkup
+    from crivo import checkup
 
     path = tmp_path / "short.csv"
     # £ (0xA3 in cp1252) three bytes from the end
@@ -41,7 +41,7 @@ def test_remote_bad_records_path_errors_clearly(monkeypatch) -> None:
     caller can't tie back to the argument they passed."""
     import pytest
 
-    from analyst_agent.readers import remote
+    from crivo.readers import remote
 
     monkeypatch.setattr(
         remote,
@@ -63,7 +63,7 @@ def test_remote_http_error_is_not_blamed_on_the_sandbox(monkeypatch) -> None:
 
     import pytest
 
-    from analyst_agent.readers import remote
+    from crivo.readers import remote
 
     def _raise(*_a, **_k):
         raise urllib.error.HTTPError("http://x/d.json", 404, "Not Found", {}, None)
@@ -79,7 +79,7 @@ def test_cloud_schemes_fail_clearly_not_as_a_mangled_local_path() -> None:
     FileNotFoundError from the file reader treating 's3://…' as a local path."""
     import pytest
 
-    from analyst_agent import readers
+    from crivo import readers
 
     for uri in ("s3://bucket/key.csv", "gs://bucket/key.csv", "az://c/key.csv"):
         with pytest.raises(NotImplementedError, match="cloud"):
@@ -91,7 +91,7 @@ def test_compressed_csv_gets_the_same_sniff_as_a_plain_csv(tmp_path) -> None:
     must not bypass checkup.load's delimiter sniff and collapse 3 columns to 1."""
     import gzip
 
-    from analyst_agent.readers import files
+    from crivo.readers import files
 
     path = tmp_path / "semi.csv.gz"
     with gzip.open(path, "wt", encoding="utf-8") as fh:

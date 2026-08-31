@@ -8,7 +8,7 @@ Skills API hard-fail on those, and a skill that can't be uploaded isn't a skill.
 
 import pytest
 
-from analyst_agent import skills
+from crivo import skills
 
 
 def make(**kw) -> "skills.Skill":

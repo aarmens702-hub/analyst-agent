@@ -1,15 +1,15 @@
 """The public Python API — the surface a developer meets after `pip install`.
 
-    import analyst_agent as aa
-    report = aa.diagnose("data.xlsx")   # or a DataFrame you already have
+    import crivo
+    report = crivo.diagnose("data.xlsx")   # or a DataFrame you already have
     print(report)
-    df = aa.read("data.csv")            # one reader, many formats, sentinel-safe
-    aa.write(cleaned, "out.parquet")    # one writer, dispatch on extension
+    df = crivo.read("data.csv")            # one reader, many formats, sentinel-safe
+    crivo.write(cleaned, "out.parquet")    # one writer, dispatch on extension
 
 Deliberately keyless and kernel-free: this is the deterministic half of the
 project — the detection engine and honest I/O — that works with zero setup.
 The LLM-authored cleaning with gates and provenance stays the agent surface
-(`python -m analyst_agent`), because that half needs a model and a sandbox.
+(`python -m crivo`), because that half needs a model and a sandbox.
 """
 
 import json as _json
@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from analyst_agent import checkup as _checkup
-from analyst_agent.autoclean import CleanSummary, clean
-from analyst_agent.detect import SINGLE_FRAME, detect_all
+from crivo import checkup as _checkup
+from crivo.autoclean import CleanSummary, clean
+from crivo.detect import SINGLE_FRAME, detect_all
 
 __all__ = [
     "CleanSummary",
@@ -69,16 +69,16 @@ class Report:
         return _checkup.render(self._name, self._frame, self._result)
 
     def _repr_html_(self) -> str:
-        # lazy so `import analyst_agent` stays cheap and side-effect-free — the
+        # lazy so `import crivo` stays cheap and side-effect-free — the
         # notebook renderer is only needed when a notebook asks for HTML
-        from analyst_agent import notebook as _notebook
+        from crivo import notebook as _notebook
 
         return _notebook.report_html(self._name, self._frame, self._result)
 
     def plot(self, ax=None):
         """A matplotlib data-quality overview — findings per column, coloured by
         grade. Returns an Axes (never calls show); keyless, no kernel."""
-        from analyst_agent import charts
+        from crivo import charts
 
         return charts.overview(self._name, self.findings, self.clear, ax=ax)
 
@@ -101,7 +101,7 @@ def diagnose(data, name: str | None = None) -> Report:
 def read(source, **kwargs) -> pd.DataFrame:
     """Read data into a DataFrame from a path, a database, or a URL.
 
-    The source is dispatched (see `analyst_agent.readers`):
+    The source is dispatched (see `crivo.readers`):
     - a local path — csv/tsv/txt, parquet (file or directory), xlsx/xls, json,
       jsonl/ndjson, feather, orc, optionally .gz/.zip/.bz2 compressed;
     - a database — a DBAPI connection or a SQLAlchemy URL, with `query=...`;
@@ -110,7 +110,7 @@ def read(source, **kwargs) -> pd.DataFrame:
     Missing-value tokens ("N/A", "-") are preserved as strings, not silently
     coerced to NaN — the detection engine must see them to report them.
     """
-    from analyst_agent import readers
+    from crivo import readers
 
     return readers.read(source, **kwargs)
 

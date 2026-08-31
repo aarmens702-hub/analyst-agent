@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/banner.svg" alt="analyst-agent" width="100%">
+<img src="docs/assets/banner.svg" alt="crivo" width="100%">
 
 <br>
 
@@ -17,12 +17,8 @@
 
 </div>
 
-<div align="center">
-<img src="docs/assets/hero.svg" alt="A terminal session: aa.diagnose finds graded problems in a CSV, aa.clean fixes the safe ones and shows before and after, then prints the verification and lineage." width="740">
-</div>
-
 Most tools will chat with your dataframe. None of them check whether the cleaning
-was right. analyst-agent does. It reads a messy table, tells you what is broken,
+was right. crivo does. It reads a messy table, tells you what is broken,
 fixes the parts that are safe to fix, and re-runs the check on every fix before it
 keeps it. The half that does this needs no API key and no setup.
 
@@ -37,17 +33,17 @@ pip install git+https://github.com/aarmens702-hub/analyst-agent
 Then point it at a file or a DataFrame you already have:
 
 ```python
-import analyst_agent as aa
+import crivo
 
-report = aa.diagnose("transactions.csv")   # runs 22 checks, no key, no kernel
+report = crivo.diagnose("transactions.csv")   # runs 22 checks, no key, no kernel
 report                                     # prints the list, or a card in a notebook
 
-clean, summary = aa.clean(report)          # applies the safe fixes, re-checks each one
+clean, summary = crivo.clean(report)          # applies the safe fixes, re-checks each one
 summary.needs_review                       # the ambiguous ones it will not guess on
-aa.write(clean, "clean.parquet")           # your data back out, any format
+crivo.write(clean, "clean.parquet")           # your data back out, any format
 ```
 
-`aa.read` handles the formats you actually get data in: csv, tsv, parquet, xlsx,
+`crivo.read` handles the formats you actually get data in: csv, tsv, parquet, xlsx,
 json, jsonl, feather, orc, compressed files (`.gz`, `.zip`, `.bz2`), parquet
 folders, a database connection, or a JSON API.
 
@@ -58,7 +54,7 @@ folders, a database connection, or a JSON API.
 - Fixes the safe ones and re-checks every fix. If the check still fires, it
   throws the fix out and reports it instead of keeping a bad one.
 - Reads from files, compressed files, folders, databases, and JSON APIs, all
-  through one `aa.read`.
+  through one `crivo.read`.
 - Shows up as a card in a notebook, and a data-quality chart with `.plot()`.
 - Ships every agent answer with the code it ran, the checks that passed, and
   where the numbers came from.
@@ -100,7 +96,7 @@ it:
 
 ```bash
 echo 'DEEPSEEK_API_KEY=sk-...' > .env       # or ANTHROPIC_API_KEY
-python -m analyst_agent
+python -m crivo
 ```
 
 ```
@@ -117,7 +113,7 @@ container in sandbox mode.
 
 ## MCP server
 
-Any MCP client can drive analyst-agent as tools. The gates follow the same rule
+Any MCP client can drive crivo as tools. The gates follow the same rule
 as headless mode: the safe fixes run, the judgement calls come back for a person,
 and the calling agent never decides them.
 
@@ -184,8 +180,8 @@ admission; the sandbox and a person do.
 
 409 tests pass. The keyless half does no network, subprocess, or Docker work when
 you import it, so it is safe to use in any notebook cell. The agent half needs a
-model key and a kernel. It is not on PyPI yet. The one thing left before
-`pip install analyst-agent` works is choosing a license.
+model key and a kernel. MIT licensed. Not on PyPI yet; publishing is the next
+step.
 
 ## Development
 

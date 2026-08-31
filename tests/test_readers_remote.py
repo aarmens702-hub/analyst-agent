@@ -88,7 +88,7 @@ def control_server():
 def test_read_url_json_walks_records_path(http_server) -> None:
     """A JSON object with a nested records array: `records_path='data.items'`
     walks into the parsed object to that list and builds the frame from it."""
-    from analyst_agent.readers.remote import read_url
+    from crivo.readers.remote import read_url
 
     df = read_url(f"{http_server}/data.json", records_path="data.items")
 
@@ -99,7 +99,7 @@ def test_read_url_json_walks_records_path(http_server) -> None:
 def test_read_url_csv_keeps_sentinel(http_server) -> None:
     """A CSV served over HTTP: rows come back and the 'N/A' cell survives as a
     string the detection engine can see, not silently coerced to NaN."""
-    from analyst_agent.readers.remote import read_url
+    from crivo.readers.remote import read_url
 
     df = read_url(f"{http_server}/data.csv")
 
@@ -112,7 +112,7 @@ def test_read_url_json_toplevel_array_without_records_path(
 ) -> None:
     """A top-level JSON array with no `records_path` is used as the records list
     directly."""
-    from analyst_agent.readers.remote import read_url
+    from crivo.readers.remote import read_url
 
     (tmp_path / "arr.json").write_text(json.dumps([{"a": "1"}, {"a": "2"}]))
 
@@ -126,7 +126,7 @@ def test_read_url_network_failure_raises_clear_error() -> None:
     not a bare urllib error or a silent timeout (the `--network none` sandbox)."""
     import socket
 
-    from analyst_agent.readers.remote import read_url
+    from crivo.readers.remote import read_url
 
     # Bind a port, then close it, so the connection is refused.
     probe = socket.socket()
@@ -141,7 +141,7 @@ def test_read_url_network_failure_raises_clear_error() -> None:
 def test_read_url_sends_a_user_agent(control_server) -> None:
     """The request carries our own User-Agent, not urllib's default — the fetch
     discipline mirrors ingest.py."""
-    from analyst_agent.readers import remote
+    from crivo.readers import remote
 
     base, handler = control_server
     handler.content_type = "application/json"
@@ -155,7 +155,7 @@ def test_read_url_sends_a_user_agent(control_server) -> None:
 def test_read_url_caps_bytes_read(control_server, monkeypatch) -> None:
     """The fetch reads at most MAX_FETCH_BYTES, mirroring ingest.py's cap: a body
     past the cap is truncated, not read in full."""
-    from analyst_agent.readers import remote
+    from crivo.readers import remote
 
     base, handler = control_server
     handler.content_type = "text/csv"
@@ -175,7 +175,7 @@ def test_read_url_decides_format_by_content_type_then_extension(
     """Content-Type decides first (application/json vs text/csv/text/plain);
     a generic type falls back to the URL's .json/.csv extension; neither raises
     a clear ValueError."""
-    from analyst_agent.readers.remote import read_url
+    from crivo.readers.remote import read_url
 
     base, handler = control_server
 

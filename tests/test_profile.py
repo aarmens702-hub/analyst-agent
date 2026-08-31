@@ -4,7 +4,7 @@ import re
 
 import pandas as pd
 
-from analyst_agent.profile import profile_df
+from crivo.profile import profile_df
 
 OMITTED_RE = re.compile(r"… (\d+) columns omitted \(char budget\)")
 

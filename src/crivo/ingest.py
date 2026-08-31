@@ -22,9 +22,9 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
-from analyst_agent.checkup import load as _load_file
+from crivo.checkup import load as _load_file
 
-USER_AGENT = "analyst-agent-ingest/0.1"
+USER_AGENT = "crivo-ingest/0.1"
 MAX_FETCH_BYTES = 512 * 1024 * 1024
 
 

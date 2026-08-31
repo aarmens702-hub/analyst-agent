@@ -9,8 +9,8 @@ trustworthily, only chat with it.
 
 import pandas as pd
 
-import analyst_agent as aa
-from analyst_agent.autoclean import changed_cells
+import crivo as aa
+from crivo.autoclean import changed_cells
 
 
 def test_changed_cells_reports_the_before_and_after_of_a_value_fix() -> None:
@@ -93,7 +93,7 @@ def test_styler_diff_returns_a_styler_highlighting_the_changed_cells() -> None:
     pytest.importorskip("jinja2")  # pandas Styler needs it; diff() is opt-in extra
     from pandas.io.formats.style import Styler
 
-    from analyst_agent.autoclean import styler_diff
+    from crivo.autoclean import styler_diff
 
     before = pd.DataFrame({"amount": ["$1,200", "$15"]})
     after = pd.DataFrame({"amount": [1200.0, 15.0]})
@@ -145,7 +145,7 @@ def test_a_fix_that_would_not_verify_is_reverted_not_applied(monkeypatch) -> Non
     detector re-runs clean. If a fixer produced garbage that still tripped the
     signal, the frame must come back untouched for that column and the finding
     must land in review — never silently 'fixed'."""
-    from analyst_agent import autoclean
+    from crivo import autoclean
 
     def broken_whitespace(frame, cols):
         out = frame.copy()

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from analyst_agent import checkup as _checkup
+from crivo import checkup as _checkup
 
 # the csv-family goes through checkup.load for the delimiter sniff, the
 # utf-8 -> cp1252 fallback, and keep_default_na=False; parquet too (a single file)

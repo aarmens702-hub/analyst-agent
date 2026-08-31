@@ -9,9 +9,9 @@ diagnose's test cannot reach.
 
 import sys
 
-from analyst_agent.loop import Session
+from crivo.loop import Session
 
-SUBPROCESS_ARGV = [sys.executable, "-m", "analyst_agent.kernel.supervisor"]
+SUBPROCESS_ARGV = [sys.executable, "-m", "crivo.kernel.supervisor"]
 
 
 def test_a_windows_encoded_export_loads_into_the_kernel(tmp_path) -> None:
@@ -39,7 +39,7 @@ def test_resume_rebuilds_a_usable_session(tmp_path) -> None:
     reading an old log. It must come back with its datasets loaded into a
     fresh kernel, its history carrying the dataset profiles, its numbering
     continuing, and a /why chain that still resolves from disk."""
-    from analyst_agent import provenance
+    from crivo import provenance
 
     csv = tmp_path / "tiny.csv"
     csv.write_text("a,b\n1,2\n3,4\n")

@@ -1,18 +1,18 @@
 ---
-name: analyst-agent
-description: Use when the user provides a messy CSV/parquet file, asks what is wrong with a dataset, wants a data file cleaned with an audit trail, or wants questions answered over tabular data with verifiable receipts. Drives the analyst-agent CLI (diagnose / headless clean / interactive REPL) and interprets its artifacts.
+name: crivo
+description: Use when the user provides a messy CSV/parquet file, asks what is wrong with a dataset, wants a data file cleaned with an audit trail, or wants questions answered over tabular data with verifiable receipts. Drives the crivo CLI (diagnose / headless clean / interactive REPL) and interprets its artifacts.
 ---
 
-# Driving analyst-agent
+# Driving crivo
 
-analyst-agent cleans messy tabular data in a sandboxed kernel and ships every
+crivo cleans messy tabular data in a sandboxed kernel and ships every
 change with executed checks and lineage. You are the orchestrator; it is the
 tool. Its trust model is the point — follow it, don't work around it.
 
 ## Step 1 — diagnose (always first; free, no API key, read-only)
 
 ```bash
-uv run python -m analyst_agent diagnose <file> --json
+uv run python -m crivo diagnose <file> --json
 ```
 
 Returns findings (each with `disease`, `slug`, `columns`, `evidence`,
@@ -27,7 +27,7 @@ Requires `DEEPSEEK_API_KEY` (or `ANALYST_PROVIDER=claude` +
 `ANTHROPIC_API_KEY`) in the environment or `.env`.
 
 ```bash
-uv run python -m analyst_agent clean <file> --json
+uv run python -m crivo clean <file> --json
 ```
 
 Chatter goes to stderr; stdout's last line is one JSON object:
@@ -49,12 +49,12 @@ If `needs_human` is non-empty, offer the interactive path, where each fix
 shows a preview of its consequence before the gate:
 
 ```bash
-uv run python -m analyst_agent          # then: /clean <var>, /why, /skills
+uv run python -m crivo          # then: /clean <var>, /why, /skills
 ```
 
 ## If the MCP server is configured
 
-When the analyst-agent MCP tools (`diagnose_file`, `clean_file`, `open_data`,
+When the crivo MCP tools (`diagnose_file`, `clean_file`, `open_data`,
 `ask`, `why`, `close_session`) are available in the session, prefer them over
 shelling out. The contract is identical: diagnose first, clean second, relay
 `needs_human` verbatim. The shell path above remains the fallback inside this

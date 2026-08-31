@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
-USER_AGENT = "analyst-agent-remote/0.1"
+USER_AGENT = "crivo-remote/0.1"
 MAX_FETCH_BYTES = 512 * 1024 * 1024
 
 

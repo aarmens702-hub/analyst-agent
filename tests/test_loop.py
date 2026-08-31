@@ -8,16 +8,16 @@ from typing import ClassVar
 
 import pytest
 
-from analyst_agent import llm
-from analyst_agent.events import (
+from crivo import llm
+from crivo.events import (
     CardReady,
     GateDecision,
     GateRequest,
     Notice,
     StreamText,
 )
-from analyst_agent.kernel.client import ExecResult, HelloInfo, StreamOut
-from analyst_agent.loop import Session, parse_tags
+from crivo.kernel.client import ExecResult, HelloInfo, StreamOut
+from crivo.loop import Session, parse_tags
 
 
 class FakeClient:
@@ -83,7 +83,7 @@ def drive(turn, decisions=None):
 
 @pytest.fixture
 def session(tmp_path, monkeypatch):
-    monkeypatch.setattr("analyst_agent.loop.KernelClient", FakeClient)
+    monkeypatch.setattr("crivo.loop.KernelClient", FakeClient)
     FakeClient.script = []
     FakeClient.executed = []
     # previews off: the scripted flows here would otherwise need one extra
@@ -461,7 +461,7 @@ def test_a_long_session_compacts_instead_of_dying(session, monkeypatch):
     turns are summarised into one block by the same scoped-generation
     primitive the intent check uses; the dataset profile blocks survive
     verbatim, the recent tail stays, and the session keeps answering."""
-    monkeypatch.setattr("analyst_agent.loop.COMPACT_AT_CHARS", 2_000)
+    monkeypatch.setattr("crivo.loop.COMPACT_AT_CHARS", 2_000)
     profile = "<dataset variable='df'>\ncols: a, b\n</dataset>"
     session.history.append({"role": "user", "content": profile})
     for i in range(30):

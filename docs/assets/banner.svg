@@ -1,4 +1,4 @@
-<svg width="1200" height="300" viewBox="0 0 1200 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="analyst-agent. Finds what is wrong with your data, and proves every fix. No API key, 22 checks, every fix verified.">
+<svg width="1200" height="300" viewBox="0 0 1200 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="crivo. Finds what is wrong with your data, and proves every fix. No API key, 22 checks, every fix verified.">
   <style>
     .mark { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-weight: 800; letter-spacing: -0.03em; }
     .tag  { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-weight: 400; }
@@ -33,7 +33,7 @@
     <rect x="114" y="184" width="30" height="6" rx="3" fill="#2a5a60"/>
   </g>
 
-  <text x="214" y="152" class="mark" font-size="60" fill="#f2faf9">analyst-agent</text>
+  <text x="214" y="156" class="mark" font-size="72" fill="#f2faf9">crivo</text>
   <text x="216" y="192" class="tag" font-size="20" fill="#a9d6d6">finds what's wrong with your data, and proves every fix.</text>
 
   <line x1="216" y1="216" x2="742" y2="216" stroke="#2c6b72" stroke-width="1.4"/>

@@ -1,12 +1,12 @@
 """Data-quality overview chart — the keyless matplotlib figure behind
-`aa.diagnose(df).plot()`.
+`crivo.diagnose(df).plot()`.
 
 One horizontal bar per location that has findings (a column name, or "whole
 table" for findings that are not column-specific), length = how many findings
 sit there, coloured by the worst grade among them (HUMAN > GATE > AUTO), worst
 at the top. Same 'verified ledger' grade palette as the notebook card. Returns
 an Axes and never calls plt.show, so it renders the same in a notebook, a
-script, or CI. matplotlib is imported lazily so `import analyst_agent` stays
+script, or CI. matplotlib is imported lazily so `import crivo` stays
 cheap.
 """
 

@@ -4,7 +4,7 @@ parquet directories, feather, and orc, all keeping the sentinel-safe discipline
 
 import pandas as pd
 
-from analyst_agent.readers.files import read_file
+from crivo.readers.files import read_file
 
 
 def test_csv_gz_round_trips_and_preserves_sentinel(tmp_path) -> None:

@@ -12,11 +12,11 @@ import sys
 
 import pytest
 
-from analyst_agent import llm, skills
-from analyst_agent.events import CardReady, GateDecision, GateRequest, Notice
-from analyst_agent.loop import Session
+from crivo import llm, skills
+from crivo.events import CardReady, GateDecision, GateRequest, Notice
+from crivo.loop import Session
 
-SUBPROCESS_ARGV = [sys.executable, "-m", "analyst_agent.kernel.supervisor"]
+SUBPROCESS_ARGV = [sys.executable, "-m", "crivo.kernel.supervisor"]
 
 # a frame with one clearly sick column: "N/A" masquerading as a value (disease 4)
 SEED = (

@@ -31,7 +31,7 @@ import argparse
 import urllib.request
 from pathlib import Path
 
-USER_AGENT = "analyst-agent-fetch-takehome/0.1"
+USER_AGENT = "crivo-fetch-takehome/0.1"
 
 HMT = {
     # publication pages resolved via the gov.uk content API; asset URLs are

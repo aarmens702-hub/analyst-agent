@@ -1,4 +1,4 @@
-"""The SQL reader for `aa.read`: a DBAPI connection or a SQLAlchemy URL string,
+"""The SQL reader for `crivo.read`: a DBAPI connection or a SQLAlchemy URL string,
 each into a DataFrame, both via `pandas.read_sql`.
 
 SQLAlchemy is an *optional* dependency (the `sql` extra). It is imported lazily,
@@ -29,7 +29,7 @@ def read_sql(source, query=None, **kwargs) -> pd.DataFrame:
         except ImportError as exc:
             raise ImportError(
                 "reading from a database URL needs SQLAlchemy, an optional "
-                'dependency; install it with: pip install "analyst-agent[sql]"'
+                'dependency; install it with: pip install "crivo[sql]"'
             ) from exc
         return pd.read_sql(query, create_engine(source), **kwargs)
     return pd.read_sql(query, source, **kwargs)

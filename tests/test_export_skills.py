@@ -1,7 +1,7 @@
 """Tests for scripts/export_skills.py — the skill export/scrub/bundle path (P4).
 
 No network, no Docker. Fixture skill folders are built with
-analyst_agent.skills.save() and a hand-written ledger dict, matching a real
+crivo.skills.save() and a hand-written ledger dict, matching a real
 skills/ directory: skills/<name>/{SKILL.md,scripts/} plus skills/ledger.json,
 or skills/retired/<name>/ for the ones the library has already retired.
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from analyst_agent import library, skills
+from crivo import library, skills
 
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "scripts"))
@@ -115,7 +115,7 @@ def test_born_from_is_generalized_to_a_basename(tmp_path) -> None:
     from_proposal() also echoes that same path into the body as quoted
     provenance, so the body needs the same generalisation, not just metadata."""
     root = tmp_path / "skills"
-    born_from = "/Users/aarmensidhu/Desktop/analyst-agent/data/raha/beers/dirty.csv"
+    born_from = "/Users/aarmensidhu/Desktop/crivo/data/raha/beers/dirty.csv"
     skill = make_skill(
         "fix-ibu-units",
         metadata={"disease": "4", "born_from": born_from},
@@ -187,7 +187,7 @@ def test_absolute_path_outside_born_from_is_refused(tmp_path) -> None:
     root = tmp_path / "skills"
     skill = make_skill(
         "fix-leaky",
-        body="## Evidence\n\nSee /Users/aarmensidhu/Desktop/analyst-agent/"
+        body="## Evidence\n\nSee /Users/aarmensidhu/Desktop/crivo/"
         "workspace/s07/skill_cases/fix-leaky.parquet for the frozen slice.\n",
     )
     skills.save(skill, root)

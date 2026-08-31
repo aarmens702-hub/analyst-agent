@@ -9,7 +9,7 @@ are both untrusted, for different reasons, and the reasons must not collapse.
 import json
 from pathlib import Path
 
-from analyst_agent import provenance
+from crivo import provenance
 
 
 def write_card(session: Path, card_id: str, checks, datasets) -> None:

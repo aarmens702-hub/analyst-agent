@@ -1,7 +1,7 @@
 """Governance ablation harness (P4) — governed vs. ungoverned skill libraries.
 
 A simulation, not a live agent run: no model calls, no kernel, no network. It
-drives `analyst_agent.library.Library` directly — the real promotion/
+drives `crivo.library.Library` directly — the real promotion/
 retirement/active-cap rules, R10-R14 — against a small local
 `UngovernedLibrary` that mimics EvoDS's admission rule (arXiv 2606.03841,
 KDD 2026): a skill is admitted after `EVODS_ADMIT_AFTER` uses regardless of
@@ -52,7 +52,7 @@ import json
 import random
 from dataclasses import dataclass, field
 
-from analyst_agent import library
+from crivo import library
 
 # Hidden, assumed rates for the synthetic population (see the honesty note
 # above). Kept together, like library.py's own governance constants, so

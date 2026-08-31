@@ -15,8 +15,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from analyst_agent import detect
-from analyst_agent.detect import (
+from crivo import detect
+from crivo.detect import (
     BC_LAT_MAX,
     BC_LAT_MIN,
     BC_LON_MAX,
@@ -682,7 +682,7 @@ def test_detect_all_reports_a_broken_detector_instead_of_hiding_it(monkeypatch) 
     nothing.' A detector that raises must not quietly vanish from both
     findings and clear as if it had simply run clean — that makes a
     systematically broken signal invisible forever."""
-    from analyst_agent.detect import REGISTRY
+    from crivo.detect import REGISTRY
 
     def boom(df, cols):
         raise ValueError("synthetic failure")

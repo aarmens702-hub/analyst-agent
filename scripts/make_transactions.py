@@ -3,7 +3,7 @@
 Unlike `fetch_raha.py` and `fetch_vancouver.py` this generates rather than
 downloads, because the interesting property here is not realism — it is that we
 know the ground truth. Every defect below is planted deliberately, so a run of
-`analyst-agent diagnose` can be scored: what it found, and what it walked past.
+`crivo diagnose` can be scored: what it found, and what it walked past.
 
 The four target diseases, and where each is planted:
 

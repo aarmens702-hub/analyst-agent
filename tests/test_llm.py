@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from analyst_agent import llm
+from crivo import llm
 
 
 def chunk(content=None, reasoning=None):

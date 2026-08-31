@@ -1,4 +1,4 @@
-"""Source dispatch for `aa.read`: a URL, a database, or a local path — each to
+"""Source dispatch for `crivo.read`: a URL, a database, or a local path — each to
 its own reader.
 
     readers.read("data.csv.gz")                 -> readers.files
@@ -49,23 +49,23 @@ def read(source, *, query=None, **kwargs):
     """Dispatch `source` to the right reader. See the module docstring."""
     scheme = _scheme(source)
     if scheme in {"http", "https"}:
-        from analyst_agent.readers import remote
+        from crivo.readers import remote
 
         return remote.read_url(source, **kwargs)
     if scheme in _CLOUD_SCHEMES:
         raise NotImplementedError(
             f"cloud storage ({scheme}://) is deferred, not built yet — fetch it "
             "with fsspec or your cloud client and pass the DataFrame straight to "
-            "aa.diagnose/aa.clean (they stamp lineage on any frame)."
+            "crivo.diagnose/crivo.clean (they stamp lineage on any frame)."
         )
     if (
         query is not None
         or scheme.split("+")[0] in _SQL_SCHEMES
         or not _is_pathlike(source)
     ):
-        from analyst_agent.readers import sql
+        from crivo.readers import sql
 
         return sql.read_sql(source, query=query, **kwargs)
-    from analyst_agent.readers import files
+    from crivo.readers import files
 
     return files.read_file(source, **kwargs)

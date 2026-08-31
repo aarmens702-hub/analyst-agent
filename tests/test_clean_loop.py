@@ -7,10 +7,10 @@ from typing import ClassVar
 
 import pytest
 
-from analyst_agent import library, llm, skills
-from analyst_agent.events import GateDecision, GateRequest, Notice, StreamText
-from analyst_agent.kernel.client import ExecResult, HelloInfo, StreamOut
-from analyst_agent.loop import Session
+from crivo import library, llm, skills
+from crivo.events import GateDecision, GateRequest, Notice, StreamText
+from crivo.kernel.client import ExecResult, HelloInfo, StreamOut
+from crivo.loop import Session
 
 REG = [{"name": "df", "type": "DataFrame", "shape": [4, 2], "mem_mb": 0.0}]
 
@@ -118,7 +118,7 @@ def drive(turn, decisions=()):
 
 @pytest.fixture
 def session(tmp_path, monkeypatch):
-    monkeypatch.setattr("analyst_agent.loop.KernelClient", FakeClient)
+    monkeypatch.setattr("crivo.loop.KernelClient", FakeClient)
     FakeClient.script, FakeClient.executed = [], []
     # skills_dir must be per-test: the default is the repo's live library,
     # and a test that writes a skill there leaks into every later test
@@ -478,7 +478,7 @@ def test_when_every_candidate_fails_the_model_gets_the_finding(
 
 def test_the_cap_bounds_how_many_candidates_are_tried(stocked_two, monkeypatch):
     """A large library must not turn one finding into a long chain of cells."""
-    monkeypatch.setattr("analyst_agent.loop.SKILL_ATTEMPT_CAP", 1)
+    monkeypatch.setattr("crivo.loop.SKILL_ATTEMPT_CAP", 1)
     monkeypatch.setattr(llm, "generate", gen([FIX_A]))
     stocked_two.library.register("fix-sentinel-missing", disease=4)
     stocked_two.library.register("fix-sentinel-missing-alt", disease=4)

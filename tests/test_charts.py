@@ -11,7 +11,7 @@ matplotlib.use("Agg")  # headless: no display needed to build or test the figure
 import pandas as pd
 from matplotlib.axes import Axes
 
-import analyst_agent as aa
+import crivo as aa
 
 
 def _messy() -> pd.DataFrame:
@@ -46,7 +46,7 @@ def test_overview_colours_each_bar_by_its_worst_grade() -> None:
     severity, not recency, drives the colour."""
     import matplotlib.colors as mcolors
 
-    from analyst_agent import charts
+    from crivo import charts
 
     findings = [
         {"columns": ["x"], "grade": "AUTO"},
@@ -64,7 +64,7 @@ def test_overview_colours_each_bar_by_its_worst_grade() -> None:
 def test_overview_renders_a_clean_empty_state() -> None:
     """No findings must render a tidy 'all clear' Axes, not crash on an empty
     bar set."""
-    from analyst_agent import charts
+    from crivo import charts
 
     ax = charts.overview("clean.csv", [], list(range(1, 23)))
 

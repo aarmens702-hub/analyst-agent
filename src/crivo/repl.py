@@ -7,8 +7,8 @@ by the hand-written session generators (run_turn for questions, clean for
 
 import json
 
-from analyst_agent import provenance
-from analyst_agent.events import (
+from crivo import provenance
+from crivo.events import (
     ArtifactSaved,
     CardReady,
     GateDecision,
@@ -18,7 +18,7 @@ from analyst_agent.events import (
 )
 
 BANNER = (
-    "analyst-agent — /load <path> [name] · /clean <var> · "
+    "crivo — /load <path> [name] · /clean <var> · "
     "/clean-family <glob> <name> · /skills · /why · ask a question · /quit"
 )
 PROMPT = "❯ "
@@ -34,7 +34,7 @@ def _manifest(session) -> str:
     matters most is the last one — how many skills will modify data without
     asking. Tolerant reads throughout: a SessionLike double without a library
     still gets a manifest."""
-    from analyst_agent import llm
+    from crivo import llm
 
     info = llm.model_info()
     sandbox = (

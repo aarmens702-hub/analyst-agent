@@ -1,5 +1,5 @@
 [project]
-name = "analyst-agent"
+name = "crivo"
 version = "0.1.0"
 description = "An analyst agent that remembers: kernel-resident data cleaning + query with governed, test-gated reusable skills and per-answer provenance"
 readme = "README.md"
@@ -50,8 +50,8 @@ Homepage = "https://github.com/aarmens702-hub/analyst-agent"
 Repository = "https://github.com/aarmens702-hub/analyst-agent"
 
 [project.scripts]
-analyst-agent = "analyst_agent:main"
-analyst-agent-mcp = "analyst_agent.mcp_server:main"
+crivo = "crivo:main"
+crivo-mcp = "crivo.mcp_server:main"
 
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]

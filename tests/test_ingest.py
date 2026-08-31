@@ -10,7 +10,7 @@ S3 object can be overwritten and "trusted" can only mean trusted-as-of.
 
 import pandas as pd
 
-from analyst_agent import ingest
+from crivo import ingest
 
 
 def test_load_url_stamps_the_facts_a_remote_lineage_node_needs(tmp_path):

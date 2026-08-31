@@ -34,7 +34,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 API_BASE = "https://opendata.vancouver.ca/api/explore/v2.1/catalog/datasets"
-USER_AGENT = "analyst-agent-fetch-vancouver/0.1"
+USER_AGENT = "crivo-fetch-vancouver/0.1"
 
 # Confirmed live via:
 #   .../datasets/{id}/records?select=report_year,count(*)%20as%20cnt

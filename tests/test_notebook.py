@@ -4,8 +4,8 @@ value that crosses into it (GitHub / nbconvert sanitize aggressively)."""
 
 import pandas as pd
 
-from analyst_agent.detect import SINGLE_FRAME, detect_all
-from analyst_agent.notebook import report_html
+from crivo.detect import SINGLE_FRAME, detect_all
+from crivo.notebook import report_html
 
 
 def _diagnosis():
@@ -77,7 +77,7 @@ def test_report_html_single_escapes_special_char_column_names():
 def test_finding_escapes_an_unexpected_grade_value():
     """Defensive: grade is always AUTO/GATE/HUMAN in practice, but the renderer's
     contract is that NO interpolated value reaches the card unescaped."""
-    from analyst_agent.notebook import _finding
+    from crivo.notebook import _finding
 
     f = {
         "disease": 1,
@@ -97,7 +97,7 @@ def test_finding_escapes_an_unexpected_grade_value():
 
 def _clean_summary():
     """A summary with at least one applied fix that changed cells (d01 money)."""
-    from analyst_agent.autoclean import clean
+    from crivo.autoclean import clean
 
     df = pd.DataFrame(
         {
@@ -110,7 +110,7 @@ def _clean_summary():
 
 
 def test_clean_html_shows_an_applied_fix_and_a_before_after_example():
-    from analyst_agent.notebook import clean_html
+    from crivo.notebook import clean_html
 
     card = clean_html(_clean_summary())
     assert card.startswith("<div")

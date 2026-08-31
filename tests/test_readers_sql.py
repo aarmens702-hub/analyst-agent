@@ -18,7 +18,7 @@ def _sqlite_conn_with_rows(path) -> sqlite3.Connection:
 
 def test_read_sql_dbapi_connection_returns_rows(tmp_path) -> None:
     """A DBAPI connection + a query reads straight through pandas."""
-    from analyst_agent.readers.sql import read_sql
+    from crivo.readers.sql import read_sql
 
     conn = _sqlite_conn_with_rows(tmp_path / "t.db")
     try:
@@ -35,7 +35,7 @@ def test_read_sql_without_query_raises_valueerror(tmp_path) -> None:
     """A source with no `query` is a usage error, not a silent empty read."""
     import pytest
 
-    from analyst_agent.readers.sql import read_sql
+    from crivo.readers.sql import read_sql
 
     conn = _sqlite_conn_with_rows(tmp_path / "t.db")
     try:
@@ -52,10 +52,10 @@ def test_read_sql_url_without_the_extra_raises_importerror() -> None:
 
     import pytest
 
-    from analyst_agent.readers.sql import read_sql
+    from crivo.readers.sql import read_sql
 
     if importlib.util.find_spec("sqlalchemy") is not None:
         pytest.skip("sqlalchemy installed")
 
-    with pytest.raises(ImportError, match=r"analyst-agent\[sql\]"):
+    with pytest.raises(ImportError, match=r"crivo\[sql\]"):
         read_sql("postgresql://x/y", query="select 1")

@@ -15,7 +15,7 @@ import json as _json
 
 import pandas as pd
 
-from analyst_agent.detect import (
+from crivo.detect import (
     LEADING_NUMBER,
     MISSING_TOKENS,
     _ws_tidy,
@@ -139,7 +139,7 @@ class CleanSummary:
         return "\n".join(lines)
 
     def _repr_html_(self) -> str:
-        from analyst_agent import notebook as _notebook
+        from crivo import notebook as _notebook
 
         return _notebook.clean_html(self)
 

@@ -1,4 +1,4 @@
-"""`analyst-agent diagnose <file>` — what is wrong with this data, for free.
+"""`crivo diagnose <file>` — what is wrong with this data, for free.
 
 Every other surface in this project needs an API key, a running kernel, and a
 decision to let an agent touch your data. This one needs a file. It runs the
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from analyst_agent.detect import SINGLE_FRAME, detect_all
+from crivo.detect import SINGLE_FRAME, detect_all
 
 GRADE_NOTE = {
     "AUTO": "safe to fix automatically",

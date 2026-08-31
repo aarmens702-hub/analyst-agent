@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from analyst_agent.kernel.client import KernelClient, StreamOut
+from crivo.kernel.client import KernelClient, StreamOut
 
-SUBPROCESS_ARGV = [sys.executable, "-m", "analyst_agent.kernel.supervisor"]
+SUBPROCESS_ARGV = [sys.executable, "-m", "crivo.kernel.supervisor"]
 
 
 @pytest.fixture(scope="module")
@@ -185,7 +185,7 @@ def test_uninterruptible_cell_goes_hung_then_restart_recovers(client):
 def test_matplotlib_chart_saved_as_artifact(client):
     from pathlib import Path
 
-    from analyst_agent.kernel.client import DisplayItem
+    from crivo.kernel.client import DisplayItem
 
     code = "import matplotlib.pyplot as plt\nplt.plot([1, 2, 3])\nplt.show()"
     events = list(client().execute(code))
@@ -238,7 +238,7 @@ def test_container_end_to_end(tmp_path_factory):
 
 @pytest.mark.docker
 def test_the_sandbox_can_run_the_gates_that_admit_a_skill():
-    """P2's admission cells import analyst_agent inside the kernel. If those
+    """P2's admission cells import crivo inside the kernel. If those
     modules did not make it into the image, admission would fail only in
     sandbox mode — the mode that matters — and nothing else would notice."""
     kc = KernelClient(workspace_dir=Path(tempfile.mkdtemp()))
@@ -247,8 +247,8 @@ def test_the_sandbox_can_run_the_gates_that_admit_a_skill():
         probe = (
             "import json\n"
             "import pandas as pd\n"
-            "from analyst_agent.detect import detect_all, detect_one\n"
-            "from analyst_agent import library, provenance, skills, verify\n"
+            "from crivo.detect import detect_all, detect_one\n"
+            "from crivo import library, provenance, skills, verify\n"
             "df = pd.DataFrame({'flow': ['N/A'] * 12 + [str(v) for v in range(20)],\n"
             "                   'name': [f's{i}' for i in range(32)]})\n"
             "found = detect_all(df, 'probe')['findings']\n"

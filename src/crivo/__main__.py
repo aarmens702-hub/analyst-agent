@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 def main() -> int:
     load_dotenv()
-    parser = argparse.ArgumentParser(prog="analyst-agent")
+    parser = argparse.ArgumentParser(prog="crivo")
     parser.add_argument(
         "--auto-run", action="store_true", help="skip the accept/run gate (dev only)"
     )
@@ -59,7 +59,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.diagnose:
-        from analyst_agent import checkup
+        from crivo import checkup
 
         try:
             if args.json:
@@ -81,15 +81,15 @@ def main() -> int:
         return 1
 
     try:
-        from analyst_agent.loop import Session
+        from crivo.loop import Session
     except ImportError:
         print(
-            "the hand-written core (src/analyst_agent/loop.py) isn't implemented yet"
+            "the hand-written core (src/crivo/loop.py) isn't implemented yet"
             " — the plumbing is ready and waiting."
         )
         print(
             "interfaces: specs/2026-08-09-p0-core-design.md §1"
-            " and src/analyst_agent/events.py (SessionLike)"
+            " and src/crivo/events.py (SessionLike)"
         )
         return 1
 
@@ -99,7 +99,7 @@ def main() -> int:
         import contextlib
         import json as _json
 
-        from analyst_agent.repl import run_clean_once
+        from crivo.repl import run_clean_once
 
         with contextlib.redirect_stdout(sys.stderr):
             session = Session(
@@ -127,7 +127,7 @@ def main() -> int:
                 print(f"  report: {summary['report']}")
         return 0 if not summary.get("error") else 1
 
-    from analyst_agent.repl import run_repl
+    from crivo.repl import run_repl
 
     session = Session(
         workspace=args.workspace,

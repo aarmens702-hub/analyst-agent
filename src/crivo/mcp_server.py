@@ -1,4 +1,4 @@
-"""analyst-agent as an MCP server (v1 wrapper): a driver, like repl.py.
+"""crivo as an MCP server (v1 wrapper): a driver, like repl.py.
 
 Six tools over stdio so any MCP client — Claude Desktop, Claude Code, Cursor —
 can drive the agent natively. The architecture ruling from the spec: this
@@ -7,7 +7,7 @@ verification primitives to the *outer* model is v2.
 
 Logic lives in plain module functions so the suite tests them against
 SessionLike doubles; `build_server()` imports the mcp SDK lazily, so importing
-analyst_agent never requires it (AC4). Every tool returns errors as results —
+crivo never requires it (AC4). Every tool returns errors as results —
 one bad file must not kill the server (R6).
 """
 
@@ -15,7 +15,7 @@ import contextlib
 import json
 import sys
 
-from analyst_agent import checkup
+from crivo import checkup
 
 
 def _quiet():
@@ -50,7 +50,7 @@ def _make_session():
     """Session factory, module-level so tests can swap in a double."""
     import os
 
-    from analyst_agent.loop import Session
+    from crivo.loop import Session
 
     return Session(
         workspace=os.environ.get("ANALYST_WORKSPACE", "workspace"),
@@ -67,7 +67,7 @@ def _clean_file(
     if missing:
         return {"error": missing}
     try:
-        from analyst_agent import repl
+        from crivo import repl
 
         with _quiet():  # construction and load() print to stdout, the RPC wire
             session = _make_session()
@@ -160,7 +160,7 @@ def _ask(session_id: str, question: str) -> dict:
         }
     import dataclasses
 
-    from analyst_agent.events import CardReady, GateDecision, GateRequest, Notice
+    from crivo.events import CardReady, GateDecision, GateRequest, Notice
 
     notices: list[str] = []
     try:
@@ -199,7 +199,7 @@ def _why(session_id: str) -> str:
     if session is None:
         return f"unknown session {session_id!r} — call open_data first"
     try:
-        from analyst_agent import provenance
+        from crivo import provenance
 
         dag = provenance.build(session.session_dir)
         return provenance.to_markdown(dag, None)
@@ -221,12 +221,12 @@ def _close_session(session_id: str) -> bool:
 
 def build_server():
     """The MCP layer over the plain functions above. The SDK import lives
-    here, not at module top: importing analyst_agent must never require the
+    here, not at module top: importing crivo must never require the
     mcp package (AC4). Each docstring below is the contract a calling model
     acts on — they are instructions, not comments."""
     from mcp.server.mcpserver import Context, MCPServer
 
-    app = MCPServer("analyst-agent")
+    app = MCPServer("crivo")
 
     @app.tool()
     def diagnose_file(path: str) -> str:
@@ -314,7 +314,7 @@ def _make_decider(elicit_sync):
     yes/no popup, so they stay deferred. Decline, cancel, and elicitation
     failure all skip with the reason in the note: a popup that errored is not
     consent."""
-    from analyst_agent.events import GateDecision
+    from crivo.events import GateDecision
 
     def decide(event):
         if event.grade != "GATE":

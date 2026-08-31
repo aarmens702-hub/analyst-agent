@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from analyst_agent.autoclean import clean
-from analyst_agent.detect import detect_all
-from analyst_agent.notebook import clean_html, report_html
+from crivo.autoclean import clean
+from crivo.detect import detect_all
+from crivo.notebook import clean_html, report_html
 
 
 def _sample() -> pd.DataFrame:

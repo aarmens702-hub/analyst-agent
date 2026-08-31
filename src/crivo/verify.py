@@ -71,7 +71,7 @@ PREVIEW_ROWS = 200  # the ruling from open-findings D: sampled, never the frame
 
 PREVIEW_TEMPLATE = """\
 import pandas as pd
-from analyst_agent import diff as _diff
+from crivo import diff as _diff
 
 _pv_names = {names}
 _pv_before = {{
@@ -212,7 +212,7 @@ def verify_cell(var: str, finding: dict, baseline_columns: list[str]) -> str:
     reference = ""
     if int(finding.get("disease", 0)) == 6:
         reference = (
-            "from analyst_agent.detect import _ws_tidy\n"
+            "from crivo.detect import _ws_tidy\n"
             f"for _c in {json.dumps(finding.get('columns', []))}:\n"
             f"    if _c in {var}.columns and _c in _clean_backup.columns:\n"
             "        _m = _clean_backup[_c].notna()\n"
@@ -224,7 +224,7 @@ def verify_cell(var: str, finding: dict, baseline_columns: list[str]) -> str:
             "        )\n"
         )
     return (
-        "from analyst_agent.detect import detect_one\n"
+        "from crivo.detect import detect_one\n"
         "import pandas as pd\n"
         "try:\n"
         f"    _v = detect_one({var}, {finding['disease']}, "
@@ -295,7 +295,7 @@ def case_cell(var: str, finding: dict, path: str) -> str:
 ADMISSION_TEMPLATE = """\
 import json as _json
 import pandas as pd
-from analyst_agent.detect import detect_one
+from crivo.detect import detect_one
 
 {fix_source}
 

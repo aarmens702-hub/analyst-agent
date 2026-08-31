@@ -3,7 +3,7 @@ event ids, rNNN save round-trip, empty-report render."""
 
 import json
 
-from analyst_agent.report import CleanReport
+from crivo.report import CleanReport
 
 
 def _fix_record(disease, slug, columns, status, attempts, evs):

@@ -10,7 +10,7 @@ from collections.abc import Generator
 
 import pytest
 
-from analyst_agent.events import (
+from crivo.events import (
     ArtifactSaved,
     CardLike,
     CardReady,
@@ -21,7 +21,7 @@ from analyst_agent.events import (
     SessionLike,
     StreamText,
 )
-from analyst_agent.repl import GATE_PROMPT, PROMPT, run_repl
+from crivo.repl import GATE_PROMPT, PROMPT, run_repl
 
 
 class FakeSession:
@@ -98,7 +98,7 @@ def test_quit_closes_session() -> None:
     assert fake.closed
     assert fake.questions == []
     assert printer.calls, "banner should print before the prompt loop"
-    assert "analyst-agent" in printer.calls[0][0]
+    assert "crivo" in printer.calls[0][0]
 
 
 def raising_input(exc: type[BaseException]):
@@ -352,16 +352,16 @@ def test_repl_import_hygiene() -> None:
     """R5: drivers contain no model or kernel logic — enforced at source level."""
     import inspect
 
-    import analyst_agent.repl as repl_module
+    import crivo.repl as repl_module
 
     src = inspect.getsource(repl_module)
-    forbidden = ("analyst_agent.kernel", "analyst_agent.llm", "analyst_agent.loop")
+    forbidden = ("crivo.kernel", "crivo.llm", "crivo.loop")
     for name in forbidden:
         assert name not in src, f"repl.py must not touch {name}"
 
 
 def test_main_without_api_key_exits_1(tmp_path) -> None:
-    """python -m analyst_agent without a key: friendly exit, not a traceback."""
+    """python -m crivo without a key: friendly exit, not a traceback."""
     import os
     import subprocess
     import sys
@@ -369,7 +369,7 @@ def test_main_without_api_key_exits_1(tmp_path) -> None:
     env = dict(os.environ)
     env["DEEPSEEK_API_KEY"] = ""  # empty beats .env: load_dotenv never overrides
     proc = subprocess.run(
-        [sys.executable, "-m", "analyst_agent"],
+        [sys.executable, "-m", "crivo"],
         capture_output=True,
         text=True,
         check=False,
@@ -379,7 +379,7 @@ def test_main_without_api_key_exits_1(tmp_path) -> None:
     assert proc.returncode == 1
     assert "DEEPSEEK_API_KEY" in proc.stdout
 
-    from analyst_agent import main
+    from crivo import main
 
     assert callable(main)
 
@@ -553,7 +553,7 @@ def test_headless_policy_runs_auto_grade_and_defers_judgement() -> None:
     nobody at the gate. The policy is the human's pre-authorisation, by
     grade — AUTO runs, GATE and HUMAN are skipped and *reported*, because an
     orchestrator must never approve a judgement call on a person's behalf."""
-    from analyst_agent.repl import run_clean_once
+    from crivo.repl import run_clean_once
 
     gates = [
         GateRequest("fix_a", 1, title="fix 1/3 · trailing space", grade="AUTO"),
@@ -619,7 +619,7 @@ def test_headless_clean_accepts_a_per_gate_decide_callback() -> None:
     gate by gate through the human, not by blanket policy. The callback owns
     every gate decision, and a skip that carries a note (declined, or
     elicitation unavailable) lands in needs_human with the note visible."""
-    from analyst_agent.repl import run_clean_once
+    from crivo.repl import run_clean_once
 
     gates = [
         GateRequest("fix_a", 1, title="fix 1/2 · trailing space", grade="AUTO"),

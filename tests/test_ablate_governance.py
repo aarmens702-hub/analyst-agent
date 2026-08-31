@@ -29,7 +29,7 @@ from ablate_governance import (
     simulate,
 )
 
-from analyst_agent import library
+from crivo import library
 
 
 def test_main_json_output_reports_both_regimes(capsys) -> None:

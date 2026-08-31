@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from analyst_agent import library, skills
+from crivo import library, skills
 
 # A path boundary: start-of-string, whitespace, quote, backtick, or paren —
 # never a colon (URL scheme), another slash (mid-URL), or a word character
@@ -196,7 +196,7 @@ def _render_readme(results: list) -> str:
         "",
         (
             "These are governed, reusable data-cleaning fixes from an"
-            " analyst-agent skill library. Each one was proposed by a model"
+            " crivo skill library. Each one was proposed by a model"
             " after a verified fix, then admitted only after passing its"
             " shipped test and a re-run against the real case that produced"
             " it — test-gated, not self-reported. Every use is"

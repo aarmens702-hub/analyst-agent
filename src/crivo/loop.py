@@ -14,9 +14,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from analyst_agent import llm, prompts, skills, snapshot, verify
-from analyst_agent.card import AnswerCard, lift_checks
-from analyst_agent.events import (
+from crivo import llm, prompts, skills, snapshot, verify
+from crivo.card import AnswerCard, lift_checks
+from crivo.events import (
     ArtifactSaved,
     CardReady,
     GateDecision,
@@ -24,10 +24,10 @@ from analyst_agent.events import (
     Notice,
     StreamText,
 )
-from analyst_agent.kernel.client import DisplayItem, KernelClient, StreamOut
-from analyst_agent.library import Library, unattended
-from analyst_agent.report import CleanReport
-from analyst_agent.transcript import Transcript
+from crivo.kernel.client import DisplayItem, KernelClient, StreamOut
+from crivo.library import Library, unattended
+from crivo.report import CleanReport
+from crivo.transcript import Transcript
 
 MAX_ITERS = 6
 CLEAN_MAX_ATTEMPTS = 3
@@ -55,8 +55,8 @@ EXEC_RE = re.compile(r"<execute>(.*?)</execute>", re.DOTALL)
 ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 
 LOAD_TEMPLATE = """\
-from analyst_agent.checkup import load as _load_file
-from analyst_agent.profile import profile_df
+from crivo.checkup import load as _load_file
+from crivo.profile import profile_df
 {name} = _load_file({path!r})
 _enc = {name}.attrs.get("encoding")
 if _enc not in (None, "utf-8-sig"):
@@ -125,7 +125,7 @@ class Session:
         self.library = Library.load(self.skills_dir)
 
         if transport_argv is None and not docker:
-            transport_argv = [sys.executable, "-m", "analyst_agent.kernel.supervisor"]
+            transport_argv = [sys.executable, "-m", "crivo.kernel.supervisor"]
         self.client = KernelClient(
             workspace_dir=self.session_dir,
             transport_argv=transport_argv,
@@ -484,7 +484,7 @@ class Session:
         state["evs"].append(self.transcript.append("user", text=f"/clean {var}"))
 
         code = (
-            "from analyst_agent.detect import detect_all\n"
+            "from crivo.detect import detect_all\n"
             "import json\n"
             f"print(json.dumps(detect_all({var}, {var!r})))"
         )
@@ -787,7 +787,7 @@ class Session:
 
     def _family_body(self, name: str, meta: list, run: dict):
         code = (
-            "from analyst_agent.detect import detect_family\n"
+            "from crivo.detect import detect_family\n"
             "import json\n"
             f"print(json.dumps(detect_family({name})))"
         )

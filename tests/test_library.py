@@ -5,7 +5,7 @@ so they are asserted at their boundaries: three successes promote, three
 successes on one dataset do not, two consecutive failures retire.
 """
 
-from analyst_agent import library
+from crivo import library
 
 
 def test_register_starts_a_skill_on_probation() -> None:

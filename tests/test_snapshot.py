@@ -14,7 +14,7 @@ import json
 
 import pandas as pd
 
-from analyst_agent import snapshot
+from crivo import snapshot
 
 
 def run_cell(code: str, namespace: dict) -> str:

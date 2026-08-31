@@ -1,7 +1,7 @@
 """Host-side kernel client: speaks protocol v1 over stdio (spec §2, R9–R15).
 
 Transport is an argv the client attaches to with pipes — the Docker exec path
-in production, or `[sys.executable, "-m", analyst_agent.kernel.supervisor]` to
+in production, or `[sys.executable, "-m", crivo.kernel.supervisor]` to
 run containerless over the identical wire format (how the conformance suite
 runs). The client never imports jupyter_client; the protocol is its whole view
 of the kernel.
@@ -122,7 +122,7 @@ class KernelClient:
 
     def _container_argv(self) -> list[str]:
         cmd = list(DOCKER_RUN)
-        cmd += ["--label", "analyst-agent"]
+        cmd += ["--label", "crivo"]
         cmd += ["-v", f"{self.workspace_dir.resolve()}:/workspace"]
         if self.data_dir:
             cmd += ["-v", f"{self.data_dir.resolve()}:/data:ro"]
@@ -131,7 +131,7 @@ class KernelClient:
         self._container_id = out.stdout.strip()
         return [
             "docker", "exec", "-i", self._container_id,
-            "python", "-m", "analyst_agent.kernel.supervisor",
+            "python", "-m", "crivo.kernel.supervisor",
         ]  # fmt: skip
 
     def _rm_container(self) -> None:

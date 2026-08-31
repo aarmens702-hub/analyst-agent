@@ -2,7 +2,7 @@
 
 import json
 
-from analyst_agent.card import AnswerCard, lift_checks
+from crivo.card import AnswerCard, lift_checks
 
 
 def test_lift_checks_extracts_assert_expressions():

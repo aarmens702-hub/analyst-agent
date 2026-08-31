@@ -15,7 +15,7 @@ Identity tokens are the project's 'verified ledger' look — docs/assets/termina
 
 import html
 
-from analyst_agent.detect import SINGLE_FRAME
+from crivo.detect import SINGLE_FRAME
 
 # --- identity tokens (docs/assets/terminal.svg) -----------------------------
 GROUND = "#14171a"  # the card's own background

@@ -11,7 +11,7 @@ import json
 
 import pandas as pd
 
-from analyst_agent import mcp_server
+from crivo import mcp_server
 
 
 def test_diagnose_file_is_keyless_and_returns_json(tmp_path, monkeypatch) -> None:
@@ -80,7 +80,7 @@ def test_clean_file_relays_needs_human_and_closes_the_session(monkeypatch) -> No
     """AC1: the wrapper must not swallow the one thing the policy exists to
     surface — the judgement calls it refused to make — and must never leak a
     kernel, success or not."""
-    from analyst_agent.events import GateRequest
+    from crivo.events import GateRequest
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
     monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
@@ -105,8 +105,8 @@ def test_ask_auto_approves_gates_and_returns_the_card(monkeypatch) -> None:
     hands back its profile; ask drives run_turn with the calling agent as the
     operator (gates auto-approved, the --auto-run trust position) and returns
     the card as a dict with its executed checks."""
-    from analyst_agent.card import AnswerCard
-    from analyst_agent.events import CardReady, GateRequest
+    from crivo.card import AnswerCard
+    from crivo.events import CardReady, GateRequest
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
     monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
@@ -228,7 +228,7 @@ def test_the_elicit_decider_asks_only_for_gate_grade() -> None:
     with the reason in the note, because a popup that errored is not consent."""
     from types import SimpleNamespace
 
-    from analyst_agent.events import GateRequest
+    from crivo.events import GateRequest
 
     asked: list[str] = []
 
@@ -274,7 +274,7 @@ def test_clean_file_threads_the_decide_callback_through(monkeypatch) -> None:
         received.update(path=path, policy=policy, decide=decide)
         return {"file": path, "needs_human": []}
 
-    monkeypatch.setattr("analyst_agent.repl.run_clean_once", fake_run)
+    monkeypatch.setattr("crivo.repl.run_clean_once", fake_run)
     monkeypatch.setattr(
         mcp_server, "_make_session", lambda: SimpleNamespace(close=lambda: None)
     )
