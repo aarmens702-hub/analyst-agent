@@ -5,6 +5,11 @@ Consolidates everything discussed 2026-08-15: the pandas-ai competition strategy
 one phased plan. Supersedes `2026-08-15-pandas-ai-roadmap.md` (its phases live on
 as tracks below).
 
+**Updated 2026-08-31:** added the launch gate and Phases 6-8 (proving ground,
+harder data, agent memory) plus an MCP maintenance workstream, from the
+landscape research + honesty review. Details and sources:
+`specs/2026-08-31-phase6-plus-roadmap.md`.
+
 **North star:** `pip install analyst-agent` gives a developer a library that
 (1) cleans their data trustworthily with receipts — our wedge, (2) reads from
 wherever their data lives, (3) answers questions with charts — the draw, and
@@ -111,6 +116,54 @@ The bigger strategic bets, each worth its own go/no-go on Phase 1–4 evidence.
   integration + example.
 - P5.3 **Agent messaging / extensibility** — let other agents call and compose
   analyst-agent (the "act as more than a data agent" ask); scope after v2.
+
+---
+
+## 2026-08-31 additions (see `2026-08-31-phase6-plus-roadmap.md` for detail)
+
+### Launch gate — before any users; finite by design
+
+Four items, then it ships: repo hygiene (retire hero/terminal SVGs, ignore
+`.DS_Store`, drop `pandera`, prune merged branches) · license (MIT recommended)
+· CI (GitHub Actions, keyless suite on Linux/macOS/Windows — the badge becomes
+real) · the name (verified free on PyPI + GitHub first). P4.2/P4.3/P4.4 execute
+immediately after the gate clears.
+
+### Phase 6 — Proving Ground (the mass-eval phase)
+
+Not model fine-tuning: a harness that trains the *system* by measured iteration.
+Synthetic corpora with injected (therefore known) corruption + the Raha datasets
+(Hospital/Flights/Beers/Rayyan) + mass question suites + Inspect AI evals for
+the agent half. Publishes cell-level P/R/F1 per the literature's protocol, at
+0 labels, plus the number nobody else can report: the fraction of applied fixes
+that survived verification vs. reverted. Absorbs P4.1. Full WRAP spec before
+code.
+
+### Phase 7 — Harder Data (scored by Phase 6, never before it)
+
+Cross-column dependencies, multi-table/FK integrity, temporal consistency;
+Raha-style ensemble detection (~20-label budget, graded GATE); severity tiers
+on checks; `aa.compare()` drift; `aa.reconcile()` keyed table diff.
+
+### Phase 8 — Agent Memory (three memories, one ledger)
+
+Durable provenance ledger (+ OpenLineage event emission); per-dataset contract/
+semantics file emitted after CLEAN and verified on future runs; skills upgraded:
+Agent Skills spec conformance, promote-from-answer-card, "answered via verified
+skill" badge, session export as a safe replayable script.
+
+### MCP maintenance workstream (parallel, small, propose-diffs)
+
+Port `mcp_server.py` to the 2026-07-28 spec (stateless, MRTR input requests for
+gates, tasks extension for long cleans); official registry listing; position
+paper on MCP verification-metadata discussions #2964/#2574 — the referee slot
+is unclaimed.
+
+### Revised sequencing
+
+Launch gate → finish Phase 3 → Phase 6 → Phase 7 → Phase 8, MCP workstream
+alongside early. One rule orders everything: no new capability ships ahead of
+the instrument that measures it.
 
 ---
 
