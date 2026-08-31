@@ -241,3 +241,41 @@ def clean_html(summary):
     )
     parts.extend(_deferred_row(f) for f in deferred)
     return _card("".join(parts))
+
+
+def answer_html(answer):
+    """The Answer card: question, answer, executed checks, the code that ran,
+    and the lineage line — self-contained and escaped like every other card."""
+    q = _span(_esc(answer.card.question), MUTED_2, italic=True)
+    text = _span(_esc(answer.text), BRIGHT, bold=True)
+    parts = [
+        f'<div style="margin:0 0 2px;">{q}</div>',
+        f'<div style="margin:0 0 4px;">{text}</div>',
+        _rule(),
+    ]
+    for check in answer.checks:
+        mark = _span("✓ ", GRADE["AUTO"], mono=True, bold=True)
+        expr = _span(_esc(check.get("expr", "")), INK, mono=True)
+        parts.append(f'<div style="margin:1px 0;">{mark}{expr}</div>')
+    if not answer.checks:
+        parts.append(
+            f'<div style="margin:1px 0;">'
+            f"{_span('no checks lifted — see flags', GRADE['GATE'], italic=True)}"
+            f"</div>"
+        )
+    if answer.code:
+        code_style = (
+            f"box-sizing:border-box;margin:6px 0 4px;padding:8px 10px;"
+            f"background:{PANEL};border:1px solid {BORDER};border-radius:6px;"
+            f"white-space:pre-wrap;"
+        )
+        code = _span(_esc(answer.code.strip()), INK, mono=True)
+        parts.append(f'<div style="{code_style}">{code}</div>')
+    chain = " &#8594; ".join(_esc(e) for e in answer.lineage.get("event_chain", []))
+    footer_bits = [f"events {chain}" if chain else "no lineage recorded"]
+    footer_bits.extend(_esc(n) for n in answer.notices)
+    parts.append(
+        f'<div style="margin:6px 0 0;">'
+        f"{_span(' · '.join(footer_bits), DIM, italic=True)}</div>"
+    )
+    return _card("".join(parts))

@@ -22,10 +22,13 @@ from crivo.api import (
     read_sql,
     write,
 )
+from crivo.query import Answer, ask
 
 __all__ = [
+    "Answer",
     "CleanSummary",
     "Report",
+    "ask",
     "clean",
     "diagnose",
     "main",
