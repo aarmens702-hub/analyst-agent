@@ -6,8 +6,8 @@
 
 **Diagnose and clean a messy dataset in one line. No API key, and every fix is re-checked before it counts.**
 
+[![ci](https://github.com/aarmens702-hub/analyst-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/aarmens702-hub/analyst-agent/actions/workflows/ci.yml)
 ![python](https://img.shields.io/badge/python-3.12-0e7a84)
-![tests](https://img.shields.io/badge/tests-409%20passing-2e9d63)
 &nbsp;
 ![no api key](https://img.shields.io/badge/no_API_key-0b2b30)
 ![sandboxed](https://img.shields.io/badge/sandboxed-0b2b30)

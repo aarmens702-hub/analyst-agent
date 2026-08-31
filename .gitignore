@@ -26,3 +26,6 @@ skills/retired/
 
 # the Loop application is personal, not repo content
 takehome/
+
+# macOS noise
+.DS_Store
