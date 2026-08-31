@@ -7,8 +7,8 @@ authors = [
     { name = "aarmens702-hub", email = "aarmens702@gmail.com" }
 ]
 requires-python = ">=3.12"
-# license deliberately unset: choosing one (MIT recommended) is a human
-# decision — see docs/PUBLISHING.md, it is the single publish blocker
+license = "MIT"
+license-files = ["LICENSE"]
 keywords = [
     "data-cleaning",
     "data-quality",
