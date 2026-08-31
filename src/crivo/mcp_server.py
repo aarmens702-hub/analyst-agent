@@ -39,7 +39,7 @@ def _required_key() -> str | None:
     """R5: which env var the configured provider needs, or None when set."""
     import os
 
-    provider = os.environ.get("ANALYST_PROVIDER", "deepseek")
+    provider = os.environ.get("CRIVO_PROVIDER", "deepseek")
     key = "ANTHROPIC_API_KEY" if provider == "claude" else "DEEPSEEK_API_KEY"
     if not os.environ.get(key):
         return f"{key} is not set — add it to the MCP client config env"
@@ -53,7 +53,7 @@ def _make_session():
     from crivo.loop import Session
 
     return Session(
-        workspace=os.environ.get("ANALYST_WORKSPACE", "workspace"),
+        workspace=os.environ.get("CRIVO_WORKSPACE", "workspace"),
         preview=False,  # headless: nobody reads a gate preview here (R7)
     )
 

@@ -7,7 +7,7 @@ before step 4 needs a model key, a kernel, or Docker.
 ## 1. Install
 
 ```bash
-# from source today; `pip install analyst-agent` once published — see the
+# from source today; `pip install crivo` once published — see the
 # README's Publishing status: publish-ready, not published
 uv add git+https://github.com/aarmens702-hub/analyst-agent
 ```
@@ -15,29 +15,29 @@ uv add git+https://github.com/aarmens702-hub/analyst-agent
 ## 2. Diagnose — the 22-check report, as a card
 
 ```python
-import analyst_agent as aa
+import crivo
 
-df = aa.read("your_data.csv")   # csv, tsv, parquet, xlsx, json, jsonl — reader picks the format
-df.aa.diagnose()
+df = crivo.read("your_data.csv")   # csv, tsv, parquet, xlsx, json, jsonl — reader picks the format
+df.crivo.diagnose()
 ```
 
 In a notebook, that line *is* the output: a styled, severity-coloured card,
-not a wall of text. `import analyst_agent as aa` registers the `.aa` accessor
-on every DataFrame — after that one import, `df.aa.diagnose()` reads like
+not a wall of text. `import crivo as aa` registers the `.aa` accessor
+on every DataFrame — after that one import, `df.crivo.diagnose()` reads like
 `df.describe()`. Detection is pure Python: no key, no kernel, no Docker.
 
 Working in a script instead of a notebook, or you just prefer a function
-call? `aa.diagnose(df)` (or `aa.diagnose("your_data.csv")` straight from a
+call? `crivo.diagnose(df)` (or `crivo.diagnose("your_data.csv")` straight from a
 path) returns the same `Report` — `print()` it for the text version, or run
-`analyst-agent diagnose your_data.csv` from the command line for the same
+`crivo diagnose your_data.csv` from the command line for the same
 report in colour, no Python at all.
 
 ## 3. Clean — safe fixes applied, the rest deferred honestly
 
 ```python
-cleaned, summary = df.aa.clean()   # or aa.clean(df, policy="auto")
+cleaned, summary = df.crivo.clean()   # or crivo.clean(df, policy="auto")
 summary                             # renders as a card: before/after per fix
-aa.write(cleaned, "cleaned.xlsx")   # format from the extension
+crivo.write(cleaned, "cleaned.xlsx")   # format from the extension
 ```
 
 `clean` only auto-applies a fix it can verify by re-running the detector that
@@ -55,8 +55,8 @@ eyes, human or model. Point the agent at the same file:
 
 ```bash
 uv sync
-echo 'DEEPSEEK_API_KEY=sk-...' > .env   # or ANALYST_PROVIDER=claude + ANTHROPIC_API_KEY
-uv run python -m analyst_agent
+echo 'DEEPSEEK_API_KEY=sk-...' > .env   # or CRIVO_PROVIDER=claude + ANTHROPIC_API_KEY
+uv run python -m crivo
 ```
 
 ```

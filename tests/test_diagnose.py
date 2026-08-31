@@ -56,7 +56,7 @@ def test_the_clean_subcommand_is_headless_and_machine_readable(
     import json
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
-    monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
+    monkeypatch.delenv("CRIVO_PROVIDER", raising=False)
     monkeypatch.setattr("sys.argv", ["crivo", "clean", "data/messy.csv", "--json"])
     session_kw: dict = {}
 
@@ -91,7 +91,7 @@ def test_resume_flag_reaches_the_session(monkeypatch) -> None:
     resume='s16'. Everything past the constructor is covered by the real
     kernel resume test; this pins the plumbing between argv and Session."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
-    monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
+    monkeypatch.delenv("CRIVO_PROVIDER", raising=False)
     monkeypatch.setattr("sys.argv", ["crivo", "--resume", "s16"])
     seen: dict = {}
 
@@ -111,10 +111,10 @@ def test_resume_flag_reaches_the_session(monkeypatch) -> None:
 
 
 def test_the_key_gate_matches_the_provider(monkeypatch, capsys) -> None:
-    """R10 follow-through: with ANALYST_PROVIDER=claude, holding a DeepSeek
+    """R10 follow-through: with CRIVO_PROVIDER=claude, holding a DeepSeek
     key must not satisfy the gate, and the message must name the key the
     session would actually use."""
-    monkeypatch.setenv("ANALYST_PROVIDER", "claude")
+    monkeypatch.setenv("CRIVO_PROVIDER", "claude")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "not-the-right-provider")
     monkeypatch.setattr("sys.argv", ["crivo"])

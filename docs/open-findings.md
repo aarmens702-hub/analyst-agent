@@ -179,7 +179,11 @@ over all 7 kernel touch points.
   requires the turn *after* a failure to actually run — the old test's scripted
   `/quit` was never consumed, so it passed either way.
 
-### Noticed during the loader fix, not yet addressed
+### Noticed during the loader fix — superseded, see section D
+
+(Resolved 2026-08-14 by unification: `LOAD_TEMPLATE` now delegates to
+`diagnose.load` inside the kernel — the third bullet of section D. The
+paragraph below is kept as the original record of the finding.)
 
 - `LOAD_TEMPLATE` reads with pandas' default NA handling, while
   `diagnose.load` deliberately sets `keep_default_na=False` — so in agent

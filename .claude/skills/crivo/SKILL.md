@@ -23,7 +23,7 @@ file is fine, say what was checked, not just "looks good".
 
 ## Step 2 — headless clean (needs an API key; writes artifacts)
 
-Requires `DEEPSEEK_API_KEY` (or `ANALYST_PROVIDER=claude` +
+Requires `DEEPSEEK_API_KEY` (or `CRIVO_PROVIDER=claude` +
 `ANTHROPIC_API_KEY`) in the environment or `.env`.
 
 ```bash

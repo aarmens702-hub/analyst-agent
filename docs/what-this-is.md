@@ -1,4 +1,4 @@
-# analyst-agent: what it is and why it is built this way
+# crivo: what it is and why it is built this way
 
 An AI analyst that cleans messy data, answers questions over it, and can show
 its work — where every number came from, which code produced it, and which

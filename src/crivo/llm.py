@@ -31,7 +31,7 @@ _claude_client = None
 
 def _provider() -> str:
     """R10: two providers, one env switch, no registry."""
-    return os.environ.get("ANALYST_PROVIDER", "deepseek")
+    return os.environ.get("CRIVO_PROVIDER", "deepseek")
 
 
 def _get_client() -> OpenAI:
@@ -57,7 +57,7 @@ def _get_claude_client():
 
 def model_name() -> str:
     default = CLAUDE_DEFAULT_MODEL if _provider() == "claude" else DEFAULT_MODEL
-    return os.environ.get("ANALYST_MODEL", default)
+    return os.environ.get("CRIVO_MODEL", default)
 
 
 def model_info() -> dict:

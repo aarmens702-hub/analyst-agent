@@ -35,10 +35,10 @@ def test_key_needing_tools_name_the_missing_key(monkeypatch) -> None:
     so the person fixing their MCP client config knows which env var to add."""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
+    monkeypatch.delenv("CRIVO_PROVIDER", raising=False)
     assert "DEEPSEEK_API_KEY" in mcp_server._clean_file("x.csv")["error"]
 
-    monkeypatch.setenv("ANALYST_PROVIDER", "claude")
+    monkeypatch.setenv("CRIVO_PROVIDER", "claude")
     assert "ANTHROPIC_API_KEY" in mcp_server._clean_file("x.csv")["error"]
 
 
@@ -83,7 +83,7 @@ def test_clean_file_relays_needs_human_and_closes_the_session(monkeypatch) -> No
     from crivo.events import GateRequest
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
-    monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
+    monkeypatch.delenv("CRIVO_PROVIDER", raising=False)
     fake = FakeSession(
         script=[
             GateRequest("fix_a", 1, title="fix 1/2 · strip spaces", grade="AUTO"),
@@ -109,7 +109,7 @@ def test_ask_auto_approves_gates_and_returns_the_card(monkeypatch) -> None:
     from crivo.events import CardReady, GateRequest
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
-    monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
+    monkeypatch.delenv("CRIVO_PROVIDER", raising=False)
     card = AnswerCard(
         card_id="c001",
         session="s01",
@@ -135,7 +135,7 @@ def test_ask_auto_approves_gates_and_returns_the_card(monkeypatch) -> None:
 
 def test_ask_on_an_unknown_session_says_what_to_do(monkeypatch) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
-    monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
+    monkeypatch.delenv("CRIVO_PROVIDER", raising=False)
 
     result = mcp_server._ask("nope1234", "anything")
 
@@ -147,7 +147,7 @@ def test_idle_sessions_are_evicted_and_their_kernels_closed(monkeypatch) -> None
     """R4: an abandoned kernel is a leaked process. Eviction happens on the
     next lookup, and the evicted session's kernel is actually closed."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
-    monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
+    monkeypatch.delenv("CRIVO_PROVIDER", raising=False)
     fake = FakeSession()
     monkeypatch.setattr(mcp_server, "_make_session", lambda: fake)
     opened = mcp_server._open_data("data/tiny.csv")
@@ -167,7 +167,7 @@ def test_why_and_close_session_round_trip(monkeypatch, tmp_path) -> None:
     """R3: why renders the provenance chain from the session's dir on disk;
     close_session is idempotent-honest — True once, False after."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
-    monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
+    monkeypatch.delenv("CRIVO_PROVIDER", raising=False)
     fake = FakeSession()
     fake.session_dir = tmp_path
     monkeypatch.setattr(mcp_server, "_make_session", lambda: fake)
@@ -187,7 +187,7 @@ def test_a_crashing_tool_returns_an_error_result_not_a_protocol_crash(
     """R6: one bad file, one broken kernel start — the server answers with an
     error result; it never dies mid-protocol."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
-    monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
+    monkeypatch.delenv("CRIVO_PROVIDER", raising=False)
 
     def explode():
         raise RuntimeError("kernel refused to start")
@@ -335,7 +335,7 @@ def test_session_chatter_never_reaches_stdout(monkeypatch) -> None:
             self.closed = True
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
-    monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
+    monkeypatch.delenv("CRIVO_PROVIDER", raising=False)
     monkeypatch.setattr(mcp_server, "_make_session", ChattySession)
 
     captured = io.StringIO()

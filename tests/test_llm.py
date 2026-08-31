@@ -57,8 +57,8 @@ def test_the_provider_switch_selects_claude_behind_the_same_seam(monkeypatch):
     provider env switch must be the only difference a caller can observe.
     model_info() hard-coded "deepseek", so every answer card produced through
     the Claude half would have carried a false provenance stamp."""
-    monkeypatch.setenv("ANALYST_PROVIDER", "claude")
-    monkeypatch.delenv("ANALYST_MODEL", raising=False)
+    monkeypatch.setenv("CRIVO_PROVIDER", "claude")
+    monkeypatch.delenv("CRIVO_MODEL", raising=False)
     calls: list = []
     stream = iter([claude_event(text="hel"), claude_event(text="lo")])
     monkeypatch.setattr(
@@ -86,7 +86,7 @@ def test_the_provider_switch_selects_claude_behind_the_same_seam(monkeypatch):
 def test_claude_thinking_deltas_are_heartbeats_not_text(monkeypatch):
     """Same contract as DeepSeek's reasoning_content: thinking never reaches
     the tag parser, but an empty chunk says the stream is alive."""
-    monkeypatch.setenv("ANALYST_PROVIDER", "claude")
+    monkeypatch.setenv("CRIVO_PROVIDER", "claude")
     stream = iter(
         [
             claude_event(thinking="pondering..."),

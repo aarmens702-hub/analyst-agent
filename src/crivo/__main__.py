@@ -74,7 +74,7 @@ def main() -> int:
             return 1
         return 0
 
-    provider = os.environ.get("ANALYST_PROVIDER", "deepseek")
+    provider = os.environ.get("CRIVO_PROVIDER", "deepseek")
     key = "ANTHROPIC_API_KEY" if provider == "claude" else "DEEPSEEK_API_KEY"
     if not os.environ.get(key):
         print(f"{key} is not set — put it in .env or export it.")
