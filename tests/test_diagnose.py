@@ -38,9 +38,7 @@ def test_the_cli_runs_without_an_api_key(tmp_path, monkeypatch, capsys) -> None:
     for a report — needing a paid credential to be told your CSV has 'N/A' in
     it is the barrier this subcommand exists to remove."""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    monkeypatch.setattr(
-        "sys.argv", ["crivo", "diagnose", str(write_csv(tmp_path))]
-    )
+    monkeypatch.setattr("sys.argv", ["crivo", "diagnose", str(write_csv(tmp_path))])
 
     from crivo.__main__ import main
 
@@ -59,9 +57,7 @@ def test_the_clean_subcommand_is_headless_and_machine_readable(
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
     monkeypatch.delenv("ANALYST_PROVIDER", raising=False)
-    monkeypatch.setattr(
-        "sys.argv", ["crivo", "clean", "data/messy.csv", "--json"]
-    )
+    monkeypatch.setattr("sys.argv", ["crivo", "clean", "data/messy.csv", "--json"])
     session_kw: dict = {}
 
     class FakeSession:

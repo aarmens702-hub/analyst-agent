@@ -85,4 +85,4 @@ target-version = "py312"
 # skills/ holds model-authored, gate-validated artifacts: their test files use
 # a `fix` name injected by the admission harness, so host-project lint rules
 # structurally cannot apply to them
-extend-exclude = ["specs", "docs", "skills"]
+extend-exclude = ["specs", "docs", "skills", "*.md"]
