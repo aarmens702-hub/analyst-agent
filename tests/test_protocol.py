@@ -89,13 +89,54 @@ def test_value_truncated_at_8kib(client):
 
 
 def test_stream_capped_at_64kib(client):
+    from crivo.kernel.supervisor import STREAM_CAP, STREAM_TAIL_CAP
+
     code = "for i in range(300):\n    print('y' * 400)"
     events = list(client().execute(code))
     r = events[-1]
     total = sum(len(e.text) for e in events if isinstance(e, StreamOut))
     assert r.status == "ok"
     assert r.truncated.get("stream") is True
-    assert total <= 64 * 1024 + 4096, f"streamed {total} bytes past the cap"
+    # Bounded both ends: a 64 KiB live head plus a 16 KiB flushed tail
+    # (and its omission marker) — never the whole firehose.
+    assert total <= STREAM_CAP + STREAM_TAIL_CAP + 256, (
+        f"streamed {total} bytes past the head+tail caps"
+    )
+
+
+def test_stream_below_cap_untouched(client):
+    """Output smaller than the stream cap is relayed verbatim: no omission
+    marker in the text and no truncated["stream"] flag on the result."""
+    events = list(client().execute("print('small enough to pass whole')"))
+    r = events[-1]
+    text = "".join(e.text for e in events if isinstance(e, StreamOut))
+    assert r.status == "ok"
+    assert "small enough to pass whole" in text
+    assert "omitted" not in text, "sub-cap output must carry no truncation marker"
+    assert not r.truncated.get("stream"), "sub-cap output must not be flagged"
+
+
+def test_stream_cap_preserves_head_and_tail(client):
+    """A capped stream keeps its beginning AND its end. A failing run prints
+    its assertion error last — a head-only cut would destroy exactly the part
+    that matters. The relayed text must keep the start, keep the final lines,
+    and carry an explicit marker naming roughly how much was dropped."""
+    code = (
+        "print('START-OF-RUN')\n"
+        "for i in range(300):\n"
+        "    print('y' * 400)\n"
+        "print('AssertionError: totals must reconcile END-OF-RUN')"
+    )
+    events = list(client().execute(code))
+    r = events[-1]
+    text = "".join(e.text for e in events if isinstance(e, StreamOut))
+    assert r.status == "ok"
+    assert r.truncated.get("stream") is True
+    assert "START-OF-RUN" in text, "the head of the stream must survive the cap"
+    assert "AssertionError: totals must reconcile END-OF-RUN" in text, (
+        "the tail of the stream (where assertion errors land) must survive"
+    )
+    assert "chars omitted" in text, "an explicit marker must name the dropped middle"
 
 
 def test_supervisor_survives_garbage_and_unknown_ops(client):

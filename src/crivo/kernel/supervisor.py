@@ -15,6 +15,7 @@ import re
 import sys
 import threading
 import time
+from collections import deque
 from importlib import metadata
 
 from jupyter_client import KernelManager
@@ -27,6 +28,7 @@ GRACE_S = 10
 REGISTRY_EXPR = {"__registry__": "_analyst_registry_json()"}
 VALUE_CAP = 8 * 1024
 STREAM_CAP = 64 * 1024
+STREAM_TAIL_CAP = 16 * 1024
 TB_HEAD, TB_TAIL = 5, 30
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 
@@ -50,6 +52,50 @@ def _cap_value(value: str | None) -> tuple[str | None, bool]:
     omitted = len(value) - 5800 - 1500
     marker = f"\n… ({omitted} chars omitted, 8 KiB cap) …\n"
     return value[:5800] + marker + value[-1500:], True
+
+
+class _StreamTail:
+    """Rolling tail of post-cap stream text; only the middle is dropped.
+
+    A failing cell prints its assertion error last, so a head-only cut would
+    destroy exactly the part that matters. Everything past STREAM_CAP lands
+    here; the oldest overflow is trimmed (and counted) so the final
+    STREAM_TAIL_CAP chars always survive to be flushed before the result.
+    """
+
+    def __init__(self, cap: int = STREAM_TAIL_CAP) -> None:
+        self.cap = cap
+        self.chunks: deque[str] = deque()
+        self.size = 0
+        self.dropped = 0
+        self.name = "stdout"
+
+    def add(self, name: str, text: str) -> None:
+        self.name = name
+        self.chunks.append(text)
+        self.size += len(text)
+        # Trim the oldest chunk in place so exactly `cap` chars stay.
+        while self.size > self.cap:
+            excess = self.size - self.cap
+            oldest = self.chunks[0]
+            if len(oldest) <= excess:
+                self.chunks.popleft()
+                self.size -= len(oldest)
+                self.dropped += len(oldest)
+            else:
+                self.chunks[0] = oldest[excess:]
+                self.size -= excess
+                self.dropped += excess
+
+    def text(self) -> str:
+        tail = "".join(self.chunks)
+        if not self.dropped:
+            return tail
+        marker = (
+            f"\n… ({self.dropped} chars omitted, "
+            f"{STREAM_CAP // 1024} KiB stream cap) …\n"
+        )
+        return marker + tail
 
 
 def _emit(obj: dict) -> None:
@@ -165,7 +211,8 @@ class Supervisor:
         t0 = time.monotonic()
         msg_id = self.kc.execute(code, user_expressions=REGISTRY_EXPR)
         value, error, exec_count = None, None, 0
-        stream_bytes, stream_capped = 0, False
+        stream_bytes = 0
+        tail = _StreamTail()
         self._client_interrupted = False
         self._watchdog_fired = False
         grace_deadline = None
@@ -178,12 +225,14 @@ class Supervisor:
                 grace_deadline = now + GRACE_S
             if grace_deadline is not None and now > grace_deadline:
                 self._hung = True
+                self._flush_tail(rid, tail)
                 self._result(rid, "hung", None, None, exec_count, t0)
                 return
             try:
                 msg = self.kc.get_iopub_msg(timeout=IOPUB_POLL_S)
             except queue.Empty:
                 if not self.km.is_alive():
+                    self._flush_tail(rid, tail)
                     self._result(rid, "kernel_died", value, error, exec_count, t0)
                     return
                 continue
@@ -192,18 +241,22 @@ class Supervisor:
             mtype, content = msg["msg_type"], msg["content"]
             if mtype == "stream":
                 text = _strip_ansi(content["text"])
+                # Head+tail, never head-only: relay live until STREAM_CAP,
+                # split the chunk that crosses it, and roll everything past
+                # the cap into the bounded tail flushed before the result.
+                head_room = max(STREAM_CAP - stream_bytes, 0)
                 stream_bytes += len(text)
-                if stream_bytes > STREAM_CAP:
-                    stream_capped = True  # stop relaying; keep draining to idle
-                else:
+                if head_room:
                     _emit(
                         {
                             "id": rid,
                             "ev": "stream",
                             "name": content["name"],
-                            "text": text,
+                            "text": text[:head_room],
                         }
                     )
+                if len(text) > head_room:
+                    tail.add(content["name"], text[head_room:])
             elif mtype == "display_data":
                 self._display(rid, content.get("data", {}))
             elif mtype == "execute_result":
@@ -217,6 +270,7 @@ class Supervisor:
                 }
             elif mtype == "status" and content["execution_state"] == "idle":
                 break
+        self._flush_tail(rid, tail)
         reply = self._shell_reply(msg_id)
         registry, omitted = self._registry_from(reply)
         if reply and not exec_count:
@@ -231,12 +285,17 @@ class Supervisor:
         truncated = {}
         if value_capped:
             truncated["value"] = True
-        if stream_capped:
+        if tail.dropped:
             truncated["stream"] = True
         self._result(
             rid, status, value, error, exec_count, t0,
             registry=registry, registry_omitted=omitted, truncated=truncated,
         )  # fmt: skip
+
+    def _flush_tail(self, rid, tail: _StreamTail) -> None:
+        if not tail.size:
+            return
+        _emit({"id": rid, "ev": "stream", "name": tail.name, "text": tail.text()})
 
     def _display(self, rid, data: dict) -> None:
         if "image/png" in data:
