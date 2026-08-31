@@ -4,12 +4,116 @@ iterator we control -- it can yield reasoning-only chunks, content chunks, or
 block -- so we can drive the same code paths a real DeepSeek stream would hit
 without ever opening a socket."""
 
+import inspect
+import os
+import re
 import time
 from types import SimpleNamespace
 
 import pytest
 
 from crivo import llm
+
+
+@pytest.fixture(scope="module")
+def ambient_key():
+    """Plants a fake shell credential the way a developer's rc file would.
+
+    Module scope matters: higher-scoped fixtures set up before the
+    function-scoped autouse quarantine in conftest, so the plant is in
+    os.environ when the quarantine runs — exactly the ambient-leak scenario."""
+    os.environ["DEEPSEEK_API_KEY"] = "sk-ambient-shell-leak"
+    yield
+    os.environ.pop("DEEPSEEK_API_KEY", None)
+
+
+def test_ambient_credentials_never_reach_a_test(ambient_key):
+    """F2: a real key in the developer's shell must not make a test pass that
+    would fail keyless in CI. The conftest quarantine deletes every var in
+    KEY_ENV_VARS before each test; tests that need one set it explicitly."""
+    assert "DEEPSEEK_API_KEY" not in os.environ
+
+
+def test_deepseek_context_overflow_is_recognized():
+    """F3: the shape DeepSeek's OpenAI-compatible endpoint actually returns
+    when the prompt outgrows the window."""
+    msg = (
+        "Error code: 400 - {'error': {'message': 'This model's maximum "
+        "context length is 65536 tokens. However, you requested 78123 tokens "
+        "(70000 in the messages, 8123 in the completion).', "
+        "'code': 'invalid_request_error'}}"
+    )
+    assert llm.is_context_overflow(msg) is True
+
+
+def test_anthropic_context_overflow_is_recognized():
+    """F3: both real Anthropic overflow shapes — the plain prompt overflow and
+    the prompt+max_tokens budget overflow."""
+    assert (
+        llm.is_context_overflow("prompt is too long: 213462 tokens > 200000 maximum")
+        is True
+    )
+    assert (
+        llm.is_context_overflow(
+            "input length and `max_tokens` exceed context limit: 195018 + 8192 > 200000"
+        )
+        is True
+    )
+
+
+def test_rate_limit_errors_are_not_context_overflow():
+    """F3: throttling mentions tokens too, but means retry-later, not
+    shrink-the-prompt. It must never be classified as overflow."""
+    assert (
+        llm.is_context_overflow(
+            "Error code: 429 - rate limit reached: too many tokens per minute, "
+            "please wait before trying again"
+        )
+        is False
+    )
+
+
+def test_unrelated_errors_are_not_context_overflow():
+    """F3: an ordinary failure shares no overflow vocabulary and stays False."""
+    assert llm.is_context_overflow("Connection reset by peer") is False
+
+
+def test_faux_provider_returns_queued_responses_in_order(monkeypatch):
+    """F4: CRIVO_PROVIDER=faux rides the same generate() seam callers use —
+    no network, no SDK — handing back queued canned replies in order."""
+    monkeypatch.setenv("CRIVO_PROVIDER", "faux")
+    monkeypatch.setattr(llm, "_faux_responses", [])  # isolate queue state
+    llm.faux_enqueue("first reply", "second reply")
+
+    assert "".join(llm.generate([{"role": "user", "content": "a"}])) == "first reply"
+    assert "".join(llm.generate([{"role": "user", "content": "b"}])) == "second reply"
+
+
+def test_faux_provider_exhausted_queue_raises_a_clear_error(monkeypatch):
+    """F4: running past the queue must name the faux provider and say how to
+    feed it, not surface a bare IndexError from deep in the seam."""
+    monkeypatch.setenv("CRIVO_PROVIDER", "faux")
+    monkeypatch.setattr(llm, "_faux_responses", [])
+    llm.faux_enqueue("only reply")
+    assert "".join(llm.generate([{"role": "user", "content": "a"}])) == "only reply"
+
+    with pytest.raises(RuntimeError, match="faux"):
+        list(llm.generate([{"role": "user", "content": "b"}]))
+
+
+def test_key_env_vars_registry_covers_every_env_var_the_module_reads():
+    """F1: one source of truth for provider credentials and selection. The
+    membership is pinned exactly, and every os.environ read in llm.py must be
+    registered so a new read can't silently dodge the test-suite quarantine."""
+    assert set(llm.KEY_ENV_VARS) == {
+        "DEEPSEEK_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "CRIVO_PROVIDER",
+        "CRIVO_MODEL",
+    }
+    source = inspect.getsource(llm)
+    reads = set(re.findall(r'environ(?:\.get\(|\[)\s*"([A-Z_]+)"', source))
+    assert reads <= set(llm.KEY_ENV_VARS), f"unregistered env reads: {reads}"
 
 
 def chunk(content=None, reasoning=None):

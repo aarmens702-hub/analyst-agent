@@ -8,12 +8,72 @@ thinking into the tag parser.
 
 import os
 import queue
+import re
 import threading
 import time
 from collections.abc import Iterable, Iterator
 
 import httpx
 from openai import OpenAI
+
+# Overflow shapes for the providers generate() actually speaks to, each with
+# the real error message it came from:
+#
+# - DeepSeek (OpenAI-compatible): "This model's maximum context length is
+#   65536 tokens. However, you requested 78123 tokens ..."
+# - DeepSeek/OpenAI error code: "context_length_exceeded"
+# - OpenAI (newer phrasing): "Your input exceeds the context window of this model"
+# - OpenAI-compatible gateways: "Input is too long for requested model"
+# - Anthropic: "prompt is too long: 213462 tokens > 200000 maximum"
+# - Anthropic: "input length and `max_tokens` exceed context limit:
+#   195018 + 8192 > 200000"
+# - Anthropic HTTP 413: '{"error":{"type":"request_too_large",...}}'
+# - Generic token-count phrasing: "too many tokens" / "token limit exceeded"
+#   (throttling says this too — _NOT_OVERFLOW_PATTERNS screens it out first)
+_OVERFLOW_PATTERNS = (
+    re.compile(r"maximum context length", re.IGNORECASE),
+    re.compile(r"context[_ ]length[_ ]exceeded", re.IGNORECASE),
+    re.compile(r"exceeds the context window", re.IGNORECASE),
+    re.compile(r"input is too long", re.IGNORECASE),
+    re.compile(r"prompt is too long", re.IGNORECASE),
+    re.compile(r"max_tokens.{0,40}exceed", re.IGNORECASE),
+    re.compile(r"request_too_large", re.IGNORECASE),
+    re.compile(r"too many tokens", re.IGNORECASE),
+    re.compile(r"token limit exceeded", re.IGNORECASE),
+)
+
+# Throttling shapes that also mention tokens and would otherwise false-match
+# above (e.g. "429 ... too many tokens per minute"). Checked first: matching
+# any of these means NOT overflow, whatever else the message says.
+_NOT_OVERFLOW_PATTERNS = (
+    re.compile(r"rate[_ ]?limit", re.IGNORECASE),  # DeepSeek/OpenAI 429 phrasing
+    re.compile(r"too many requests", re.IGNORECASE),  # generic HTTP 429
+    re.compile(r"per min(ute)?", re.IGNORECASE),  # "tokens per minute" quotas
+    re.compile(r"overloaded", re.IGNORECASE),  # Anthropic 529 overloaded_error
+)
+
+
+def is_context_overflow(message: str) -> bool:
+    """True when a provider error says the prompt outgrew the context window.
+
+    Throttling errors mention tokens too ("too many tokens per minute") and
+    must stay False: they mean retry later, not shrink the prompt.
+    """
+    if any(p.search(message) for p in _NOT_OVERFLOW_PATTERNS):
+        return False
+    return any(p.search(message) for p in _OVERFLOW_PATTERNS)
+
+
+# Every env var that can carry a provider credential or selection, anywhere in
+# crivo (llm.py, __main__.py, mcp_server.py). The single source of truth: the
+# test-suite quarantine deletes exactly these so an ambient shell key can never
+# make a test pass that would fail in CI.
+KEY_ENV_VARS = (
+    "DEEPSEEK_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "CRIVO_PROVIDER",
+    "CRIVO_MODEL",
+)
 
 DEFAULT_MODEL = "deepseek-v4-pro"
 BASE_URL = "https://api.deepseek.com"
@@ -27,6 +87,15 @@ STALL_S = 90  # no bytes at all for this long means the stream is dead
 
 _client: OpenAI | None = None
 _claude_client = None
+
+# CRIVO_PROVIDER=faux: canned replies consumed FIFO by generate(), one per
+# call. No network, no SDK — same seam, so callers need no test-only branch.
+_faux_responses: list[str] = []
+
+
+def faux_enqueue(*texts: str) -> None:
+    """Queue canned replies for the faux provider, delivered in order."""
+    _faux_responses.extend(texts)
 
 
 def _provider() -> str:
@@ -99,6 +168,17 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
     stream item becomes text; the watchdog around them is shared, because a
     hung stream hangs identically whoever serves it.
     """
+    if _provider() == "faux":
+        if not _faux_responses:
+            raise RuntimeError(
+                "faux provider: response queue is empty — queue replies with "
+                "llm.faux_enqueue() before calling generate()"
+            )
+        # one queued reply per call, through the same watchdog as the real
+        # providers so a faux run exercises the code path callers get
+        yield from _watched(iter([_faux_responses.pop(0)]), lambda item: item)
+        return
+
     if _provider() == "claude":
         msgs = list(messages)
         # anthropic takes system as a top-level param, not a message role

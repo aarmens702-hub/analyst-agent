@@ -1,9 +1,23 @@
-"""Shared pytest config: the `docker` marker auto-skips when no daemon is up."""
+"""Shared pytest config: the `docker` marker auto-skips when no daemon is up,
+and provider credentials are quarantined so tests never see the shell's keys."""
 
 import shutil
 import subprocess
 
 import pytest
+
+from crivo.llm import KEY_ENV_VARS
+
+
+@pytest.fixture(autouse=True)
+def _quarantine_provider_env(monkeypatch):
+    """Deletes every provider credential/selection var before each test.
+
+    A developer's real key in the shell must never make a test pass that would
+    fail keyless in CI. Tests that need a var set it explicitly with
+    monkeypatch; monkeypatch restores the shell's environment afterward."""
+    for var in KEY_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
 
 
 def _docker_available() -> bool:
