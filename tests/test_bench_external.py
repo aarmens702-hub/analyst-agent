@@ -120,7 +120,7 @@ def test_load_scored_pair_aligns_renamed_headers_positionally(tmp_path: Path):
     pd.DataFrame({"ProviderNumber": ["1", "x"], "city": ["a", "b"]}).to_csv(
         d / "dirty.csv", index=False
     )
-    clean, dirty, truth = load_scored_pair("hospital", root=tmp_path)
+    _, dirty, truth = load_scored_pair("hospital", root=tmp_path)
     assert list(dirty.columns) == ["provider_number", "city"]  # aligned
     by_granularity = {c.granularity: c for c in truth.corruptions}
     rename = by_granularity["column"]
