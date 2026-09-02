@@ -28,14 +28,32 @@ rate 0.3 and 0.5 and see which diseases wake up; (c) genuine gaps (d16/d17
 plausibly have no signal at all for mixed-magnitude or packed cells).
 The bench can answer (b) cheaply; do that first.
 
-## 2. Hospital overcleaning (external)
+## 2. Hospital overcleaning (external) — investigated, decomposed
 
 `clean()` changed 4,078 cells where truth marks ~509 dirty (dirt-targeting
-precision 0.013). Likely the case-variants fixer folding an entire text
-column to most-common casing. Verification survived 1.0 while truth
-disagrees — textbook proof that "signal gone" and "matches ground truth" are
-different claims. Candidate: case-fold only when variants of the same folded
-value actually co-occur, not blanket-normalize.
+precision 0.013). Receipts (per-fix cell attribution, 2026-09-02) say the
+original hypothesis was WRONG — the case-variants fixer never ran on
+hospital. The real decomposition:
+
+- **Score + Sample (2,000 cells): a benchmark-convention collision, not a
+  bug.** Hospital's ground-truth *clean* file uses the literal token
+  `'empty'` as its missing marker; `'empty'` is in crivo's own sentinel
+  vocabulary (detect.py), so the d4 fix turns it into NaN — defensible
+  cleaning that this benchmark scores as damage. Decision: keep crivo's
+  behavior, do NOT teach the scorer that `'empty'` means missing (that would
+  be fitting the metric to the dataset); hospital's repair numbers carry
+  this asterisk permanently.
+- **MeasureName (42 innocent cells): real d6 aggressiveness question.** The
+  pristine prose legitimately contains internal double spaces ("the  right
+  kind"); `_ws_tidy` collapses every internal run. A conservative variant
+  (strip edges + nbsp, leave internal runs unless the padded-variant pattern
+  co-occurs) would raise external precision but LOWER synthetic d6 repair —
+  the taxonomy (and so the injector) counts internal doubles as damage. The
+  bench now referees this trade properly: any change gets judged by both
+  corpora. Aarmen's call; no unilateral semantics change.
+- Verification survived 1.0 throughout while truth disagrees — still the
+  textbook proof that "signal gone" and "matches ground truth" are different
+  claims.
 
 ## 3. Repair-undefined-by-design diseases
 
@@ -53,6 +71,51 @@ entry point. Its plain-number/leading-zero equivalence already migrated into
 `bench.score.equivalent_str`. Note: `scripts/fetch_raha.py` now fetches into
 `data/external/raha/` (pinned + hashed); score_fixes' old `data/raha/` path
 comments are stale.
+
+## Rate-sensitivity probe (2026-09-02)
+
+Hypothesis (a) from §1 — prevalence gating — is REFUTED: raising the
+corruption rate wakes nothing. Same bases/seeds as the smoke corpus,
+injectors called directly at rates 0.1/0.3/0.5, detection micro-F1
+("silent" = no finding of the right disease and nothing to score):
+
+| disease | dataset | r=0.1 | r=0.3 | r=0.5 | other signals that fired |
+|---|---|---|---|---|---|
+| 5 suppression-codes | tx-suppression | silent | silent | silent | d1 |
+| 7 case-variants | tx-case-variants | silent | silent | silent | d6 |
+| 10 near-duplicate-rows | tx-near-dups | silent | silent | silent | d9 |
+| 11 key-violations | tx-key-violations | silent | silent | silent | — |
+| 13 out-of-domain | tx-out-of-domain | silent | silent | silent | — |
+| 14 broken-coordinates | geo-broken-coords | 0.333 | 0.333 | 0.333 | d1, d11, d15 |
+| 16 unit-heterogeneity | tx-unit-mix | silent | silent | silent | d15 |
+| 17 packed-fields | tx-packed-fields | silent | silent | silent | d11 |
+| 21 aggregate-rows | tx-aggregate-row | silent | silent | silent | d15 |
+| 22 id-numeric-corruption | tx-excel-ids | silent | silent | silent | — |
+
+Verdicts:
+
+- d5, d7, d10, d16, d21 — **blind at all tested rates, adjacent-covered**: a
+  neighboring signal (d1/d6/d9/d15) sees the symptom, so the dirt is noticed
+  but misdiagnosed — detection F1 charges a miss plus a false positive.
+- d11, d13, d22 — **blind at all tested rates, nothing fires**: planted
+  duplicate keys, impossible negatives, and Excel-eaten ids go completely
+  unreported. These three are the sharpest gaps.
+- d17 — **blind**; the only companion signal is a d11 firing that looks like
+  a false positive of its own.
+- d14 — **partial and rate-flat** (0.333 at every rate): catches lat=999,
+  never the in-range swaps; higher rates also draw d1/d11/d15 false
+  positives on the geo frame.
+
+Implication for the detector-diff proposals: this is not threshold tuning —
+rate changes move nothing, so these are missing or mis-scoped signals, and
+each proposal to Aarmen should be a new/extended detector for its disease,
+landed one at a time with the bench as the regression net (the smoke corpus
+already scores every one of them).
+
+Also observed during the probe: d11 and d1 fired on frames where those
+diseases were never planted — false-positive scoping bugs in their own
+right; each detector-diff proposal should carry a line on its FP behavior
+against the frames it should stay silent on.
 
 ## 5. Smoke timing vs spec
 
