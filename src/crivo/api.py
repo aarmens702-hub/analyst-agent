@@ -82,6 +82,53 @@ class Report:
 
         return charts.overview(self._name, self.findings, self.clear, ax=ax)
 
+    def suggest(self, k: int = 5) -> list[str]:
+        """3..k plain-English starter questions for this dataset — keyless,
+        deterministic (schema order, findings first), derived from dtypes and
+        findings. Column names may appear; cell values never do (house rule:
+        no dataset rows on any output surface)."""
+        frame = self._frame
+        n = len(frame)
+        numeric = [c for c in frame.columns if pd.api.types.is_numeric_dtype(frame[c])]
+        datetimes = [
+            c for c in frame.columns if pd.api.types.is_datetime64_any_dtype(frame[c])
+        ]
+        ids = [c for c in frame.columns if n > 1 and frame[c].nunique(dropna=True) == n]
+        categorical = [
+            c
+            for c in frame.columns
+            if c not in ids
+            and not pd.api.types.is_numeric_dtype(frame[c])
+            and not pd.api.types.is_datetime64_any_dtype(frame[c])
+            and 0 < frame[c].nunique(dropna=True) <= max(20, n // 10)
+        ]
+
+        out: list[str] = []
+        for finding in self.findings[:2]:
+            for col in finding["columns"][:1]:
+                out.append(
+                    f'How many rows of "{col}" are affected by {finding["slug"]}?'
+                )
+        if numeric and categorical:
+            out.append(f'What is the total "{numeric[0]}" by "{categorical[0]}"?')
+        if datetimes and numeric:
+            out.append(f'How does "{numeric[0]}" change over "{datetimes[0]}"?')
+        if ids:
+            out.append(f'How many distinct "{ids[0]}" are there?')
+        if categorical:
+            out.append(f'Which "{categorical[0]}" appears most often?')
+        if numeric:
+            out.append(f'What are the min, mean, and max of "{numeric[0]}"?')
+        if frame.shape[1]:
+            # schema-only fallbacks so even a clean two-text-column frame
+            # gets its three starters
+            out.append("How many rows are there?")
+            out.append("Which columns have missing values?")
+
+        seen: set[str] = set()
+        deduped = [q for q in out if not (q in seen or seen.add(q))]
+        return deduped[:k]
+
 
 def diagnose(data, name: str | None = None) -> Report:
     """Diagnose a DataFrame or a file path against the 22-check engine.
