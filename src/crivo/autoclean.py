@@ -79,6 +79,27 @@ def _drop_constant(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
     return frame.drop(columns=[c for c in cols if c in frame.columns])
 
 
+_TRUTHY = {"y", "yes", "true", "t", "1"}
+_FALSY = {"n", "no", "false", "f", "0"}
+
+
+def _fix_booleans(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
+    """boolean-chaos: one truth, many spellings — canonicalise to a real
+    nullable boolean dtype. Unmappable strays stay untouched by leaving the
+    whole column alone (a partial mapping would trade one chaos for two)."""
+    out = frame.copy()
+    for c in cols:
+        series = out[c]
+        folded = series.astype(str).str.strip().str.lower()
+        known = folded.isin(_TRUTHY | _FALSY) | series.isna()
+        if not bool(known.all()):
+            continue
+        mapped = folded.map(lambda v: v in _TRUTHY)
+        mapped[series.isna()] = pd.NA
+        out[c] = mapped.astype("boolean")
+    return out
+
+
 def _fix_headers(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
     """Repair damaged column NAMES: strip BOM/zero-width residue, collapse
     padding, replace "Unnamed: N" placeholders, dedupe collisions — renames
@@ -121,11 +142,12 @@ FIXERS = {
     7: _fix_case_variants,
     18: _fix_headers,
     19: _drop_constant,
+    23: _fix_booleans,
 }
 # apply order: clear sentinels and whitespace before coercing types; structural
 # changes last (drops, then renames), so a value fix never runs against an
 # already-mutated shape and a rename never orphans a later fixer's column list
-_ORDER = [4, 6, 7, 1, 2, 19, 18]
+_ORDER = [4, 6, 7, 1, 2, 23, 19, 18]
 
 
 class CleanSummary:
