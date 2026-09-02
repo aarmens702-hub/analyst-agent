@@ -103,24 +103,32 @@ def test_fetcher_verify_and_skip_decision(tmp_path: Path, monkeypatch) -> None:
     assert fetch_raha.fetch_one("widgets", "clean.csv", entry, root) == "skipped"
 
 
-def test_truth_from_pair_aligns_renamed_headers_positionally():
+def test_load_scored_pair_aligns_renamed_headers_positionally(tmp_path: Path):
     # Raha reality: hospital renames every column between clean and dirty,
     # beers renames two — same order, same count. The rename is itself dirt,
-    # so alignment must record it, not crash and not silently ignore it.
+    # so alignment must record it, not crash and not silently ignore it —
+    # and the manifest hash must pin the ALIGNED frame, the one scoring eats.
     import pandas as pd
 
-    from bench.external import truth_from_pair
+    from bench.external import load_scored_pair
 
-    clean = pd.DataFrame({"provider_number": ["1", "2"], "city": ["a", "b"]})
-    dirty = pd.DataFrame({"ProviderNumber": ["1", "x"], "city": ["a", "b"]})
-    truth = truth_from_pair(clean, dirty, "hospital")
+    d = tmp_path / "hospital"
+    d.mkdir()
+    pd.DataFrame({"provider_number": ["1", "2"], "city": ["a", "b"]}).to_csv(
+        d / "clean.csv", index=False
+    )
+    pd.DataFrame({"ProviderNumber": ["1", "x"], "city": ["a", "b"]}).to_csv(
+        d / "dirty.csv", index=False
+    )
+    clean, dirty, truth = load_scored_pair("hospital", root=tmp_path)
+    assert list(dirty.columns) == ["provider_number", "city"]  # aligned
     by_granularity = {c.granularity: c for c in truth.corruptions}
     rename = by_granularity["column"]
     assert rename.columns == ("provider_number",)
     assert "ProviderNumber" in rename.note
     cells = by_granularity["cell"].cells
     assert [(c.row, c.column) for c in cells] == [(1, "provider_number")]
-    truth.verify_frame(dirty)  # hash is of the dirty frame as fetched, pre-alignment
+    truth.verify_frame(dirty)  # the returned dirty is exactly the pinned frame
 
 
 def test_fetch_all_drives_every_entry_and_main_respects_strict(

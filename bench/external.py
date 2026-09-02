@@ -40,8 +40,6 @@ def truth_from_pair(clean: pd.DataFrame, dirty: pd.DataFrame, name: str) -> Grou
         )
 
     corruptions = []
-    # The hash pins the dirty frame AS FETCHED — stamp before any realignment.
-    dirty_digest = frame_sha256(dirty)
     if list(clean.columns) != list(dirty.columns):
         # Raha reality: hospital renames every header, beers renames two —
         # same order, same count. The rename is itself dirt: record each
@@ -82,6 +80,20 @@ def truth_from_pair(clean: pd.DataFrame, dirty: pd.DataFrame, name: str) -> Grou
         base="external",
         n_rows=len(clean),
         n_cols=len(clean.columns),
-        frame_sha256=dirty_digest,
+        frame_sha256=frame_sha256(dirty),
         corruptions=corruptions,
     )
+
+
+def load_scored_pair(
+    name: str, root: Path = Path("data/external/raha")
+) -> tuple[pd.DataFrame, pd.DataFrame, GroundTruth]:
+    """The one-call entry for scoring a fetched dataset: (clean, ALIGNED
+    dirty, truth). The returned dirty carries the clean header names and is
+    exactly the frame the manifest hash pins — hand it straight to
+    score_pair, which scores external pairs in string space."""
+    clean, dirty = load_pair(name, root)
+    truth = truth_from_pair(clean, dirty, name)
+    if list(clean.columns) != list(dirty.columns):
+        dirty = dirty.set_axis(clean.columns, axis=1)
+    return clean, dirty, truth

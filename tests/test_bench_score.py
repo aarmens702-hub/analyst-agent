@@ -218,3 +218,46 @@ def test_score_pair_keyless_integration_smoke():
             assert 0.0 <= node <= 1.0, node
 
     _bounded(result)
+
+
+def test_string_space_equivalence_scores_external_pairs():
+    # Raha pairs are all-string; crivo.clean re-types. Typed equivalence makes
+    # external repair structurally unwinnable (str is never a number), so
+    # external scoring needs string-space equality: blank == missing,
+    # "12.0" == "12", but "02115" != "2115" (leading zeros are disease 22).
+    import numpy as np
+    import pandas as pd
+
+    from bench.score import equivalent_str, score_end_to_end
+    from bench.truth import GroundTruth, frame_sha256
+
+    cases = [
+        ("12.0", "12", True),
+        ("12.0", 12.0, True),  # typed cleaned value vs string pristine
+        ("02115", "2115", False),
+        ("  x ", "x", True),
+        ("", np.nan, True),
+        (pd.Timestamp("2004-01-01"), "2004-01-01", True),
+        ("a", "b", False),
+    ]
+    for a, b, want in cases:
+        assert equivalent_str(a, b) is want, (a, b)
+        assert equivalent_str(b, a) is want, (b, a)
+
+    # 2x2 string pair: cell (0,'n') dirty "12,0"->cleaned typed 12.0 == "12" ✓
+    # cell (1,'d') dirty "bad"->cleaned NaT vs pristine "2004-01-01" ✗ (missed)
+    pristine = pd.DataFrame({"n": ["12", "3"], "d": ["2004-01-01", "2004-01-02"]})
+    dirty = pd.DataFrame({"n": ["12,0", "3"], "d": ["2004-01-01", "bad"]})
+    cleaned = pd.DataFrame(
+        {"n": [12.0, 3.0], "d": [pd.Timestamp("2004-01-01"), pd.NaT]}
+    )
+    truth = GroundTruth(
+        seed=0, base="external", n_rows=2, n_cols=2, frame_sha256=frame_sha256(dirty)
+    )
+    result = score_end_to_end(
+        pristine, dirty, cleaned, truth, values_equal=equivalent_str
+    )
+    # D = {(0,n),(1,d)}; C = {(0,n),(1,d)}; repaired = {(0,n)} only
+    assert result["counts"] == {"dirty": 2, "changed": 2, "repaired": 1}
+    assert result["repair"]["precision"] == 0.5
+    assert result["repair"]["recall"] == 0.5

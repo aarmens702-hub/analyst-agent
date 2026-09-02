@@ -9,9 +9,15 @@ from __future__ import annotations
 
 import datetime
 import math
+import re
 
 import numpy as np
 import pandas as pd
+
+# A plain number, so "12.0" and "12" can score as the same value in string
+# space. Leading zeros are excluded on purpose: losing them is disease 22,
+# so "02115" must never equal "2115".
+_PLAIN_NUMBER = re.compile(r"^[-+]?(0|[1-9]\d*)(\.\d+)?$")
 
 from crivo.autoclean import FIXERS, clean
 from crivo.detect import detect_all
@@ -68,8 +74,45 @@ def equivalent(a, b) -> bool:
         return False
 
 
+def _stringly(x) -> str:
+    """Render a value the way an all-string CSV would show it: missing is
+    blank, a midnight timestamp is its date, everything else str() stripped."""
+    if _is_missing(x):
+        return ""
+    if _is_datetime(x):
+        ts = pd.Timestamp(x)
+        return str(ts.date()) if ts == ts.normalize() else str(ts)
+    return str(x).strip()
+
+
+def equivalent_str(a, b) -> bool:
+    """String-space equivalence for external (all-string) pairs.
+
+    Raha pairs carry every value as text while crivo.clean re-types, so the
+    typed `equivalent` would make external repair structurally unwinnable.
+    Here both sides render to strings first; two plain numbers then compare
+    numerically ("12.0" == "12") — but a leading zero fails the plain-number
+    shape, so "02115" != "2115" (losing zeros is disease 22, not a formatting
+    nicety). Never raises.
+    """
+    try:
+        a_s, b_s = _stringly(a), _stringly(b)
+        if a_s == b_s:
+            return True
+        if _PLAIN_NUMBER.match(a_s) and _PLAIN_NUMBER.match(b_s):
+            return math.isclose(float(a_s), float(b_s), rel_tol=1e-9)
+        return False
+    except Exception:  # noqa: BLE001 - an incomparable pair must never crash the scorer
+        return False
+
+
 def _positions(
-    columns, n_rows: int, left: pd.DataFrame, right: pd.DataFrame, want_equivalent: bool
+    columns,
+    n_rows: int,
+    left: pd.DataFrame,
+    right: pd.DataFrame,
+    want_equivalent: bool,
+    values_equal=equivalent,
 ) -> set[tuple[int, str]]:
     """Row/column positions (row < n_rows) where `left` and `right` do (or, if
     `want_equivalent` is False, do not) agree, restricted to `columns`. A
@@ -88,16 +131,20 @@ def _positions(
         for row in range(n_rows):
             l_val = l_col.iat[row] if row < l_len else None
             r_val = r_col.iat[row] if row < r_len else None
-            if equivalent(l_val, r_val) == want_equivalent:
+            if values_equal(l_val, r_val) == want_equivalent:
                 out.add((row, name))
     return out
 
 
-def dirty_cells(pristine: pd.DataFrame, dirty: pd.DataFrame) -> set[tuple[int, str]]:
+def dirty_cells(
+    pristine: pd.DataFrame, dirty: pd.DataFrame, values_equal=equivalent
+) -> set[tuple[int, str]]:
     """Cells where `dirty` diverges from `pristine`, scoped to the pristine's
     own rows and columns — appended rows and renamed columns are row/column-
     granular damage, scored elsewhere, not cell damage."""
-    return _positions(pristine.columns, len(pristine), pristine, dirty, False)
+    return _positions(
+        pristine.columns, len(pristine), pristine, dirty, False, values_equal
+    )
 
 
 def _f1(precision: float | None, recall: float | None) -> float | None:
@@ -110,16 +157,22 @@ def _f1(precision: float | None, recall: float | None) -> float | None:
 
 
 def score_end_to_end(
-    pristine: pd.DataFrame, dirty: pd.DataFrame, cleaned: pd.DataFrame, truth
+    pristine: pd.DataFrame,
+    dirty: pd.DataFrame,
+    cleaned: pd.DataFrame,
+    truth,
+    values_equal=equivalent,
 ) -> dict:
     """Cell-level dirt-targeting and repair quality (Baran-comparable),
     scored over the pristine grid only: rows < truth.n_rows, pristine's own
-    columns. D = truly dirty, C = touched by the cleaner, K = ended correct."""
+    columns. D = truly dirty, C = touched by the cleaner, K = ended correct.
+    `values_equal` picks the equivalence space: typed for the synthetic
+    corpus, `equivalent_str` for all-string external pairs."""
     n = truth.n_rows
     columns = pristine.columns
-    D = _positions(columns, n, pristine, dirty, False)
-    C = _positions(columns, n, dirty, cleaned, False)
-    K = _positions(columns, n, pristine, cleaned, True)
+    D = _positions(columns, n, pristine, dirty, False, values_equal)
+    C = _positions(columns, n, dirty, cleaned, False, values_equal)
+    K = _positions(columns, n, pristine, cleaned, True, values_equal)
 
     c_and_d = C & D
     d_and_k = D & K
@@ -245,10 +298,12 @@ def score_pair(
     truth.verify_frame(dirty)  # refuse a frame/manifest pair that drifted apart
     detect_result = detect_all(dirty, name=name)
     cleaned, summary = clean(dirty)
+    # external pairs are all-string by Raha convention: score in string space
+    values_equal = equivalent_str if truth.base == "external" else equivalent
     truth_diseases = sorted({c.disease for c in truth.corruptions if c.disease != 0})
     return {
         "detection": score_detection(detect_result, truth),
-        "end_to_end": score_end_to_end(pristine, dirty, cleaned, truth),
+        "end_to_end": score_end_to_end(pristine, dirty, cleaned, truth, values_equal),
         "verification": score_verification(dirty, summary),
         "attempted_diseases": sorted(d for d in truth_diseases if d in FIXERS),
         "not_attempted_diseases": sorted(d for d in truth_diseases if d not in FIXERS),
