@@ -26,10 +26,60 @@ __all__ = [
     "Report",
     "clean",
     "diagnose",
+    "load_example",
     "read",
     "read_sql",
     "write",
 ]
+
+
+def load_example() -> pd.DataFrame:
+    """A small messy frame for trying crivo offline — the README's first block.
+
+    Deterministic (same frame every call) and built in code, no download.
+    Planted diseases, by taxonomy number: 1 numbers-as-strings ("$1,234.50"
+    money formats in `revenue`), 4 sentinel-missing ("-999" and "N/A" in
+    `units`), 6 whitespace-damage (padded values in `note`), 7 case variants
+    (re-cased `region` values), 9 duplicate-rows (two exact repeats at the
+    end). `diagnose` finds them; `clean` fixes the safe subset and shows the
+    receipts — the sixty-second demo of verify-or-revert.
+    """
+    regions = ["north", "south", "east", "west"]
+    rows = [
+        {
+            "customer": f"customer {i % 9}",
+            "region": regions[i % 4],
+            "revenue": f"{100 + 7.5 * i:.2f}",
+            "units": str(3 + (i * 5) % 40),
+            "note": "ok" if i % 3 else "review",
+        }
+        for i in range(58)
+    ]
+    frame = pd.DataFrame(rows)
+    frame.loc[[2, 11, 23, 31, 44], "region"] = [
+        "NORTH",
+        "SOUTH",
+        "East",
+        "WEST",
+        "North",
+    ]
+    frame.loc[[4, 13, 26, 38, 49, 55], "revenue"] = [
+        "$1,234.50",
+        "$987.00",
+        "2,450.75",
+        "$310.25",
+        "1,999.99",
+        "$45.10",
+    ]
+    frame.loc[[6, 19, 40], "units"] = "-999"
+    frame.loc[[9, 28, 51], "units"] = "N/A"
+    frame.loc[[5, 21, 35, 47], "note"] = [
+        "  follow up  ",
+        "double  space",
+        " padded",
+        "trailing  ",
+    ]
+    return pd.concat([frame, frame.iloc[[3, 17]]], ignore_index=True)
 
 
 class Report:
@@ -81,6 +131,24 @@ class Report:
         from crivo import charts
 
         return charts.overview(self._name, self.findings, self.clear, ax=ax)
+
+    def to_html(self, path) -> Path:
+        """Write the report as ONE standalone, self-contained HTML file — the
+        notebook card wrapped in a document shell, every style inline, no
+        scripts, no external assets — for sending to someone who will never
+        install anything. Returns the written path; parents are created."""
+        from crivo import notebook as _notebook
+
+        card = _notebook.report_html(self._name, self._frame, self._result)
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f"<title>crivo report — {self._name}</title></head>\n"
+            f'<body style="margin:0;padding:24px;background:#f4f4f2">{card}</body></html>\n'
+        )
+        return p
 
     def suggest(self, k: int = 5) -> list[str]:
         """3..k plain-English starter questions for this dataset — keyless,
