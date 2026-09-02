@@ -450,11 +450,13 @@ def inject_d6(
 
 
 def _case_variant(value: str, kind: int) -> str:
+    # case-only on purpose: a whitespace-padded variant is d6's disease, and
+    # planting it here would teach the bench to reward misdiagnosis
     if kind == 0:
         return value.upper()
     if kind == 1:
         return value.lower()
-    return value + " "
+    return value.capitalize()
 
 
 @injector(7)
@@ -465,9 +467,16 @@ def inject_d7(
     columns: list[str] | None = None,
     rate: float = 0.1,
 ) -> pd.DataFrame:
-    """case-spelling-variants: category column: rate of cells re-cased or
-    padded variants of the SAME value."""
-    col = _pick_column(_text_columns(frame), columns, 7, "case-spelling-variants")
+    """case-spelling-variants: a REPEATED-vocab text column: rate of cells
+    re-cased variants of the SAME value. The disease is one entity under
+    several spellings, so it needs values that recur — a near-unique id
+    column recased is undetectable by construction and an unfair plant."""
+    repeated = [
+        c
+        for c in _text_columns(frame)
+        if len(frame) and frame[c].nunique(dropna=True) / len(frame) <= 0.5
+    ]
+    col = _pick_column(repeated, columns, 7, "case-spelling-variants")
     n = len(frame)
     out = frame.copy()
     k = _count(rate, n)
@@ -480,10 +489,9 @@ def inject_d7(
         text = str(original)
         corrupted = _case_variant(text, int(v))
         if corrupted == text:
-            # lower() is a no-op on an already-lowercase vocabulary word —
-            # recorded cells must be real corruptions, so fall back to the
-            # trailing-space form, which always differs
-            corrupted = _case_variant(text, 2)
+            corrupted = text.swapcase()  # always differs for alphabetic vocab
+        if corrupted == text:
+            continue  # no alphabetic material to recase — record no lie
         out.at[row, col] = corrupted
         cells.append(
             Cell(

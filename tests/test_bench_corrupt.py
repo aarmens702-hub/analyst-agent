@@ -140,3 +140,31 @@ def test_corrupt_end_to_end_manifest_matches_and_round_trips():
     assert truth.n_rows == len(frame)
     assert truth.n_cols == len(frame.columns)
     assert len(truth.corruptions) == 3
+
+
+def test_d7_targets_repeated_vocab_and_plants_case_only_variants():
+    """Bench triage 2026-09-02: d7 auto-picked the unique txn_id column, where
+    a recased one-occurrence value creates no fold-collision — the disease
+    (one entity under several spellings) requires REPEATED values, so the
+    plant was undetectable by construction. And its trailing-space fallback
+    is d6's disease, not d7's: every planted variant must differ from its
+    original by case alone."""
+    import numpy as np
+
+    from bench.bases import transactions
+    from bench.corrupt import INJECTORS
+    from bench.truth import GroundTruth
+
+    frame = transactions(107, 250)
+    truth = GroundTruth(seed=107, base="t", n_rows=250, n_cols=9, frame_sha256="")
+    INJECTORS[7](frame, truth, np.random.default_rng(107))
+    (corruption,) = truth.corruptions
+    (col,) = corruption.columns
+    assert frame[col].nunique() / len(frame) <= 0.5, (
+        f"d7 must target a repeated-vocab column, picked {col!r}"
+    )
+    for cell in corruption.cells:
+        assert str(cell.corrupted) != str(cell.original)
+        assert str(cell.corrupted).casefold() == str(cell.original).casefold(), (
+            "variants must differ by case alone — whitespace is d6's disease"
+        )
