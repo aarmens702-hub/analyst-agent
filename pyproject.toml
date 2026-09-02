@@ -68,6 +68,9 @@ dev = [
 
 [tool.pytest.ini_options]
 tdd_guard_project_root = "/Users/aarmensidhu/Desktop/analyst-agent"
+# bench/ is repo tooling (the Proving Ground), deliberately not shipped in the
+# wheel — the repo root on sys.path is what makes `import bench` work in tests
+pythonpath = ["."]
 # Container tests build an image and run it. That is real memory on whatever
 # machine `pytest` happens to be typed on, so it must be asked for, never
 # inherited: `uv run pytest -m docker` opts in.
