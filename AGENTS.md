@@ -23,6 +23,12 @@ exists because every one of these rules has already burned an agent once.
   needed. New test files start with exactly one test. Pytest fixture errors
   register as ERROR not FAILED — make first failures happen inside test
   bodies. Pausing the guard is Aarmen-gated; do not edit its config.
+- **tdd-guard state is GLOBAL and single-slot:** concurrent agents clobber
+  each other's recorded red, so rejections may cite tests that aren't yours.
+  Protocol: re-run YOUR test file, retry the edit immediately. If a sibling
+  runs pytest continuously the window is unwinnable — batch gated edits for
+  after it reports, and prefer wave topologies with at most one agent
+  running tests during any hot period.
 - **Kernel/LLM tests:** the suite is keyless by design; `tests/conftest.py`
   quarantines provider credentials. Never add a test that needs a real key or
   the network — fake providers and tmp files exist for a reason.
