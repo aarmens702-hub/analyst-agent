@@ -140,12 +140,29 @@ against the frames it should stay silent on.
   column (12 x "N/A" beside unique names, caught by the admission-kernel
   suite) impersonates a damaged key under any textiness prior, so the wide
   path now requires an id-claiming NAME, full stop.
+- **Second sweep (same day):** d5 fires on realistic mixed float/token
+  columns (`.str` ops silently NaN'd floats; SUPPRESSION_TOKEN learned the
+  literal disclosure words); d21's ≥2 floor lifted for a lone TOTAL row
+  when a numeric column corroborates as the sum of the rest; d14 gained the
+  exchange signature (disjoint robust bands → in-range swaps visible); d10
+  gained the leave-one-column-out drift pass (rows equal everywhere but one
+  close numeric — genuine repeat business stays silent because ids are
+  never "close"). d7 was the injector's fault, not the detector's: the
+  plant landed on the unique id column where recasing creates no fold
+  collision — undetectable by construction — so the injector now targets
+  repeated-vocab columns and plants case-only variants (the trailing-space
+  form was d6's disease). d16 deferred to its own design round: the planted
+  ×0.3048 band blends into amount's 3.7-decade spread — no gap exists for
+  the bimodal gate to find; needs ratio-residue testing, not a gate tweak.
+- Truth-format follow-up worth considering when the bench next evolves:
+  multi-label `Corruption.diseases` — d13/d15 firing on the d14 frame are
+  honest observations of the same plant, charged as FPs by single-label
+  truth.
 - Both pristine bases now detect fully clean across seeds. Smoke detect
-  µF1 (silence-as-zero): 0.469 → **0.581**. Still open: the
-  adjacent-covered group (d5/d7/d10/d16/d21), d14's in-range swaps, and
-  the known-and-accepted d13-fallback firing on swapped coordinates in
-  the d14 frame (a true observation charged as an FP by single-label
-  truth).
+  µF1 (silence-as-zero): 0.469 → 0.581 → **0.728**, repair F1 (fixable)
+  0.936 → **0.980**. Still open: d16 (own design round — ratio-residue
+  testing) and the multi-label truth question above; everything else on
+  this page's silent list is now landed and pinned by its own test.
 
 ## 5. Smoke timing vs spec
 
