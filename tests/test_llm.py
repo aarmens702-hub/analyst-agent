@@ -110,6 +110,8 @@ def test_key_env_vars_registry_covers_every_env_var_the_module_reads():
         "ANTHROPIC_API_KEY",
         "CRIVO_PROVIDER",
         "CRIVO_MODEL",
+        "CRIVO_BASE_URL",
+        "CRIVO_API_KEY",
     }
     source = inspect.getsource(llm)
     reads = set(re.findall(r'environ(?:\.get\(|\[)\s*"([A-Z_]+)"', source))
@@ -272,3 +274,38 @@ def test_a_stream_that_goes_silent_is_abandoned(monkeypatch):
     elapsed = time.monotonic() - started
 
     assert elapsed < 0.3, "must give up on the wall clock, not wait for the stream"
+
+
+def test_openai_provider_selects_a_generic_endpoint_behind_the_same_seam(monkeypatch):
+    """P3: CRIVO_PROVIDER=openai speaks to any OpenAI-compatible /v1 server
+    (Ollama, OpenRouter, vLLM) — endpoint and model come from env, the key is
+    optional because local servers ignore it, and misconfiguration must name
+    the exact variable instead of KeyErroring deep in the SDK."""
+    monkeypatch.setenv("CRIVO_PROVIDER", "openai")
+    monkeypatch.setattr(llm, "_openai_client", None, raising=False)
+
+    with pytest.raises(RuntimeError, match="CRIVO_BASE_URL"):
+        list(llm.generate([{"role": "user", "content": "hi"}]))
+
+    monkeypatch.setenv("CRIVO_BASE_URL", "http://localhost:11434/v1")
+    with pytest.raises(RuntimeError, match="CRIVO_MODEL"):
+        list(llm.generate([{"role": "user", "content": "hi"}]))
+
+    monkeypatch.setenv("CRIVO_MODEL", "llama3.3")
+    captured: dict = {}
+
+    def fake_openai(**kw):
+        captured.update(kw)
+        return fake_client(iter([chunk(content="pong")]))
+
+    monkeypatch.setattr(llm, "OpenAI", fake_openai)
+    monkeypatch.setattr(llm, "_openai_client", None, raising=False)
+
+    assert list(llm.generate([{"role": "user", "content": "hi"}])) == ["pong"]
+    assert captured["base_url"] == "http://localhost:11434/v1"
+    assert captured["api_key"] == "local-no-key"  # placeholder: server ignores it
+    assert llm.model_info() == {
+        "provider": "openai",
+        "model": "llama3.3",
+        "temperature": 0.0,
+    }

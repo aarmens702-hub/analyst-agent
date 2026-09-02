@@ -23,6 +23,30 @@ def test_ask_without_a_key_raises_before_any_session_spins_up(monkeypatch):
     assert not spun, "no session may be constructed without a key"
 
 
+def test_ask_gate_matches_the_configured_provider(monkeypatch):
+    """P3: the gate demands what the CONFIGURED provider actually needs —
+    openai wants an endpoint and model (keys optional: local servers ignore
+    them), faux wants nothing at all — instead of always naming DeepSeek."""
+    from crivo import query as ask_mod
+
+    spun = []
+    monkeypatch.setattr(ask_mod, "_make_session", lambda: spun.append(1))
+
+    monkeypatch.setenv("CRIVO_PROVIDER", "openai")
+    with pytest.raises(RuntimeError, match="CRIVO_BASE_URL"):
+        ask_mod.ask(pd.DataFrame({"a": [1]}), "how many rows?")
+    monkeypatch.setenv("CRIVO_BASE_URL", "http://localhost:11434/v1")
+    with pytest.raises(RuntimeError, match="CRIVO_MODEL"):
+        ask_mod.ask(pd.DataFrame({"a": [1]}), "how many rows?")
+    assert not spun, "no session may be constructed while the gate fails"
+
+    monkeypatch.setenv("CRIVO_MODEL", "llama3.3")
+    assert ask_mod._required_key() is None
+
+    monkeypatch.setenv("CRIVO_PROVIDER", "faux")
+    assert ask_mod._required_key() is None, "the faux provider needs no env"
+
+
 class _FakeSession:
     """A Session double speaking the real event protocol: one gate, then the
     card. Records what ask() did with it."""

@@ -11,8 +11,19 @@ import os
 
 
 def _required_key() -> str | None:
-    """The env var the configured provider needs, or None when it is set."""
+    """The env var the configured provider still needs, or None when ready.
+
+    Per-provider, not one-size-fits-all: openai (any /v1 endpoint) needs an
+    endpoint and model but no key — local servers ignore keys; faux needs
+    nothing at all — it exists so tests never need credentials."""
     provider = os.environ.get("CRIVO_PROVIDER", "deepseek")
+    if provider == "faux":
+        return None
+    if provider == "openai":
+        for var in ("CRIVO_BASE_URL", "CRIVO_MODEL"):
+            if not os.environ.get(var):
+                return var
+        return None
     key = "ANTHROPIC_API_KEY" if provider == "claude" else "DEEPSEEK_API_KEY"
     if not os.environ.get(key):
         return key

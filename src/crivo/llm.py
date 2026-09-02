@@ -73,6 +73,8 @@ KEY_ENV_VARS = (
     "ANTHROPIC_API_KEY",
     "CRIVO_PROVIDER",
     "CRIVO_MODEL",
+    "CRIVO_BASE_URL",
+    "CRIVO_API_KEY",
 )
 
 DEFAULT_MODEL = "deepseek-v4-pro"
@@ -87,6 +89,7 @@ STALL_S = 90  # no bytes at all for this long means the stream is dead
 
 _client: OpenAI | None = None
 _claude_client = None
+_openai_client: OpenAI | None = None  # CRIVO_PROVIDER=openai: generic endpoint
 
 # CRIVO_PROVIDER=faux: canned replies consumed FIFO by generate(), one per
 # call. No network, no SDK — same seam, so callers need no test-only branch.
@@ -124,8 +127,38 @@ def _get_claude_client():
     return _claude_client
 
 
+def _get_openai_client() -> OpenAI:
+    """CRIVO_PROVIDER=openai: any OpenAI-compatible /v1 server (Ollama,
+    OpenRouter, vLLM). The key is optional — local servers ignore it, but the
+    SDK requires a non-empty string, hence the placeholder."""
+    global _openai_client
+    if _openai_client is None:
+        base_url = os.environ.get("CRIVO_BASE_URL")
+        if not base_url:
+            raise RuntimeError(
+                "CRIVO_PROVIDER=openai needs CRIVO_BASE_URL — the endpoint's /v1 "
+                "root (Ollama example: http://localhost:11434/v1)"
+            )
+        _openai_client = OpenAI(
+            api_key=os.environ.get("CRIVO_API_KEY", "local-no-key"),
+            base_url=base_url,
+        )
+    return _openai_client
+
+
 def model_name() -> str:
-    default = CLAUDE_DEFAULT_MODEL if _provider() == "claude" else DEFAULT_MODEL
+    provider = _provider()
+    if provider == "openai":
+        # no sane default exists across arbitrary endpoints, so silence here
+        # would mean silently querying somebody's default-loaded model
+        model = os.environ.get("CRIVO_MODEL")
+        if not model:
+            raise RuntimeError(
+                "CRIVO_PROVIDER=openai needs CRIVO_MODEL — the endpoint's model "
+                "id (e.g. llama3.3, qwen3:32b, openrouter/auto)"
+            )
+        return model
+    default = CLAUDE_DEFAULT_MODEL if provider == "claude" else DEFAULT_MODEL
     return os.environ.get("CRIVO_MODEL", default)
 
 
@@ -194,7 +227,10 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
         yield from _watched(stream, _claude_text)
         return
 
-    stream = _get_client().chat.completions.create(
+    # deepseek and the generic openai provider share the wire format; only
+    # which client (fixed DeepSeek endpoint vs env-configured) differs
+    client = _get_openai_client() if _provider() == "openai" else _get_client()
+    stream = client.chat.completions.create(
         model=model or model_name(),
         messages=list(messages),
         temperature=TEMPERATURE,
