@@ -18,6 +18,7 @@ import pandas as pd
 from crivo.detect import (
     LEADING_NUMBER,
     MISSING_TOKENS,
+    ZERO_WIDTH,
     _ws_tidy,
     detect_all,
     detect_one,
@@ -78,6 +79,37 @@ def _drop_constant(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
     return frame.drop(columns=[c for c in cols if c in frame.columns])
 
 
+def _fix_headers(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
+    """Repair damaged column NAMES: strip BOM/zero-width residue, collapse
+    padding, replace "Unnamed: N" placeholders, dedupe collisions — renames
+    only, never drops, and untargeted healthy names always keep their claim.
+    Header-repeat data ROWS are deliberately out of reach (row deletion is a
+    judgement call), so a frame carrying those fails d18's re-verification
+    and the rename reverts — honest, never half-fixed."""
+    targeted = {str(c) for c in cols}
+    positions = [pos for pos, name in enumerate(frame.columns) if str(name) in targeted]
+    taken = {
+        str(name) for pos, name in enumerate(frame.columns) if pos not in positions
+    }
+    new_names = [str(name) for name in frame.columns]
+    for pos in positions:
+        text = new_names[pos]
+        for z in ZERO_WIDTH:
+            text = text.replace(z, "")
+        text = " ".join(text.split())
+        if not text or text.startswith("Unnamed:"):
+            text = f"column_{pos}"
+        candidate, k = text, 1
+        while candidate in taken:
+            k += 1
+            candidate = f"{text}_{k}"
+        taken.add(candidate)
+        new_names[pos] = candidate
+    out = frame.copy()
+    out.columns = new_names
+    return out
+
+
 # disease -> deterministic fixer. Row-deleting diseases (9 dup-rows, 10
 # near-dup) are deliberately absent: dropping a row is destructive and a
 # judgement call, so it is reported, never auto-applied.
@@ -87,11 +119,13 @@ FIXERS = {
     4: _fix_sentinels,
     6: _fix_whitespace,
     7: _fix_case_variants,
+    18: _fix_headers,
     19: _drop_constant,
 }
 # apply order: clear sentinels and whitespace before coercing types; structural
-# drops last, so a value fix never runs against an already-mutated shape
-_ORDER = [4, 6, 7, 1, 2, 19]
+# changes last (drops, then renames), so a value fix never runs against an
+# already-mutated shape and a rename never orphans a later fixer's column list
+_ORDER = [4, 6, 7, 1, 2, 19, 18]
 
 
 class CleanSummary:
@@ -176,6 +210,50 @@ def changed_cells(
     out: list[dict] = []
     for fix in applied:
         examples: list[dict] = []
+        if fix["disease"] == 18:
+            # header repair renames columns, so the old name is absent from
+            # `after` — without this branch the d19 "removed" path below
+            # would misreport every rename as a drop. Same column count:
+            # positions are stable and the mapping is the positional diff.
+            # Different count (a d19 drop ran in the same clean): pair the
+            # vanished old names with the appeared new names in order —
+            # renamed columns keep their relative order, dropped ones
+            # appear on neither side of the pairing.
+            before_names = [str(c) for c in before.columns]
+            after_names = [str(c) for c in after.columns]
+            if len(before_names) == len(after_names):
+                pairs = [
+                    (old, new)
+                    for old, new in zip(before_names, after_names)
+                    if old != new
+                ]
+            else:
+                # names dropped by a d19 fix in the same clean are gone, not
+                # renamed — exclude them or the pairing walks onto them
+                dropped = {
+                    str(c)
+                    for other in applied
+                    if other["disease"] == 19
+                    for c in other["columns"]
+                }
+                after_set, before_set = set(after_names), set(before_names)
+                olds = [
+                    n for n in before_names if n not in after_set and n not in dropped
+                ]
+                news = [n for n in after_names if n not in before_set]
+                pairs = list(zip(olds, news))
+            examples = [
+                {"column": old, "renamed": True, "new": new} for old, new in pairs
+            ][:per_fix]
+            out.append(
+                {
+                    "disease": fix["disease"],
+                    "slug": fix["slug"],
+                    "columns": fix["columns"],
+                    "examples": examples,
+                }
+            )
+            continue
         for col in fix["columns"]:
             if col not in before.columns:
                 continue
