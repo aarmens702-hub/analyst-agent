@@ -95,7 +95,12 @@ NUMERIC_WITH_UNIT = re.compile(
 LEADING_NUMBER = re.compile(
     r"^\s*([-+]?)\s*[$€£¥]?\s*((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
 )
-SUPPRESSION_TOKEN = re.compile(r"^[<>]=?\s?\d+$|^[a-zA-Z*.]{1,3}$")
+SUPPRESSION_TOKEN = re.compile(
+    # "<5" bounds, 1-3 letter agency codes, or the literal disclosure words —
+    # statistical publishers really do print "SUPPRESSED" in numeric columns
+    r"^[<>]=?\s?\d+$|^[a-zA-Z*.]{1,3}$"
+    r"|(?i:^(suppressed|redacted|withheld|masked|confidential)$)"
+)
 MOJIBAKE_MARKERS = ("Ã", "Â", "â€", "Ð", "Ñ", "�")
 ZERO_WIDTH = ("\u200b", "‌", "‍", "﻿")
 # _finding's evidence must never carry a literal newline (single-line display
@@ -748,13 +753,18 @@ def _d05(df, cols) -> list:
         probe = _probe(values)
         if float(pd.to_numeric(probe, errors="coerce").notna().mean()) < 0.85:
             continue
+        # astype(str) first: the realistic degrade keeps unsuppressed cells
+        # as floats in an object column, and `.str` ops on a mixed Series
+        # silently NaN every non-string — which read as "nothing parses"
+        # and kept d5 quiet on exactly the shape it exists for
+        as_text = values.astype(str)
         numeric = pd.to_numeric(
-            values.str.replace(",", "", regex=False), errors="coerce"
+            as_text.str.replace(",", "", regex=False), errors="coerce"
         )
         parse_frac = float(numeric.notna().mean())
         if not 0.90 <= parse_frac < 1.0:
             continue
-        residual = values[numeric.isna()].str.strip()
+        residual = as_text[numeric.isna()].str.strip()
         residual = residual[~residual.str.lower().isin(MISSING_TOKENS)]
         tokens = sorted(set(residual))
         if not tokens or len(tokens) > 10:
@@ -982,7 +992,38 @@ def _d09(df, cols) -> list:
 @register(10)
 def _d10(df, cols) -> list:
     exact = int(df.duplicated().sum())
-    near = int(_normalised_frame(df).duplicated().sum()) - exact
+    normal = _normalised_frame(df)
+    near = int(normal.duplicated().sum()) - exact
+    # Leave-one-column-out drift pass: rows identical everywhere but ONE
+    # numeric column whose values sit within a hair of each other are the
+    # same entity recorded twice with drift (amount +0.01). Text folding
+    # above already covers the text-deviation case; and a differing ID is a
+    # genuinely different record — ids are never "close" — which is exactly
+    # what the closeness requirement encodes (bench 2026-09-02).
+    drift_rows: set = set()
+    fold_dupes = normal.duplicated(keep=False)
+    if df.shape[1] >= 2 and 0 < len(df) <= 100_000:
+        for j in range(df.shape[1]):
+            col = pd.to_numeric(df.iloc[:, j], errors="coerce")
+            if col.notna().mean() < 0.9:
+                continue  # closeness is a numeric notion; text deviation is folding's job
+            others = normal.drop(columns=[normal.columns[j]])
+            cand = others.duplicated(keep=False) & ~fold_dupes
+            if not cand.any():
+                continue
+            keyed: dict = {}
+            for idx in others.index[cand]:
+                keyed.setdefault(tuple(others.loc[idx]), []).append(idx)
+            for idxs in keyed.values():
+                if len(idxs) < 2:
+                    continue
+                vals = col.loc[idxs].dropna()
+                if len(vals) < 2:
+                    continue
+                spread = float(vals.max() - vals.min())
+                if spread <= 1e-3 * max(1.0, abs(float(vals.max()))):
+                    drift_rows.update(idxs[1:])  # keep-first, like duplicated()
+    near += len(drift_rows)
     if near <= 0:
         return []
     return [
@@ -1257,7 +1298,21 @@ def _d14(df, cols) -> list:
     lat, lon = df.iloc[:, i], df.iloc[:, j]
     zero_zero = int(((lat == 0) & (lon == 0)).sum())
     out_of_range = int((~lat.between(-90, 90) | ~lon.between(-180, 180)).sum())
-    if zero_zero == 0 and out_of_range == 0:
+    # exchange signature: when the two columns' robust bands are disjoint, a
+    # row sitting in each other's band is a swap even though both values stay
+    # globally valid — the case the range checks above can never see. With
+    # overlapping bands (regional data straddling the same values) the
+    # signature is undefined and contributes nothing.
+    lat_num = pd.to_numeric(lat, errors="coerce")
+    lon_num = pd.to_numeric(lon, errors="coerce")
+    lat_lo, lat_hi = lat_num.quantile(0.05), lat_num.quantile(0.95)
+    lon_lo, lon_hi = lon_num.quantile(0.05), lon_num.quantile(0.95)
+    swapped = 0
+    if pd.notna(lat_hi) and pd.notna(lon_hi) and (lat_hi < lon_lo or lon_hi < lat_lo):
+        swapped = int(
+            (lat_num.between(lon_lo, lon_hi) & lon_num.between(lat_lo, lat_hi)).sum()
+        )
+    if zero_zero == 0 and out_of_range == 0 and swapped == 0:
         return []
     in_bc = float(
         (
@@ -1268,11 +1323,13 @@ def _d14(df, cols) -> list:
         _finding(
             14,
             [_name(df, i), _name(df, j)],
-            f"{zero_zero} rows sit at null island (0, 0) and {out_of_range} fall outside "
-            f"valid lat/lon ranges; {in_bc:.0%} of rows are inside the BC bounding box",
+            f"{zero_zero} rows sit at null island (0, 0), {out_of_range} fall outside "
+            f"valid lat/lon ranges, {swapped} look lat/lon-swapped; "
+            f"{in_bc:.0%} of rows are inside the BC bounding box",
             {
                 "zero_zero": zero_zero,
                 "out_of_range": out_of_range,
+                "swapped": swapped,
                 "in_bc_frac": in_bc,
                 "rows": len(df),
             },
@@ -1620,7 +1677,29 @@ def _d21(df, cols) -> list:
             continue  # a high-cardinality label column, not a grouping dimension
         hit = values.str.lower().str.match(ROLLUP_LABEL)
         count = int(hit.sum())
-        if count < 2 or count > 0.2 * rows:
+        if count > 0.2 * rows:
+            continue
+        if count == 1:
+            # the classic real-world case is exactly ONE trailing TOTAL row,
+            # which the old >= 2 floor silenced. A lone label may speak only
+            # when the row corroborates as an aggregate: some numeric column
+            # holds ~the sum of every other row there — a merchant that
+            # merely NAMES itself "Total" has no such signature.
+            row_label = hit[hit].index[0]  # _text keeps the frame's index
+            corroborated = False
+            for j in range(df.shape[1]):
+                col_num = pd.to_numeric(df.iloc[:, j], errors="coerce")
+                candidate = col_num.get(row_label)
+                rest = col_num.drop(index=row_label).dropna()
+                if candidate is None or pd.isna(candidate) or len(rest) < 5:
+                    continue
+                total = float(rest.sum())
+                if total and math.isclose(float(candidate), total, rel_tol=1e-6):
+                    corroborated = True
+                    break
+            if not corroborated:
+                continue
+        elif count < 1:
             continue
         labels = sorted(set(values[hit]))
         out.append(

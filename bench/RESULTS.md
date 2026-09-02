@@ -5,8 +5,8 @@ All numbers are the **deterministic mode baseline** — keyless
 scored "not attempted", never blended into the fixable aggregate.
 
 - datasets: 23 synthetic (7 fully fixable, 5 with repair defined) + 4 external
-- detection micro-F1, mean incl. silence-as-zero: 0.581 — silent on 8/23 datasets
-- repair F1, repair-defined fixable datasets (5/7): 0.936
+- detection micro-F1, mean incl. silence-as-zero: 0.728 — silent on 4/23 datasets
+- repair F1, repair-defined fixable datasets (5/7): 0.980
 - survived-verification rate, mean: 1.000
 
 — means undefined: no fixer attempted, the detector produced nothing to score, or a 0/0 ratio. A fixable dataset can score zero repairs by design (sentinel-clearing and constant-drops land on NaN/removal, never the truth value).
@@ -19,12 +19,12 @@ scored "not attempted", never blended into the fixable aggregate.
 | tx-dates-frozen | 2 | 1.000 | 1.000 | 1.000 | 1.000 |
 | tx-dates-mixed | 3 | 1.000 | — | — | — |
 | tx-sentinels | 4 | 0.667 | 0.780 | — | 1.000 |
-| tx-suppression | 5 | — | 1.000 | — | 1.000 |
+| tx-suppression | 5 | 0.667 | 1.000 | — | 1.000 |
 | tx-whitespace | 6 | 1.000 | 1.000 | 1.000 | 1.000 |
-| tx-case-variants | 7 | — | 0.780 | 0.780 | 1.000 |
+| tx-case-variants | 7 | 1.000 | 1.000 | 1.000 | 1.000 |
 | tx-mojibake | 8 | 1.000 | — | — | — |
 | tx-dup-rows | 9 | 1.000 | — | — | — |
-| tx-near-dups | 10 | — | — | — | — |
+| tx-near-dups | 10 | 0.500 | — | — | — |
 | tx-key-violations | 11 | 1.000 | — | — | — |
 | pairs-contradictions | 12 | — | — | — | — |
 | tx-out-of-domain | 13 | 1.000 | — | — | — |
@@ -34,10 +34,10 @@ scored "not attempted", never blended into the fixable aggregate.
 | tx-packed-fields | 17 | — | — | — | — |
 | tx-header-damage | 18 | — | 1.000 | — | — |
 | tx-constant-col | 19 | 1.000 | 0.998 | — | 1.000 |
-| tx-aggregate-row | 21 | — | — | — | — |
+| tx-aggregate-row | 21 | 0.800 | — | — | — |
 | tx-excel-ids | 22 | 1.000 | — | — | — |
 | tx-compound-fixable | 4,6,1,2 | 0.889 | 0.993 | 0.942 | 1.000 |
-| tx-compound-hard | 7,15,9,21,18 | 0.400 | 0.952 | — | 1.000 |
+| tx-compound-hard | 7,15,9,21,18 | 0.824 | 0.957 | 0.087 | 1.000 |
 
 ## External (Raha) datasets
 

@@ -379,6 +379,30 @@ def test_d10_near_duplicate_rows() -> None:
     assert 10 not in _diseases(detect_all(clean))
 
 
+def test_d10_catches_near_dups_with_tiny_numeric_drift() -> None:
+    """Bench 2026-09-02: 'near' meant duplicate-after-text-folding only, so a
+    copied row with amount +0.01 was invisible. Rows identical everywhere but
+    one numeric column whose values sit within a hair of each other are the
+    same entity recorded twice — while genuine repeat business (same purchase
+    shape, a DIFFERENT id) is a real second transaction and must stay
+    silent: ids aren't close, they're different."""
+    base = pd.DataFrame(
+        {
+            "txn_id": [f"TX{i:05d}" for i in range(40)],
+            "merchant": [f"shop {i % 7}" for i in range(40)],
+            "amount": [float(10 + i) for i in range(40)],
+        }
+    )
+    tweaked = base.iloc[[3, 11, 27]].assign(amount=lambda d: d["amount"] + 0.01)
+    dirty = pd.concat([base, tweaked], ignore_index=True)
+    (f,) = _of(detect_all(dirty), 10)
+    assert f["stats"]["near_dup_rows"] == 3
+
+    repeats = base.iloc[[5, 9]].assign(txn_id=["TX90001", "TX90002"])
+    genuine = pd.concat([base, repeats], ignore_index=True)
+    assert 10 not in _diseases(detect_all(genuine))
+
+
 def test_d11_key_violations() -> None:
     ids = list(range(400)) + [42]
     values = [f"row {i}" for i in range(400)] + ["row 42 CONTRADICTS"]
@@ -495,7 +519,17 @@ def test_d13_out_of_domain() -> None:
     assert 13 in clean_res["clear"]
 
 
-def test_d13_sign_anomaly_fires_without_a_named_domain() -> None:
+def test_d05_fires_on_a_mixed_float_and_token_column() -> None:
+    """Bench 2026-09-02: the realistic degrade keeps unsuppressed cells as
+    floats (object column of float + '<5'/'SUPPRESSED'), and `.str` ops on a
+    mixed Series silently NaN every float — the parse gate then read ~0% and
+    d5 stayed silent on exactly the shape it exists for."""
+    mixed = pd.DataFrame(
+        {"score": [float(v) for v in range(20, 47)] + ["<5", "SUPPRESSED", "<10"]}
+    )
+    (f,) = _of(detect_all(mixed), 5)
+    assert f["stats"]["flagged"] == 3
+    assert "<5" in str(f["stats"]["tokens"])
     """Bench triage 2026-09-02: negatives planted in 'amount' matched no
     DOMAIN_BOUNDS name pattern, so d13 stayed silent. A column that is
     overwhelmingly non-negative with a stray few below zero is out of its own
@@ -691,6 +725,52 @@ def test_d22_id_numeric_corruption() -> None:
     assert f["stats"]["shorter"] == 3
     clean = pd.DataFrame({"zip_code": zips})
     assert 22 not in _diseases(detect_all(clean))
+
+
+def test_d14_detects_in_range_coordinate_swaps() -> None:
+    """Bench 2026-09-02: a lat/lon swap whose values stay globally valid was
+    invisible — d14 only knew null island and out-of-range. When the two
+    columns' robust bands are disjoint, a row sitting in each other's band is
+    an exchange; when the bands overlap (regional data straddling the same
+    values), the signature is undefined and must stay silent."""
+    lats = [40.0 + (i % 100) / 10 for i in range(60)]
+    lons = [60.0 + (i % 200) / 10 for i in range(60)]
+    for k in (5, 25, 45):  # swapped: globally valid, in each other's band
+        lats[k], lons[k] = lons[k], lats[k]
+    (f,) = _of(detect_all(pd.DataFrame({"lat": lats, "lon": lons})), 14)
+    assert f["stats"]["swapped"] == 3
+
+    overlap = pd.DataFrame(
+        {
+            "lat": [50.0 + (i % 60) / 10 for i in range(60)],
+            "lon": [52.0 + (i % 60) / 10 for i in range(60)],
+        }
+    )
+    assert 14 not in _diseases(detect_all(overlap))
+
+
+def test_d21_a_single_total_row_with_a_sum_signature_fires() -> None:
+    """Bench 2026-09-02: the count >= 2 floor silenced the classic case — ONE
+    trailing TOTAL row. A lone aggregate label may fire only when the row
+    corroborates as an aggregate (some numeric value ≈ the sum of the rest);
+    a merchant legitimately NAMED 'Total' with ordinary numbers stays silent."""
+    amounts = [float(10 + i) for i in range(30)]
+    frame = pd.DataFrame(
+        {
+            "merchant": [f"shop {i}" for i in range(30)] + ["TOTAL"],
+            "amount": amounts + [sum(amounts)],
+        }
+    )
+    (f,) = _of(detect_all(frame), 21)
+    assert f["grade"] in {"GATE", "HUMAN"}
+
+    innocent = pd.DataFrame(
+        {
+            "merchant": [f"shop {i}" for i in range(30)] + ["Total"],
+            "amount": amounts + [55.0],
+        }
+    )
+    assert 21 not in _diseases(detect_all(innocent))
 
 
 def test_d22_catches_partially_eaten_string_ids() -> None:
