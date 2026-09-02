@@ -86,6 +86,15 @@ MONEY_STYLES = (
 )
 
 
+def test_d01_constant_prefix_code_columns_are_not_flagged() -> None:
+    """Bench 2026-09-02: 'SIT000000'-style ids — one constant alpha prefix and
+    fixed-width digits on every value — were read as numbers carrying
+    currency/unit residue. A uniform code scheme is an identifier, not an
+    amount wearing a unit."""
+    codes = pd.DataFrame({"site_id": [f"SIT{i:06d}" for i in range(60)]})
+    assert 1 not in _diseases(detect_all(codes))
+
+
 @pytest.mark.parametrize("k", [1, 2, 3, 4, 5])
 def test_d01_gets_louder_not_quieter_as_money_formats_mix(k) -> None:
     """A1: the old gate demanded 90% of values match ONE pattern, so a column
@@ -384,6 +393,75 @@ def test_d11_key_violations() -> None:
     assert 11 not in _diseases(detect_all(clean))
 
 
+def test_d11_fires_when_the_key_is_heavily_damaged_but_not_on_float_dupes() -> None:
+    """Bench triage 2026-09-02, the A1 shape: 10% duplicated ids dropped
+    uniqueness under the 0.995 gate, so more damage meant more silence. An
+    id-named or string key with contradiction-carrying duplicates is a
+    violation at any damage level — while a merely-numeric column with
+    coincidental duplicates (lat readings with a repeated sentinel) is not a
+    key and must stay silent, however unique it looks."""
+    ids = [f"TX{i:05d}" for i in range(250)]
+    for k in range(25):  # 10% of keys overwritten with other existing keys
+        ids[10 * k + 9] = ids[10 * k]
+    frame = pd.DataFrame({"txn_id": ids, "label": [f"row {i}" for i in range(250)]})
+    (f,) = _of(detect_all(frame), 11)
+    assert f["grade"] == "HUMAN"
+    assert "txn_id" in f["columns"]
+    assert f["stats"]["contradicted_keys"] == 25
+
+    floats = pd.DataFrame(
+        {
+            "lat": [49.2 + i * 0.01 for i in range(240)] + [999.0] * 10,
+            "lon": [float(i) for i in range(250)],
+        }
+    )
+    assert 11 not in _diseases(detect_all(floats))
+
+    # a float column is never a key even in the near-perfect window: uniform
+    # readings that collide once are measurements, not damaged identifiers
+    readings = pd.DataFrame(
+        {"reading": [float(i) for i in range(299)] + [7.0], "site": range(300)}
+    )
+    assert 11 not in _diseases(detect_all(readings))
+
+    # an id-NAMED random attribute that merely collides (two 4-digit account
+    # numbers repeating at n=250, the birthday effect) is noise, not a
+    # damaged key — the wide path needs real damage before it may speak
+    rng_like = [f"{1000 + (i * 37) % 8999}" for i in range(248)] + ["1037", "1074"]
+    accounts = pd.DataFrame(
+        {"account_no": rng_like, "note": [f"n{i}" for i in range(250)]}
+    )
+    assert 11 not in _diseases(detect_all(accounts))
+
+
+def test_d11_sentinel_riddled_text_is_not_a_damaged_key() -> None:
+    """A text column holding repeated sentinel tokens beside unique
+    neighbours (12 x 'N/A' next to unique names) sits squarely in the wide
+    uniqueness window and its 'duplicates' contradict on every attribute —
+    but it is d04's patient, not a damaged key. Bare textiness must not
+    qualify a column for the wide path; only an id-claiming NAME does."""
+    frame = pd.DataFrame(
+        {
+            "name": [f"beer {i}" for i in range(32)],
+            "ibu": ["N/A"] * 12 + [str(v) for v in range(20, 40)],
+        }
+    )
+    assert 11 not in _diseases(detect_all(frame))
+
+
+def test_d11_short_all_digit_codes_never_take_the_wide_path() -> None:
+    """Heavy collision counts in a SHORT all-digit code are expected by the
+    birthday effect (250 draws from 9000 four-digit values collide ~3.5
+    times, unlucky seeds more), so the wide path must refuse short codes
+    entirely — zips, PINs, account numbers duplicate by construction, not by
+    damage. Silence here beats accusing every short code column forever."""
+    heavy = [f"{1000 + (i * 37) % 8999}" for i in range(234)] + [
+        f"{1000 + j * 11}" for j in range(8) for _ in range(2)
+    ]
+    frame = pd.DataFrame({"account_no": heavy, "note": [f"n{i}" for i in range(250)]})
+    assert 11 not in _diseases(detect_all(frame))
+
+
 def test_d12_fd_contradictions_indicator() -> None:
     words = ["oak", "elm", "fir", "ash", "yew", "ivy", "gum", "bay", "box", "may"]
     codes = [f"C{i:03d}" for i in range(50) for _ in range(4)]
@@ -415,6 +493,23 @@ def test_d13_out_of_domain() -> None:
     clean_res = detect_all(clean)
     assert 13 not in _diseases(clean_res)
     assert 13 in clean_res["clear"]
+
+
+def test_d13_sign_anomaly_fires_without_a_named_domain() -> None:
+    """Bench triage 2026-09-02: negatives planted in 'amount' matched no
+    DOMAIN_BOUNDS name pattern, so d13 stayed silent. A column that is
+    overwhelmingly non-negative with a stray few below zero is out of its own
+    domain whatever it is called — while a genuinely signed column (deltas,
+    balances) must stay silent."""
+    amounts = [float(i % 97 + 1) for i in range(200)]
+    amounts[13], amounts[77] = -812.5, -3.25
+    (f,) = _of(detect_all(pd.DataFrame({"amount": amounts})), 13)
+    assert f["grade"] == "GATE"
+    assert f["stats"]["violations"] == 2
+    assert "amount" in f["columns"]
+
+    signed = pd.DataFrame({"delta": [float((-1) ** i * (i + 1)) for i in range(60)]})
+    assert 13 not in _diseases(detect_all(signed))
 
 
 def test_d14_broken_coordinates() -> None:
@@ -596,6 +691,31 @@ def test_d22_id_numeric_corruption() -> None:
     assert f["stats"]["shorter"] == 3
     clean = pd.DataFrame({"zip_code": zips})
     assert 22 not in _diseases(detect_all(clean))
+
+
+def test_d22_catches_partially_eaten_string_ids() -> None:
+    """Bench triage 2026-09-02: partial Excel damage leaves a MIXED string
+    column — most ids still 'TX000123', a minority eaten to bare digits or
+    scientific notation — which never parses as numbers, so the numeric-only
+    d22 stayed silent. The mixed shape is the same disease and must fire."""
+    ids = [f"TX{i:06d}" for i in range(100)]
+    ids[7], ids[21], ids[63] = "123", "1.23E+05", "7042"
+    (f,) = _of(detect_all(pd.DataFrame({"txn_id": ids, "v": range(100)})), 22)
+    assert f["grade"] == "GATE"
+    assert "txn_id" in f["columns"]
+    assert f["stats"]["eaten"] == 3
+
+
+def test_d22_intact_and_all_digit_string_ids_stay_silent() -> None:
+    """False-positive discipline for the mixed-shape branch: an undamaged
+    prefixed column has nothing eaten, and an all-digit string id column
+    (zips) has no intact majority — both must stay silent."""
+    intact = pd.DataFrame(
+        {"txn_id": [f"TX{i:06d}" for i in range(100)], "v": range(100)}
+    )
+    assert 22 not in _diseases(detect_all(intact))
+    zips = pd.DataFrame({"zip": [f"{90000 + i}" for i in range(100)], "v": range(100)})
+    assert 22 not in _diseases(detect_all(zips))
 
 
 def test_d22_sequential_ids_are_not_flagged() -> None:

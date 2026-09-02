@@ -467,6 +467,18 @@ def _d01(df, cols) -> list:
         direct = pd.to_numeric(values, errors="coerce").notna().mean()
         if direct > 0.95:  # already parses as-is: stored as text, no residue
             continue
+        # a uniform code scheme — one constant alpha prefix and fixed-width
+        # digits on ~every value ("SIT000123", "TX000042") — is an
+        # identifier, not an amount wearing a unit; without this, id columns
+        # read as currency residue (bench 2026-09-02). Money keeps varying
+        # digit widths and separators, so it never matches this shape.
+        scheme = values.str.extract(r"^([A-Za-z]{1,6})(\d+)$", expand=True)
+        if (
+            scheme[0].notna().mean() >= 0.95
+            and scheme[0].nunique(dropna=True) == 1
+            and scheme[1].str.len().nunique(dropna=True) == 1
+        ):
+            continue
         shares = _number_families(values)
         union = sum(shares.values())
         families = {name: s for name, s in shares.items() if s >= 0.05}
@@ -997,8 +1009,44 @@ def _d11(df, cols) -> list:
         return out
     for i in _targets(df, cols):
         values = df.iloc[:, i]
+        # a float column is never a key: near-unique uniform measurements
+        # that collide once are coincidence, not damaged identifiers
+        if pd.api.types.is_float_dtype(values):
+            continue
         distinct = values.nunique(dropna=True)
-        if not (0.995 <= distinct / rows < 1.0) or distinct < 20:
+        uniqueness = distinct / rows
+        # Two ways in: the near-perfect window (any dtype), or — because a
+        # damaged key gets LESS unique the more of it is overwritten, so the
+        # old 0.995 gate bought more silence with more damage (the A1 shape;
+        # bench 2026-09-02) — a damage-tolerant floor for columns that look
+        # like keys by name or by being text. Merely-numeric columns
+        # (readings, coordinates) never take the wide path: coincidental
+        # duplicates there are measurements, not keys.
+        # the wide path is only for columns that CLAIM to be keys by name:
+        # bare textiness is far too weak a prior — a sentinel-riddled text
+        # column (12 x "N/A" beside unique neighbours) reads as a damaged
+        # key under it. Unnamed true keys keep the near-perfect window.
+        looks_like_key = bool(ID_NAME.search(_key(df, i)))
+        # the wide path also demands real damage: >=3 duplicated rows AND
+        # uniqueness <= 0.98, because a short random attribute (4-digit
+        # account numbers at a few hundred rows) birthday-collides its way
+        # to ~0.99 and would impersonate a key forever. The 0.98..0.995
+        # band is a known dead zone (0.5-2% damage on a true key) — priced
+        # in deliberately, silence there beats accusing every short code.
+        wide = looks_like_key and 0.6 <= uniqueness <= 0.98 and rows - distinct >= 3
+        if wide:
+            # short all-digit codes (zips, PINs, 4-digit account numbers)
+            # birthday-collide by construction — 250 draws from 9000
+            # four-digit values repeat ~3.5 times with no damage at all —
+            # so they never qualify as damaged keys via the wide path
+            sample = values.dropna().astype(str).str.strip()
+            if (
+                len(sample)
+                and bool(sample.str.fullmatch(r"\d+").all())
+                and int(sample.str.len().mode().iloc[0]) <= 5
+            ):
+                wide = False
+        if not (wide or 0.995 <= uniqueness < 1.0) or distinct < 20:
             continue
         others = [j for j in range(df.shape[1]) if j != i]
         if not others:
@@ -1136,6 +1184,32 @@ def _d13(df, cols) -> list:
             ((lo, hi) for pattern, lo, hi in DOMAIN_BOUNDS if pattern.search(key)), None
         )
         if bounds is None:
+            # Data-driven fallback: the name table can never know every
+            # domain (the bench caught it silent on planted negatives in
+            # "amount"). A column that is overwhelmingly non-negative with a
+            # stray few below zero is out of its own domain, whatever it is
+            # called; a genuinely signed column (deltas, balances) has far
+            # more than a stray few and stays out of reach.
+            neg = numbers[numbers < 0]
+            if len(numbers) >= 20 and 0 < len(neg) <= 0.25 * len(numbers):
+                out.append(
+                    _finding(
+                        13,
+                        [_name(df, i)],
+                        f"{len(neg)} negative values in an otherwise "
+                        f"non-negative column ({len(neg) / len(numbers):.1%} "
+                        f"of it); samples: {_samples(neg)}",
+                        {
+                            "violations": len(neg),
+                            "low": 0.0,
+                            "high": None,
+                            "min": float(numbers.min()),
+                            "max": float(numbers.max()),
+                        },
+                        "GATE",
+                        0.7,
+                    )
+                )
             continue
         low, high = bounds
         bad = numbers[(numbers < low) | (numbers > high)]
@@ -1571,6 +1645,39 @@ def _d22(df, cols) -> list:
     out = []
     for i in _targets(df, cols):
         if not ID_NAME.search(_key(df, i)):
+            continue
+        values = df.iloc[:, i]
+        if _is_texty(values):
+            # Partial damage leaves a MIXED column — most ids keep their
+            # prefixed/padded shape, a minority collapsed to bare digits or
+            # scientific notation by a numeric cast somewhere upstream. That
+            # column never parses as numbers, so the numeric path below is
+            # structurally blind to it (bench 2026-09-02). An all-digit id
+            # column (zips) has no intact majority and stays out of reach.
+            vals = _text(df, i)
+            if len(vals) >= 10:
+                stripped = vals.str.strip()
+                eaten_mask = stripped.str.fullmatch(r"\d+|\d+(?:\.\d+)?[eE]\+?\d+")
+                eaten = int(eaten_mask.sum())
+                intact = int((~eaten_mask).sum())
+                if eaten and intact >= max(eaten, 0.5 * len(stripped)):
+                    out.append(
+                        _finding(
+                            22,
+                            [_name(df, i)],
+                            f"{eaten} of {len(stripped)} identifiers collapsed "
+                            f"to bare digits or scientific notation while the "
+                            f"rest keep a non-numeric shape — a numeric cast "
+                            f"ate them; samples: {_samples(stripped[eaten_mask])}",
+                            {
+                                "eaten": eaten,
+                                "intact": intact,
+                                "values": len(stripped),
+                            },
+                            "GATE",
+                            0.85,
+                        )
+                    )
             continue
         numbers = _numbers(df, i)
         if numbers is None or len(numbers) < 10:
