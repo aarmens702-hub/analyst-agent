@@ -4,9 +4,9 @@ All numbers are the **deterministic mode baseline** — keyless
 `crivo.clean()`, no LLM. Diseases without a deterministic fixer are
 scored "not attempted", never blended into the fixable aggregate.
 
-- datasets: 23 synthetic (7 fully fixable, 5 with repair defined) + 4 external
-- detection micro-F1, mean incl. silence-as-zero: 0.728 — silent on 4/23 datasets
-- repair F1, repair-defined fixable datasets (5/7): 0.980
+- datasets: 29 synthetic (9 fully fixable, 5 with repair defined) + 4 external
+- detection micro-F1, mean incl. silence-as-zero: 0.754 — silent on 4/29 datasets
+- repair F1, repair-defined fixable datasets (5/9): 0.980
 - survived-verification rate, mean: 1.000
 
 — means undefined: no fixer attempted, the detector produced nothing to score, or a 0/0 ratio. A fixable dataset can score zero repairs by design (sentinel-clearing and constant-drops land on NaN/removal, never the truth value).
@@ -32,12 +32,18 @@ scored "not attempted", never blended into the fixable aggregate.
 | tx-outliers | 15 | 1.000 | — | — | — |
 | tx-unit-mix | 16 | — | — | — | — |
 | tx-packed-fields | 17 | — | — | — | — |
-| tx-header-damage | 18 | — | 1.000 | — | — |
+| tx-header-damage | 18 | — | 1.000 | — | 1.000 |
 | tx-constant-col | 19 | 1.000 | 0.998 | — | 1.000 |
 | tx-aggregate-row | 21 | 0.800 | — | — | — |
 | tx-excel-ids | 22 | 1.000 | — | — | — |
+| flags-bool-chaos | 23 | 1.000 | 0.182 | — | 1.000 |
+| tx-header-echo | 24 | 0.667 | — | — | 1.000 |
+| tx-dup-column | 25 | 1.000 | — | — | — |
+| notes-truncation | 26 | 0.500 | 0.182 | — | 1.000 |
+| dates-implausible | 13 | 1.000 | — | — | — |
+| tx-excel-guard | 22 | 1.000 | — | — | — |
 | tx-compound-fixable | 4,6,1,2 | 0.889 | 0.993 | 0.942 | 1.000 |
-| tx-compound-hard | 7,15,9,21,18 | 0.824 | 0.957 | 0.087 | 1.000 |
+| tx-compound-hard | 7,15,9,21,18 | 0.778 | 0.957 | 0.957 | 1.000 |
 
 ## External (Raha) datasets
 

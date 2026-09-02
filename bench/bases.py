@@ -64,6 +64,10 @@ def _typed_column(kind: str, name: str, n: int, rng: np.random.Generator):
         return rng.choice(_CATEGORY_VOCAB, n)
     if kind == "text":
         return rng.choice(_TEXT_VOCAB, n)
+    if kind == "flag":
+        # exactly two clean spellings — the pristine form boolean-chaos
+        # (disease 23) degrades into mixed Y/N/1/0/TRUE representations
+        return rng.choice(["yes", "no"], n)
     if kind == "id":
         return [f"{name[:3].upper()}{i:06d}" for i in range(n)]
     if kind == "lat":
@@ -75,7 +79,8 @@ def _typed_column(kind: str, name: str, n: int, rng: np.random.Generator):
 
 def typed_frame(seed: int, n: int, spec: dict[str, str]) -> pd.DataFrame:
     """Build a frame from a column-name -> kind spec. Kinds: numeric, int,
-    datetime, category, text, id, lat, lon, start/end (paired, end >= start).
+    datetime, category, text, flag (two-valued yes/no), id, lat, lon,
+    start/end (paired, end >= start).
 
     "end" is built in a second pass so its position in `spec` doesn't matter —
     it always resolves against whichever column declared kind "start".

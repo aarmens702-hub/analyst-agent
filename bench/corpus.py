@@ -57,6 +57,42 @@ SMOKE: list[dict] = [
     {"name": "tx-constant-col", "base": _TX, "diseases": [19], "seed": 119, "n": 250},
     {"name": "tx-aggregate-row", "base": _TX, "diseases": [21], "seed": 121, "n": 250},
     {"name": "tx-excel-ids", "base": _TX, "diseases": [22], "seed": 122, "n": 250},
+    # taxonomy v2 (arc W2): one entry per new plant; the date and truncation
+    # entries use bases with no earlier-priority column so auto-pick lands
+    # where the disease lives
+    {
+        "name": "flags-bool-chaos",
+        "base": (
+            "typed_frame",
+            {"spec": {"row_id": "id", "active": "flag", "amount": "numeric"}},
+        ),
+        "diseases": [23],
+        "seed": 123,
+        "n": 250,
+    },
+    {"name": "tx-header-echo", "base": _TX, "diseases": [24], "seed": 124, "n": 250},
+    {"name": "tx-dup-column", "base": _TX, "diseases": [25], "seed": 125, "n": 250},
+    {
+        "name": "notes-truncation",
+        "base": (
+            "typed_frame",
+            {"spec": {"note_id": "id", "bio": "text", "amount": "numeric"}},
+        ),
+        "diseases": [26],
+        "seed": 126,
+        "n": 250,
+    },
+    {
+        "name": "dates-implausible",
+        "base": (
+            "typed_frame",
+            {"spec": {"case_id": "id", "seen_at": "datetime", "note": "text"}},
+        ),
+        "diseases": [13],
+        "seed": 127,
+        "n": 250,
+    },
+    {"name": "tx-excel-guard", "base": _TX, "diseases": [22], "seed": 128, "n": 250},
     # compound mixes: one deterministic-fixable, one deliberately beyond
     # FIXERS' reach — the honest-split aggregates need both kinds to exist
     {

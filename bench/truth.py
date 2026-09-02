@@ -19,6 +19,9 @@ import json
 from dataclasses import asdict, dataclass, field
 
 GRANULARITIES = ("cell", "row", "column")
+# grows with the taxonomy; matches crivo's SLUGS by convention, never by
+# import — the bench stays decoupled from the code it grades
+MAX_DISEASE = 26
 
 
 @dataclass(frozen=True)
@@ -31,7 +34,7 @@ class Cell:
 
 @dataclass(frozen=True)
 class Corruption:
-    disease: int  # taxonomy id 1..22; 0 = external/unknown
+    disease: int  # taxonomy id 1..MAX_DISEASE; 0 = external/unknown
     columns: tuple[str, ...]
     granularity: str  # one of GRANULARITIES
     cells: tuple[Cell, ...] = ()  # granularity == "cell", else ()
@@ -43,9 +46,9 @@ class Corruption:
             raise ValueError(
                 f"granularity must be one of {GRANULARITIES}, got {self.granularity!r}"
             )
-        if not 0 <= self.disease <= 22:
+        if not 0 <= self.disease <= MAX_DISEASE:
             raise ValueError(
-                f"disease must be 0 (external) or 1..22, got {self.disease}"
+                f"disease must be 0 (external) or 1..{MAX_DISEASE}, got {self.disease}"
             )
 
 

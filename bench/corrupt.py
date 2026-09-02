@@ -724,23 +724,44 @@ def inject_d13(
     rate: float = 0.1,
 ) -> pd.DataFrame:
     """out-of-domain-values: numeric column whose pristine values are all
-    >= 0: rate of cells negated, planting values outside the domain."""
-    col = _pick_column(
-        _nonneg_numeric_columns(frame), columns, 13, "out-of-domain-values"
-    )
+    >= 0: rate of cells negated, planting values outside the domain. Fold
+    (taxonomy v2): with no such numeric column, a datetime column takes the
+    hit instead — far-future or epoch-artifact timestamps, equally outside
+    any plausible domain. Auto-pick prefers numerics so existing corpus
+    entries never shift."""
+    numeric = _nonneg_numeric_columns(frame)
+    if numeric or columns:
+        col = _pick_column(numeric, columns, 13, "out-of-domain-values")
+        date_mode = False
+    else:
+        col = _pick_column(
+            _datetime_columns(frame), columns, 13, "out-of-domain-values"
+        )
+        date_mode = True
     n = len(frame)
     k = _count(rate, n)
     rows = rng.choice(n, size=k, replace=False)
+    variants = rng.integers(0, 2, size=k)
     out = frame.copy()
     cells = []
-    for row in rows:
+    for row, v in zip(rows, variants):
         row = int(row)
         original = frame[col].iat[row]
-        corrupted = float(original) * -1
+        if date_mode:
+            corrupted = (
+                pd.Timestamp("2090-01-01") + pd.Timedelta(days=int(row))
+                if v == 0
+                else pd.Timestamp("1970-01-01")
+            )
+        else:
+            corrupted = float(original) * -1
         out.at[row, col] = corrupted
         cells.append(
             Cell(
-                row=row, column=col, original=_json_safe(original), corrupted=corrupted
+                row=row,
+                column=col,
+                original=_json_safe(original),
+                corrupted=_json_safe(corrupted),
             )
         )
     truth.corruptions.append(
@@ -749,7 +770,11 @@ def inject_d13(
             columns=(col,),
             granularity="cell",
             cells=tuple(cells),
-            note="negative values planted outside the non-negative domain",
+            note=(
+                "implausible timestamps planted outside any date domain"
+                if date_mode
+                else "negative values planted outside the non-negative domain"
+            ),
         )
     )
     return out
@@ -1048,12 +1073,26 @@ def inject_d22(
     n = len(frame)
     k = _count(rate, n)
     rows = rng.choice(n, size=k, replace=False)
-    variant_idx = rng.integers(0, 2, size=k)
+    # fold (taxonomy v2): kind 2 is the Excel text-guard remnant — a leading
+    # apostrophe on the otherwise intact id
+    variant_idx = rng.integers(0, 3, size=k)
     out = frame.copy()
     cells = []
     for row, v in zip(rows, variant_idx):
         row = int(row)
         original = frame[col].iat[row]
+        if v == 2:
+            corrupted = f"'{original}"
+            out.at[row, col] = corrupted
+            cells.append(
+                Cell(
+                    row=row,
+                    column=col,
+                    original=_json_safe(original),
+                    corrupted=corrupted,
+                )
+            )
+            continue
         digits = _trailing_digits(str(original))
         if digits is None:
             continue
@@ -1076,6 +1115,187 @@ def inject_d22(
             granularity="cell",
             cells=tuple(cells),
             note="Excel-style id damage (stripped prefix or scientific form)",
+        )
+    )
+    return out
+
+
+_BOOL_TRUTHY = frozenset({"y", "yes", "true", "t", "1"})
+_TRUE_SPELLINGS = ("Y", "yes", "TRUE", "1")
+_FALSE_SPELLINGS = ("N", "no", "FALSE", "0")
+
+
+def _two_valued_columns(frame: pd.DataFrame) -> list[str]:
+    return [
+        c
+        for c in frame.columns
+        if (pd.api.types.is_string_dtype(frame[c]) or frame[c].dtype == object)
+        and frame[c].nunique(dropna=True) == 2
+    ]
+
+
+@injector(23)
+def inject_d23(
+    frame: pd.DataFrame,
+    truth: GroundTruth,
+    rng: np.random.Generator,
+    columns: list[str] | None = None,
+    rate: float = 0.1,
+) -> pd.DataFrame:
+    """boolean-chaos: a two-valued column's cells rewritten as a MIX of
+    boolean spellings (Y/N/yes/no/TRUE/FALSE/1/0), each cell keeping its
+    truth value — the disease is representation mixing, never meaning."""
+    col = _pick_column(_two_valued_columns(frame), columns, 23, "boolean-chaos")
+    values = frame[col].dropna()
+    a, b = sorted(str(v) for v in values.unique())
+    # deterministic truth mapping: a recognizable truthy spelling wins; if
+    # neither folds into the vocab, sorted order stands in (b as truthy)
+    truthy_value = a if a.strip().lower() in _BOOL_TRUTHY else b
+    n = len(frame)
+    k = _count(rate, n)
+    rows = rng.choice(n, size=k, replace=False)
+    spelling_idx = rng.integers(0, len(_TRUE_SPELLINGS), size=k)
+    out = frame.copy()
+    out[col] = _holder_for(frame, col)
+    cells = []
+    for row, s in zip(rows, spelling_idx):
+        row = int(row)
+        original = frame[col].iat[row]
+        if pd.isna(original):
+            continue
+        side = _TRUE_SPELLINGS if str(original) == truthy_value else _FALSE_SPELLINGS
+        corrupted = side[int(s)]
+        if corrupted == str(original):
+            corrupted = side[(int(s) + 1) % len(side)]
+        out.at[row, col] = corrupted
+        cells.append(
+            Cell(
+                row=row, column=col, original=_json_safe(original), corrupted=corrupted
+            )
+        )
+    truth.corruptions.append(
+        Corruption(
+            disease=23,
+            columns=(col,),
+            granularity="cell",
+            cells=tuple(cells),
+            note="boolean spellings mixed; truth values preserved",
+        )
+    )
+    return out
+
+
+@injector(24)
+def inject_d24(
+    frame: pd.DataFrame,
+    truth: GroundTruth,
+    rng: np.random.Generator,
+    columns: list[str] | None = None,
+    rate: float = 0.1,
+) -> pd.DataFrame:
+    """stray structural rows: a header-echo row (every cell = its column
+    name) plus a mostly-empty footer row, appended at the END — coordinate
+    stability; real files carry them anywhere, and a detector must not care
+    about position. Whole-row disease: `columns` and `rate` target nothing."""
+    n = len(frame)
+    out = frame.copy()
+    for c in out.columns:
+        out[c] = _holder_for(out, c)  # header text must sit in ANY column
+    header_row = {c: str(c) for c in out.columns}
+    footer_row = {c: "" for c in out.columns}
+    text_cols = [
+        c
+        for c in frame.columns
+        if pd.api.types.is_string_dtype(frame[c]) or frame[c].dtype == object
+    ]
+    footer_row[text_cols[-1] if text_cols else out.columns[0]] = (
+        "Report generated by export tool"
+    )
+    out = pd.concat([out, pd.DataFrame([header_row, footer_row])], ignore_index=True)
+    truth.corruptions.append(
+        Corruption(
+            disease=24,
+            columns=tuple(frame.columns),
+            granularity="row",
+            rows=(n, n + 1),
+            note="header echo + footer junk appended",
+        )
+    )
+    return out
+
+
+@injector(25)
+def inject_d25(
+    frame: pd.DataFrame,
+    truth: GroundTruth,
+    rng: np.random.Generator,
+    columns: list[str] | None = None,
+    rate: float = 0.1,
+) -> pd.DataFrame:
+    """duplicated-columns: one existing column appended again under a join-
+    debris name ("<name>_x"). Column-granular; the dirty frame gains a
+    column the way row diseases gain rows — truth.n_cols stays pristine."""
+    source = _pick_column(list(frame.columns), columns, 25, "duplicated-columns")
+    clone = f"{source}_x"
+    if clone in frame.columns:
+        clone = f"{source}_dup"
+    out = frame.copy()
+    out[clone] = frame[source].copy()
+    truth.corruptions.append(
+        Corruption(
+            disease=25,
+            columns=(source,),
+            granularity="column",
+            note=f"content duplicated as {clone!r}",
+        )
+    )
+    return out
+
+
+@injector(26)
+def inject_d26(
+    frame: pd.DataFrame,
+    truth: GroundTruth,
+    rng: np.random.Generator,
+    columns: list[str] | None = None,
+    rate: float = 0.1,
+    ceiling: int = 8,
+) -> pd.DataFrame:
+    """truncated-values: a text column's longest values cut at a varchar-style
+    ceiling, a third of them left with a trailing ellipsis — classic export
+    damage. Applicable only where something actually exceeds the ceiling."""
+    candidates = [
+        c
+        for c in _text_columns(frame)
+        if frame[c].dropna().astype(str).str.len().max() > ceiling
+    ]
+    col = _pick_column(candidates, columns, 26, "truncated-values")
+    lengths = frame[col].dropna().astype(str).str.len()
+    long_rows = [int(i) for i in lengths.index[lengths > ceiling]]
+    k = min(_count(rate, len(frame)), len(long_rows))
+    chosen = rng.choice(len(long_rows), size=k, replace=False)
+    out = frame.copy()
+    out[col] = _holder_for(frame, col)
+    cells = []
+    for pick_no, idx in enumerate(sorted(int(c) for c in chosen)):
+        row = long_rows[idx]
+        original = str(frame[col].iat[row])
+        corrupted = (
+            original[: ceiling - 1] + "…" if pick_no % 3 == 2 else original[:ceiling]
+        )
+        out.at[row, col] = corrupted
+        cells.append(
+            Cell(
+                row=row, column=col, original=_json_safe(original), corrupted=corrupted
+            )
+        )
+    truth.corruptions.append(
+        Corruption(
+            disease=26,
+            columns=(col,),
+            granularity="cell",
+            cells=tuple(cells),
+            note=f"cut at {ceiling} chars",
         )
     )
     return out

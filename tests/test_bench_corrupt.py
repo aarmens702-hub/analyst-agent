@@ -50,7 +50,8 @@ def test_recorded_cells_match_the_pristine_to_dirty_diff():
 def _rich_frame(n=40):
     """One frame where columns=None auto-pick succeeds for every disease:
     a float+int numeric pair, a datetime, an ascii category, an accented
-    text column, a unique id, a lat/lon pair, and a start/end pair."""
+    text column, a two-valued flag, a unique id, a lat/lon pair, and a
+    start/end pair."""
     return typed_frame(
         3,
         n,
@@ -60,6 +61,7 @@ def _rich_frame(n=40):
             "posted_at": "datetime",
             "city": "category",
             "bio": "text",
+            "active": "flag",
             "key": "id",
             "lat": "lat",
             "lon": "lon",
@@ -69,7 +71,7 @@ def _rich_frame(n=40):
     )
 
 
-EXPECTED_DISEASES = tuple(sorted(set(range(1, 23)) - {20}))
+EXPECTED_DISEASES = tuple(sorted((set(range(1, 23)) - {20}) | {23, 24, 25, 26}))
 
 
 @pytest.mark.parametrize("disease_id", EXPECTED_DISEASES)
@@ -140,6 +142,35 @@ def test_corrupt_end_to_end_manifest_matches_and_round_trips():
     assert truth.n_rows == len(frame)
     assert truth.n_cols == len(frame.columns)
     assert len(truth.corruptions) == 3
+
+
+def test_d13_and_d22_folds_plant_their_new_variants():
+    """Taxonomy v2 folds: d13 gains date-domain implausibles (far-future or
+    epoch artifacts) when its target is a datetime column — auto-pick still
+    prefers non-negative numerics, so existing entries are untouched; d22
+    gains the Excel text-guard apostrophe among its damage kinds."""
+    import pandas as pd
+
+    from bench.bases import typed_frame
+
+    dates = typed_frame(
+        21, 40, {"case_id": "id", "seen_at": "datetime", "note": "text"}
+    )
+    truth = GroundTruth(seed=21, base="t", n_rows=40, n_cols=3, frame_sha256="")
+    INJECTORS[13](dates, truth, np.random.default_rng(21))
+    (c,) = truth.corruptions
+    assert c.columns == ("seen_at",)
+    assert c.cells, "date fold must record its planted cells"
+    planted = [pd.Timestamp(cell.corrupted) for cell in c.cells]
+    assert all(p.year >= 2090 or p.year == 1970 for p in planted)
+
+    ids = typed_frame(22, 60, {"case_id": "id", "note": "text"})
+    truth2 = GroundTruth(seed=22, base="t", n_rows=60, n_cols=2, frame_sha256="")
+    INJECTORS[22](ids, truth2, np.random.default_rng(22), rate=0.5)
+    (c2,) = truth2.corruptions
+    assert any(str(cell.corrupted).startswith("'") for cell in c2.cells), (
+        "apostrophe text-guard remnants must appear among d22's damage kinds"
+    )
 
 
 def test_d7_targets_repeated_vocab_and_plants_case_only_variants():

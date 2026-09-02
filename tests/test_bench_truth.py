@@ -2,7 +2,7 @@
 into it, the scorer reads from it, the external adapter emits it — so the
 JSON round-trip has to be lossless before anything parallel starts."""
 
-from bench.truth import Cell, Corruption, GroundTruth
+from bench.truth import MAX_DISEASE, Cell, Corruption, GroundTruth
 
 
 def test_json_round_trip_is_lossless():
@@ -60,7 +60,7 @@ def test_corruption_rejects_bad_vocabulary():
     # (kwargs override, expected message fragment)
     bad = [
         ({"granularity": "sideways"}, "granularity"),
-        ({"disease": 23}, "disease"),
+        ({"disease": MAX_DISEASE + 1}, "disease"),
         ({"disease": -1}, "disease"),
     ]
     for override, fragment in bad:
