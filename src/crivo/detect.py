@@ -45,6 +45,10 @@ SLUGS = {
     20: "schema-drift",
     21: "aggregate-rows",
     22: "id-numeric-corruption",
+    23: "boolean-chaos",
+    24: "stray-structural-rows",
+    25: "duplicated-columns",
+    26: "truncated-values",
 }
 
 INDICATORS = frozenset({12, 15})  # detected, evidenced, never auto-fixed (R2)
@@ -1217,6 +1221,38 @@ def _d12(df, cols) -> list:
 def _d13(df, cols) -> list:
     out = []
     for i in _targets(df, cols):
+        # datetime columns get domain sense too (taxonomy v2 fold): a
+        # far-future timestamp or the exact epoch instant is what damaged
+        # integers become, not a date anyone typed. Ordinary history is fine.
+        raw = df.iloc[:, i]
+        if pd.api.types.is_datetime64_any_dtype(raw):
+            stamps = raw.dropna()
+            if len(stamps) < 5:
+                continue
+            far_future = stamps[stamps.dt.year >= 2050]
+            epoch = stamps[stamps == pd.Timestamp("1970-01-01")]
+            violations = len(far_future) + (len(epoch) if len(epoch) >= 2 else 0)
+            if len(far_future) == 0 and len(epoch) < 2:
+                continue
+            out.append(
+                _finding(
+                    13,
+                    [_name(df, i)],
+                    f"{len(far_future)} timestamps sit in 2050+ and "
+                    f"{len(epoch)} at the exact epoch instant — cast "
+                    "artifacts, not dates anyone typed",
+                    {
+                        "violations": violations,
+                        "far_future": len(far_future),
+                        "epoch": len(epoch),
+                        "min": str(stamps.min()),
+                        "max": str(stamps.max()),
+                    },
+                    "GATE",
+                    0.85,
+                )
+            )
+            continue
         numbers = _numbers(df, i)
         if numbers is None or len(numbers) < 5:
             continue
@@ -1587,12 +1623,15 @@ def _d18(df, cols) -> list:
     bom = [n for n in names if any(z in n for z in ZERO_WIDTH)]
     duplicated = int(pd.Index(names).duplicated().sum())
     unnamed = [n for n in names if n.startswith("Unnamed:") or n.strip() == ""]
+    # padded/doubled-space names: invisible until the header fixer could
+    # repair them (arc W2) — the detector must see everything its fixer fixes
+    padded = [n for n in names if n.strip() != "" and (n != n.strip() or "  " in n)]
     header_rows = 0
     scan = df.head(200)
     for pos in range(len(scan)):
         if [str(v) for v in scan.iloc[pos].tolist()] == names:
             header_rows += 1
-    if not bom and not duplicated and not unnamed and not header_rows:
+    if not bom and not duplicated and not unnamed and not padded and not header_rows:
         return []
     problems = []
     if bom:
@@ -1601,9 +1640,11 @@ def _d18(df, cols) -> list:
         problems.append(f"{duplicated} duplicate column names")
     if unnamed:
         problems.append(f"{len(unnamed)} unnamed columns")
+    if padded:
+        problems.append(f"{len(padded)} column names carry stray whitespace")
     if header_rows:
         problems.append(f"{header_rows} data rows repeat the header")
-    affected = bom + unnamed + [n for n in names if names.count(n) > 1]
+    affected = bom + unnamed + padded + [n for n in names if names.count(n) > 1]
     return [
         _finding(
             18,
@@ -1613,6 +1654,7 @@ def _d18(df, cols) -> list:
                 "bom_columns": len(bom),
                 "duplicate_columns": duplicated,
                 "unnamed_columns": len(unnamed),
+                "padded": len(padded),
                 "header_rows": header_rows,
             },
             "AUTO",
@@ -1736,6 +1778,25 @@ def _d22(df, cols) -> list:
             vals = _text(df, i)
             if len(vals) >= 10:
                 stripped = vals.str.strip()
+                # Excel's text-guard leaking into the data: a few ids carry a
+                # leading apostrophe the rest lack — same disease family as
+                # eaten zeros (a cast mangled the representation), opposite
+                # polarity (the guarded minority sits in a digit majority).
+                guarded = stripped.str.match(r"'\S")
+                n_guarded = int(guarded.sum())
+                if 2 <= n_guarded <= 0.5 * len(stripped):
+                    out.append(
+                        _finding(
+                            22,
+                            [_name(df, i)],
+                            f"{n_guarded} identifiers carry a leading "
+                            "apostrophe — Excel's text-guard leaked into the "
+                            f"data; samples: {_samples(stripped[guarded])}",
+                            {"guarded": n_guarded, "values": len(stripped)},
+                            "GATE",
+                            0.9,
+                        )
+                    )
                 eaten_mask = stripped.str.fullmatch(r"\d+|\d+(?:\.\d+)?[eE]\+?\d+")
                 eaten = int(eaten_mask.sum())
                 intact = int((~eaten_mask).sum())
@@ -1814,6 +1875,209 @@ def _flat(df):
     flat = df.copy(deep=False)
     flat.index = pd.RangeIndex(len(flat))
     return flat
+
+
+# --- 24. stray structural rows (header echoes, footer junk) ------------------
+
+
+@register(24)
+def _d24(df, cols) -> list:
+    """Concatenated exports leave the header echoed as a data row and
+    mostly-empty footer junk at the end. Row-granular structure damage; GATE
+    because row deletion is always a judgment call. Bounded scan: header
+    echoes over the first 50k rows, footer junk over the last handful."""
+    rows = len(df)
+    if rows < 10 or df.shape[1] < 2:
+        return []
+    folded_names = [str(c).strip().lower() for c in df.columns]
+    # cheap pre-screen: an echo row needs column 0 to contain its own name,
+    # so one Series scan decides whether the expensive full fold ever runs
+    first = df.iloc[:, 0].head(50_000).astype(str).str.strip().str.lower()
+    header_rows: list[int] = []
+    if bool((first == folded_names[0]).any()):
+        scan = df.head(50_000).astype(str).apply(lambda s: s.str.strip().str.lower())
+        echo_share = scan.eq(folded_names).mean(axis=1)
+        header_rows = [int(i) for i, share in enumerate(echo_share) if share >= 0.6]
+
+    tail_n = min(3, rows)
+    tail = df.tail(tail_n).astype(str).apply(lambda s: s.str.strip().str.lower())
+    tail_missing = df.tail(tail_n).isna() | tail.isin({"", "nan", "none"})
+    body_missing = float(
+        (df.head(rows - tail_n).isna()).mean(axis=1).mean() if rows > tail_n else 0.0
+    )
+    footer_rows = [
+        int(pos)
+        for offset, pos in enumerate(range(rows - tail_n, rows))
+        if pos not in header_rows
+        and float(tail_missing.iloc[offset].mean()) >= max(0.6, body_missing + 0.4)
+    ]
+    if not header_rows and not footer_rows:
+        return []
+    return [
+        _finding(
+            24,
+            [],
+            f"{len(header_rows)} row(s) echo the header and {len(footer_rows)} "
+            f"trailing row(s) are mostly-empty footer junk mixed into the data",
+            {
+                "header_rows": len(header_rows),
+                "footer_rows": len(footer_rows),
+                "positions": (header_rows + footer_rows)[:8],
+                "rows": rows,
+            },
+            "GATE",
+            0.9,
+        )
+    ]
+
+
+# --- 26. truncated values ----------------------------------------------------
+
+
+@register(26)
+def _d26(df, cols) -> list:
+    """A varchar ceiling shows as many DISTINCT values piled at exactly one
+    length in an otherwise varied column, or a literal trailing ellipsis.
+    Fixed-width codes are all one length by design and stay silent — variety
+    plus a shared ceiling is the signature. HUMAN, no fixer: the lost tail is
+    unknowable, so repair is never a deterministic call."""
+    out = []
+    for i in _targets(df, cols):
+        values = _text(df, i)
+        if values is None or len(values) < 15:
+            continue
+        stripped = values.str.strip()
+        lengths = stripped.str.len()
+        ellipsis = int(stripped.str.endswith(("…", "...")).sum())
+        n = len(stripped)
+        max_len = int(lengths.max()) if n else 0
+        varied = int(lengths.nunique()) >= 5
+        # Only the two ROBUST signatures fire deterministically: a literal
+        # ellipsis, or edge dominance (a varied column where a quarter-plus
+        # of distinct values pile at exactly the max — everything was cut).
+        # Interior-ceiling heuristics are deliberately absent: templated
+        # text produces comb-shaped length distributions whose gaps mimic
+        # ceilings, and this detector's first draft fired on exactly that.
+        ceiling, at_ceiling = 0, 0
+        if varied and max_len >= 8:
+            count_at_max = int((lengths == max_len).sum())
+            distinct_at_max = int(stripped[lengths == max_len].nunique())
+            if (
+                count_at_max >= 0.25 * n
+                and distinct_at_max / count_at_max >= 0.9
+                and int(lengths.nunique()) >= 6
+            ):
+                ceiling, at_ceiling = max_len, distinct_at_max
+        if ellipsis == 0 and at_ceiling < 3:
+            continue
+        out.append(
+            _finding(
+                26,
+                [_name(df, i)],
+                f"{at_ceiling} distinct values sit exactly at the {ceiling}-char "
+                f"ceiling and {ellipsis} end in an ellipsis — a varchar limit or "
+                "display cut ate the tails",
+                {
+                    "at_ceiling": at_ceiling,
+                    "ceiling": ceiling,
+                    "ellipsis": ellipsis,
+                    "values": len(stripped),
+                },
+                "HUMAN",
+                0.85,
+            )
+        )
+    return out
+
+
+# --- 25. duplicated columns --------------------------------------------------
+
+
+@register(25)
+def _d25(df, cols) -> list:
+    """Identical content under two names — post-join _x/_y debris. Hash-first
+    so wide frames pay one vectorised digest per column, with full equality
+    confirmed only on hash twins. GATE: dropping a column is a judgment call
+    (which name survives is semantics the data can't tell us)."""
+    if len(df) < 10 or df.shape[1] < 2:
+        return []
+    digests: dict[bytes, list[int]] = {}
+    for i in _targets(df, cols):
+        col = df.iloc[:, i]
+        try:
+            key = pd.util.hash_pandas_object(col, index=False).to_numpy().tobytes()
+        except TypeError:
+            continue  # unhashable exotics: never worth crashing the run over
+        digests.setdefault(key, []).append(i)
+    out = []
+    for twins in digests.values():
+        if len(twins) < 2:
+            continue
+        first = df.iloc[:, twins[0]]
+        confirmed = [twins[0]] + [j for j in twins[1:] if first.equals(df.iloc[:, j])]
+        if len(confirmed) < 2:
+            continue
+        names = [_name(df, j) for j in confirmed]
+        out.append(
+            _finding(
+                25,
+                names,
+                f"{len(confirmed)} columns carry identical content "
+                f"({', '.join(repr(n) for n in names[:4])}) — every sum over "
+                "them double counts",
+                {"columns": names, "rows": len(df)},
+                "GATE",
+                0.95,
+            )
+        )
+    return out
+
+
+# --- 23. boolean representation chaos ---------------------------------------
+
+_BOOL_FAMILIES = (
+    frozenset({"y", "n"}),
+    frozenset({"yes", "no"}),
+    frozenset({"true", "false"}),
+    frozenset({"t", "f"}),
+    frozenset({"1", "0"}),
+)
+_BOOL_VOCAB = frozenset().union(*_BOOL_FAMILIES)
+
+
+@register(23)
+def _d23(df, cols) -> list:
+    """One truth, many spellings: Y/yes/TRUE/1 mixed in a single column. A
+    consistent convention (a clean Y/N pair, a 0/1 int column) is healthy —
+    the disease is REPRESENTATION mixing, so it needs two spelling families."""
+    out = []
+    for i in _targets(df, cols):
+        values = _present(df, i)
+        if values is None or len(values) < 10:
+            continue
+        distinct = set(values.astype(str).str.strip().str.lower().unique())
+        # subset-of-vocab is the real gate; chaos can show every spelling
+        if len(distinct) < 2 or not distinct <= _BOOL_VOCAB:
+            continue
+        families = sum(1 for fam in _BOOL_FAMILIES if distinct & fam)
+        if families < 2:
+            continue
+        out.append(
+            _finding(
+                23,
+                [_name(df, i)],
+                f"{len(distinct)} boolean spellings from {families} conventions "
+                f"in one column ({', '.join(sorted(distinct))})",
+                {
+                    "distinct": sorted(distinct),
+                    "families": families,
+                    "values": len(values),
+                },
+                "AUTO",
+                0.95,
+            )
+        )
+    return out
 
 
 def detect_all(df, name: str = "df") -> dict:

@@ -546,6 +546,23 @@ def test_d05_fires_on_a_mixed_float_and_token_column() -> None:
     assert 13 not in _diseases(detect_all(signed))
 
 
+def test_d13_implausible_dates() -> None:
+    """Taxonomy v2 fold (arc W2): datetime columns get domain sense too —
+    far-future timestamps and exact-epoch artifacts (1970-01-01 00:00:00 is
+    what a zeroed integer becomes, not a date anyone typed). Ordinary
+    historical dates are legitimate and must stay silent."""
+    seen = pd.Series(pd.date_range("2023-01-01", periods=26, freq="D"))
+    seen.iloc[3] = pd.Timestamp("2091-05-01")
+    seen.iloc[11] = pd.Timestamp("1970-01-01")
+    seen.iloc[19] = pd.Timestamp("1970-01-01")
+    (f,) = _of(detect_all(pd.DataFrame({"seen_at": seen})), 13)
+    assert f["grade"] == "GATE"
+    assert f["stats"]["violations"] == 3
+
+    history = pd.Series(pd.date_range("1981-06-01", periods=26, freq="ME"))
+    assert 13 not in _diseases(detect_all(pd.DataFrame({"born": history})))
+
+
 def test_d14_broken_coordinates() -> None:
     assert (BC_LAT_MIN, BC_LAT_MAX) == (48.0, 60.0)
     assert (BC_LON_MIN, BC_LON_MAX) == (-139.0, -114.0)
@@ -749,6 +766,19 @@ def test_d14_detects_in_range_coordinate_swaps() -> None:
     assert 14 not in _diseases(detect_all(overlap))
 
 
+def test_d18_padded_column_names_fire() -> None:
+    """Arc W2 (found by the header-fixer build): ' amount ' style padded
+    names were invisible to d18 even though the fixer repairs them — the
+    detector must see everything its fixer can fix, or verify-or-revert has
+    a blind edge."""
+    frame = pd.DataFrame({" amount ": [1.0] * 12, "note  x": ["a"] * 12})
+    (f,) = _of(detect_all(frame), 18)
+    assert f["stats"]["padded"] == 2
+
+    healthy = pd.DataFrame({"amount": [1.0] * 12, "note": ["a"] * 12})
+    assert 18 not in _diseases(detect_all(healthy))
+
+
 def test_d21_a_single_total_row_with_a_sum_signature_fires() -> None:
     """Bench 2026-09-02: the count >= 2 floor silenced the classic case — ONE
     trailing TOTAL row. A lone aggregate label may fire only when the row
@@ -784,6 +814,18 @@ def test_d22_catches_partially_eaten_string_ids() -> None:
     assert f["grade"] == "GATE"
     assert "txn_id" in f["columns"]
     assert f["stats"]["eaten"] == 3
+
+
+def test_d22_catches_excel_apostrophe_guards() -> None:
+    """Taxonomy v2 fold (arc W2): a leading apostrophe is Excel's text-guard
+    leaking into the data ("'000123") — same disease family as eaten zeros:
+    a numeric cast somewhere mangled the id column's representation."""
+    ids = [f"{100000 + i:06d}" for i in range(100)]
+    for k in (7, 21, 63):
+        ids[k] = "'" + ids[k]
+    (f,) = _of(detect_all(pd.DataFrame({"account_id": ids, "v": range(100)})), 22)
+    assert f["grade"] == "GATE"
+    assert f["stats"]["guarded"] == 3
 
 
 def test_d22_intact_and_all_digit_string_ids_stay_silent() -> None:
@@ -822,7 +864,7 @@ def test_finding_schema_and_ordering() -> None:
     assert res["findings"], "kitchen sink produced no findings"
     for f in res["findings"]:
         assert set(f) == FINDING_KEYS
-        assert isinstance(f["disease"], int) and 1 <= f["disease"] <= 22
+        assert isinstance(f["disease"], int) and f["disease"] in detect.SLUGS
         assert f["slug"] == f["slug"].lower() and " " not in f["slug"]
         assert isinstance(f["columns"], list)
         assert all(isinstance(c, str) for c in f["columns"])
@@ -835,7 +877,7 @@ def test_finding_schema_and_ordering() -> None:
     nums = [f["disease"] for f in res["findings"]]
     assert nums == sorted(nums)
     assert set(res["clear"]).isdisjoint(_diseases(res))
-    assert set(res["clear"]) | _diseases(res) == (set(range(1, 20)) | {21, 22})
+    assert set(res["clear"]) | _diseases(res) == set(detect.SINGLE_FRAME)
 
 
 def test_json_serializable_round_trip() -> None:
@@ -860,7 +902,7 @@ def test_detect_one_rejects_bad_disease_numbers() -> None:
     with pytest.raises(ValueError):
         detect_one(df, 0, [])
     with pytest.raises(ValueError):
-        detect_one(df, 23, [])
+        detect_one(df, 99, [])  # forever off the taxonomy
     with pytest.raises(ValueError):
         detect_one(df, 20, [])  # family-scoped; use detect_family
 
@@ -875,6 +917,96 @@ def test_pathological_frames_do_not_raise() -> None:
         {"obj": [[1, 2], {"a": 1}, None, [1, 2]] * 3, "n": [1, 2, 3, 1] * 3}
     )
     detect_all(weird)  # unhashable + mixed object cells must not error
+
+
+def test_d23_boolean_chaos() -> None:
+    """Taxonomy v2 (arc W2): one truth, many spellings — Y/yes/TRUE/1 mixed in
+    a single column. A CONSISTENT convention (a clean Y/N pair) is fine; the
+    disease is representation mixing, so it fires only when the distinct
+    values span two or more boolean spelling families."""
+    mixed = pd.DataFrame(
+        {"active": ["Y", "N", "yes", "no", "TRUE", "FALSE", "1", "0"] * 5}
+    )
+    (f,) = _of(detect_all(mixed), 23)
+    assert f["grade"] == "AUTO"
+    assert "active" in f["columns"]
+
+    consistent = pd.DataFrame({"active": ["Y", "N"] * 20})
+    assert 23 not in _diseases(detect_all(consistent))
+    numericish = pd.DataFrame({"flag": ["0", "1"] * 20})  # one family: not chaos
+    assert 23 not in _diseases(detect_all(numericish))
+
+
+def test_d24_stray_header_and_footer_rows() -> None:
+    """Taxonomy v2 (arc W2): concatenated exports leave the header echoed as a
+    data row and mostly-empty footer junk at the end. Both are row-granular
+    structure damage (GATE — row deletion stays a judgment call); a frame
+    with clean structure must stay silent."""
+    frame = pd.DataFrame(
+        {
+            "txn_id": [f"T{i}" for i in range(30)] + ["txn_id", ""],
+            "amount": [str(float(i + 1)) for i in range(30)] + ["amount", ""],
+            "note": ["ok"] * 30 + ["note", "generated by export tool v2"],
+        }
+    )
+    (f,) = _of(detect_all(frame), 24)
+    assert f["grade"] == "GATE"
+    assert f["stats"]["header_rows"] == 1
+    assert f["stats"]["footer_rows"] == 1
+
+    clean = pd.DataFrame(
+        {
+            "txn_id": [f"T{i}" for i in range(30)],
+            "amount": [str(float(i + 1)) for i in range(30)],
+            "note": ["ok"] * 30,
+        }
+    )
+    assert 24 not in _diseases(detect_all(clean))
+
+
+def test_d25_duplicated_columns() -> None:
+    """Taxonomy v2 (arc W2): identical content under two names — post-join
+    _x/_y debris. GATE (dropping a column is a judgment call). Columns that
+    merely correlate, or share dtype but not values, stay silent."""
+    base = [float(i) for i in range(40)]
+    frame = pd.DataFrame({"amount": base, "amount_x": base, "note": ["ok"] * 40})
+    (f,) = _of(detect_all(frame), 25)
+    assert f["grade"] == "GATE"
+    assert set(f["columns"]) == {"amount", "amount_x"}
+
+    distinct = pd.DataFrame(
+        {"amount": base, "fee": [v / 10 for v in base], "note": ["ok"] * 40}
+    )
+    assert 25 not in _diseases(detect_all(distinct))
+
+
+def test_d26_truncation_artifacts() -> None:
+    """Taxonomy v2 (arc W2): a varchar ceiling shows as MANY DISTINCT values
+    piled at exactly one length in an otherwise varied column (or a literal
+    trailing ellipsis). Fixed-width code columns are all one length by design
+    and must stay silent — variety plus a shared ceiling is the signature."""
+    short = [("word " * (1 + i % 4))[: 5 + i % 7] for i in range(25)]
+    # space-free at the cut so .strip() can't eat the wall
+    cut = [(f"note{i:02d}" + "abcdefghijklmno")[:14] for i in range(10)]
+    cut[0] = cut[0][:13] + "…"
+    (f,) = _of(detect_all(pd.DataFrame({"bio": cut + short})), 26)
+    assert f["grade"] == "HUMAN"
+    assert f["stats"]["at_ceiling"] >= 4
+    assert f["stats"]["ellipsis"] == 1
+
+    codes = pd.DataFrame({"code": [f"C{i:04d}" for i in range(30)]})
+    assert 26 not in _diseases(detect_all(codes))
+
+
+def test_d26_comb_shaped_template_lengths_stay_silent() -> None:
+    """FP discipline: templated text ("bio N " + "detail " * k) produces a
+    comb-shaped length distribution whose gaps mimic interior ceilings — the
+    exact shape this detector's first draft fired on. Pinned so no future
+    'improvement' reintroduces the interior heuristic without answering it."""
+    comb = pd.DataFrame(
+        {"bio": [f"bio {i} " + "detail " * (2 + i % 5) for i in range(24)]}
+    )
+    assert 26 not in _diseases(detect_all(comb))
 
 
 def test_detect_all_reports_a_broken_detector_instead_of_hiding_it(monkeypatch) -> None:
@@ -908,7 +1040,9 @@ def test_raha_beers_units_and_sentinels() -> None:
     assert any(f["columns"] == ["ounces"] for f in _of(res, 1))  # "12.0 oz"
     assert any(f["columns"] == ["ibu"] for f in _of(res, 4))  # "N/A"
     assert set(res["clear"]).isdisjoint(ds)
-    assert set(res["clear"]) | ds == (set(range(1, 20)) | {21, 22})
+    # clear + found must partition the whole single-frame taxonomy, whatever
+    # its current size — growth must never silently shrink the checked claim
+    assert set(res["clear"]) | ds == set(detect.SINGLE_FRAME)
 
 
 @needs_raha
