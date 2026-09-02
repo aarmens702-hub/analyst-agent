@@ -117,6 +117,36 @@ diseases were never planted — false-positive scoping bugs in their own
 right; each detector-diff proposal should carry a line on its FP behavior
 against the frames it should stay silent on.
 
+### Landed same day (2026-09-02, bench-gated, red-first)
+
+- **d13**: data-driven sign-anomaly fallback — a ≥20-value column that is
+  ≥75% non-negative with a stray minority below zero fires GATE without
+  needing a DOMAIN_BOUNDS name. tx-out-of-domain: silent → 0.667.
+- **d11**: the 0.995 uniqueness gate (more damage = more silence, the A1
+  shape) replaced by a two-path gate — near-perfect window kept, plus a
+  damage-tolerant wide path (0.6–0.98) for id-named/text columns with ≥3
+  duplicated rows. Floats never qualify (measurements, not keys); short
+  all-digit codes never take the wide path (birthday collisions by
+  construction). tx-key-violations: silent → 1.000, and the probe's
+  d11-on-geo/reading FP is dead.
+- **d22**: mixed-shape branch — an id-named string column whose minority
+  collapsed to bare digits/scientific notation while the intact majority
+  keeps a non-numeric shape fires GATE (the numeric-only path was
+  structurally blind to partial damage). tx-excel-ids: silent → 0.667.
+- **d1 FP**: uniform code schemes (constant alpha prefix + fixed-width
+  digits, "SIT000123") no longer read as currency residue.
+- The wide path's key prior was tightened twice: first floats and short
+  all-digit codes, then bare textiness itself — a sentinel-riddled text
+  column (12 x "N/A" beside unique names, caught by the admission-kernel
+  suite) impersonates a damaged key under any textiness prior, so the wide
+  path now requires an id-claiming NAME, full stop.
+- Both pristine bases now detect fully clean across seeds. Smoke detect
+  µF1 (silence-as-zero): 0.469 → **0.581**. Still open: the
+  adjacent-covered group (d5/d7/d10/d16/d21), d14's in-range swaps, and
+  the known-and-accepted d13-fallback firing on swapped coordinates in
+  the d14 frame (a true observation charged as an FP by single-label
+  truth).
+
 ## 5. Smoke timing vs spec
 
 Acceptance said < 60 s. Measured: ~61 s locally *with* the 4 external
