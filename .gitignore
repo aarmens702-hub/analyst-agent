@@ -29,3 +29,4 @@ takehome/
 
 # macOS noise
 .DS_Store
+bench/results/

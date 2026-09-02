@@ -176,6 +176,14 @@ admission; the sandbox and a person do.
 
 </details>
 
+## Benchmarks
+
+<!-- bench:start -->
+Numbers land here from `uv run python -m bench.run --full --write-readme`
+(the Proving Ground: synthetic corpus with planted ground truth + the Raha
+external datasets, scored cell-level). Until then, see `bench/RESULTS.md`.
+<!-- bench:end -->
+
 ## Where it's at
 
 409 tests pass. The keyless half does no network, subprocess, or Docker work when

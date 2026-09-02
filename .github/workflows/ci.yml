@@ -27,3 +27,5 @@ jobs:
         run: uv run ruff format --check .
       - name: Tests (keyless suite; container tests are opt-in)
         run: uv run pytest -q
+      - name: Bench smoke (instrument invariants; external datasets absent in CI)
+        run: uv run python -m bench.run --smoke
