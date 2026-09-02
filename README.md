@@ -33,14 +33,17 @@ pip install git+https://github.com/aarmens702-hub/analyst-agent
 Then point it at a file or a DataFrame you already have:
 
 ```python
-import crivo
+import crivo as cv
 
-report = crivo.diagnose("transactions.csv")   # runs 22 checks, no key, no kernel
-report                                     # prints the list, or a card in a notebook
+df = cv.read("transactions.csv")        # any format, sentinel-safe
+report = cv.diagnose(df)                # runs the checks, no key, no kernel
+report                                  # prints the list, or a card in a notebook
+report.suggest()                        # starter questions for this dataset
 
-clean, summary = crivo.clean(report)          # applies the safe fixes, re-checks each one
-summary.needs_review                       # the ambiguous ones it will not guess on
-crivo.write(clean, "clean.parquet")           # your data back out, any format
+cleaned, summary = cv.clean(df)         # applies the safe fixes, re-checks each one
+summary.cells()                         # the receipts: exactly what changed, per fix
+summary.needs_review                    # the ambiguous ones it will not guess on
+cv.write(cleaned, "clean.parquet")      # your data back out, any format
 ```
 
 `crivo.read` handles the formats you actually get data in: csv, tsv, parquet, xlsx,
