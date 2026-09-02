@@ -41,6 +41,16 @@ def main() -> int:
     )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument(
+        "--fail-on",
+        choices=["AUTO", "GATE", "HUMAN", "never"],
+        default="GATE",
+        help="diagnose as a linter: exit 1 when any finding carries this grade "
+        "or one needing MORE human judgment (ordered AUTO < GATE < HUMAN by "
+        "judgment required — the default GATE means 'fail me when something "
+        "needs a person'); 'never' always exits 0 after reporting. Unreadable "
+        "files exit 2, like bad arguments.",
+    )
+    parser.add_argument(
         "--clean",
         metavar="FILE",
         help="headless one-shot clean: auto policy, judgement calls deferred",
@@ -59,20 +69,33 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.diagnose:
+        import json as _json
+
         from crivo import checkup
 
         try:
             if args.json:
-                print(checkup.report(args.diagnose, as_json=True))
+                payload = checkup.report(args.diagnose, as_json=True)
+                print(payload)
+                findings = _json.loads(payload)["findings"]
             else:
                 # styled for a terminal; rich degrades to plain text off a TTY
                 frame = checkup.load(args.diagnose)
                 result = checkup.detect_all(frame, os.path.basename(args.diagnose))
                 checkup.render_console(args.diagnose, frame, result)
+                findings = result["findings"]
         except (OSError, ValueError) as exc:
             print(f"could not read {args.diagnose}: {exc}")
-            return 1
-        return 0
+            return 2  # could-not-run, like argparse's own bad-argument exit
+        # linter semantics: exit 1 when a finding sits at/above the threshold
+        # on the judgment ladder; an unknown grade counts as maximally human
+        if args.fail_on == "never":
+            return 0
+        judgment = {"AUTO": 0, "GATE": 1, "HUMAN": 2}
+        threshold = judgment[args.fail_on]
+        return (
+            1 if any(judgment.get(f["grade"], 2) >= threshold for f in findings) else 0
+        )
 
     provider = os.environ.get("CRIVO_PROVIDER", "deepseek")
     key = "ANTHROPIC_API_KEY" if provider == "claude" else "DEEPSEEK_API_KEY"
