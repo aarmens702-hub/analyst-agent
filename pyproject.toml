@@ -64,6 +64,7 @@ dev = [
     # test-only: exercises CleanSummary.diff()'s pandas Styler. NOT a runtime
     # dependency — the keyless core and the notebook cards never need jinja2.
     "jinja2>=3.0",
+    "hypothesis>=6.167.1",
 ]
 
 [tool.pytest.ini_options]
