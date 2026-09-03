@@ -81,6 +81,21 @@ categorical aggregates, line for time-indexed, single-value stat for
 scalars), returns the Axes, raises a clear message when the result shape
 isn't chartable. Tested against the faux provider like test_ask.py does.
 
+## 4. loop.py — snapshot restore ordering + model-visible note (arc W3/H7)
+
+The snapshot cells are upgraded (aggregate cap, manifest, dill fallback —
+landed, Claude-side). Two halves live in your files:
+
+- **Restore BEFORE bootstrap on recovery**: `_recover`/`_resume_state` should
+  run the restore cell before any load replay, so live handles from the
+  replay beat stale pickles rather than the reverse (prime-agent's ordering
+  insight). Today the order is replay-then-restore.
+- **A model-visible note after restore**: inject one observation line listing
+  restored and failed names ("kernel restored: df, threshold; failed: none")
+  so the model knows its state survived instead of re-deriving it. Pairs
+  with the backlog's compaction-prompt trick (after context summarization,
+  tell the model its kernel variables survived) — that one is prompts.py.
+
 ## Also queued behind these (no review needed, noted for transparency)
 
 - query.py `_required_key()` currently hardcodes deepseek/claude; once the
