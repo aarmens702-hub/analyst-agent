@@ -81,6 +81,22 @@ def load(path, **kwargs) -> pd.DataFrame:
     if path.suffix.lower() in {".parquet", ".pq"}:
         return pd.read_parquet(path, **kwargs)
     sample = _text_sample(path)
+    if sample[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        # a utf-16 byte-order mark: the cp1252 fallback below would "succeed"
+        # on these bytes and mangle every header ('ÿþi'), so sniff it first
+        head = sample.decode("utf-16", errors="replace")
+        counts = {sep: head.count(sep) for sep in (",", ";", "\t", "|")}
+        sep = max(counts, key=counts.get) if any(counts.values()) else ","
+        read_kwargs = {
+            "sep": sep,
+            "encoding": "utf-16",
+            "keep_default_na": False,
+            "low_memory": False,
+        }
+        read_kwargs.update(kwargs)
+        frame = pd.read_csv(path, **read_kwargs)
+        frame.attrs["encoding"] = "utf-16"
+        return frame
     try:
         # a multibyte char cut at the 8KB boundary is not evidence against
         # utf-8; a failure anywhere earlier is — but only forgive it when the

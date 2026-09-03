@@ -152,21 +152,26 @@ def test_read_url_sends_a_user_agent(control_server) -> None:
     assert handler.last_user_agent == remote.USER_AGENT
 
 
-def test_read_url_caps_bytes_read(control_server, monkeypatch) -> None:
-    """The fetch reads at most MAX_FETCH_BYTES, mirroring ingest.py's cap: a body
-    past the cap is truncated, not read in full."""
+def test_read_url_refuses_oversize_bodies(control_server, monkeypatch) -> None:
+    """Arc W3/H5: a body past the cap is REFUSED with the limit named — never
+    silently truncated (a clipped download is a frame that LOOKS complete,
+    worse than no frame at all). CRIVO_HTTP_MAX_BYTES is the knob; a body
+    inside the cap still reads whole."""
+    import pytest
+
     from crivo.readers import remote
 
     base, handler = control_server
     handler.content_type = "text/csv"
     handler.body = b"id,note\n1,a\n2,b\n3,c\n"
-    monkeypatch.setattr(
-        remote, "MAX_FETCH_BYTES", len(b"id,note\n1,a\n"), raising=False
-    )
+    monkeypatch.setenv("CRIVO_HTTP_MAX_BYTES", str(len(b"id,note\n1,a\n")))
 
+    with pytest.raises(RuntimeError, match="CRIVO_HTTP_MAX_BYTES"):
+        remote.read_url(f"{base}/data.csv")
+
+    monkeypatch.setenv("CRIVO_HTTP_MAX_BYTES", str(len(handler.body)))
     df = remote.read_url(f"{base}/data.csv")
-
-    assert df["note"].tolist() == ["a"]
+    assert df["note"].tolist() == ["a", "b", "c"]
 
 
 def test_read_url_decides_format_by_content_type_then_extension(

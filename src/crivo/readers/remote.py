@@ -14,6 +14,7 @@ because the detection engine can only report a missing value it can still see.
 
 import io
 import json
+import os
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -23,6 +24,12 @@ import pandas as pd
 
 USER_AGENT = "crivo-remote/0.1"
 MAX_FETCH_BYTES = 512 * 1024 * 1024
+DEFAULT_TIMEOUT_S = 30.0
+
+# Env knobs this module reads. The conftest quarantine composes registries
+# (llm.KEY_ENV_VARS + this) so an ambient override can never make a test pass
+# that would fail clean in CI.
+READER_ENV_VARS = ("CRIVO_HTTP_TIMEOUT_S", "CRIVO_HTTP_MAX_BYTES")
 
 
 def read_url(url, records_path=None, **kwargs) -> pd.DataFrame:
@@ -48,11 +55,27 @@ def _fetch(url: str) -> tuple[str, str]:
     """Fetch the response body (capped) as text plus its Content-Type. A network
     failure raises a clear error, never a bare urllib error or silent timeout."""
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    timeout_s = float(os.environ.get("CRIVO_HTTP_TIMEOUT_S", DEFAULT_TIMEOUT_S))
+    max_bytes = int(os.environ.get("CRIVO_HTTP_MAX_BYTES", MAX_FETCH_BYTES))
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
             charset = response.headers.get_content_charset() or "utf-8"
-            text = response.read(MAX_FETCH_BYTES).decode(charset, errors="replace")
+            raw = response.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                # fail, never truncate: a silently clipped download is a frame
+                # that LOOKS complete — worse than no frame at all
+                raise RuntimeError(
+                    f"fetch refused for {url}: response exceeds the "
+                    f"{max_bytes:,}-byte cap (raise CRIVO_HTTP_MAX_BYTES to "
+                    "allow more)"
+                )
+            text = raw.decode(charset, errors="replace")
             content_type = response.headers.get_content_type()
+    except TimeoutError as exc:
+        raise RuntimeError(
+            f"fetch timed out for {url} after {timeout_s:g}s "
+            "(CRIVO_HTTP_TIMEOUT_S raises the budget)"
+        ) from exc
     except urllib.error.HTTPError as exc:
         # a real HTTP status (404/500/…): the server answered, so don't blame the
         # sandbox — HTTPError is a URLError subclass and must be caught first
@@ -60,6 +83,14 @@ def _fetch(url: str) -> tuple[str, str]:
             f"fetch failed for {url}: HTTP {exc.code} {exc.reason}"
         ) from exc
     except urllib.error.URLError as exc:
+        if isinstance(getattr(exc, "reason", None), TimeoutError):
+            # a connect-phase timeout arrives wrapped; same budget, same story.
+            # RuntimeError on purpose (TRY004's TypeError reading is wrong
+            # here): this is the module's fetch-error idiom, not a type check.
+            raise RuntimeError(  # noqa: TRY004
+                f"fetch timed out for {url} after {timeout_s:g}s "
+                "(CRIVO_HTTP_TIMEOUT_S raises the budget)"
+            ) from exc
         raise RuntimeError(
             f"fetch failed for {url}: {exc.reason} — host unreachable (in the "
             "docker sandbox, --network none makes remote fetches fail by design)"
