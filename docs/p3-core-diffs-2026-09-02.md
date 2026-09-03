@@ -96,6 +96,24 @@ landed, Claude-side). Two halves live in your files:
   with the backlog's compaction-prompt trick (after context summarization,
   tell the model its kernel variables survived) — that one is prompts.py.
 
+## 5. loop.py — stop dropping the charts the model already draws
+
+Found 2026-09-03 while auditing the Phase 3 chart story: the kernel client
+already SAVES every model-drawn matplotlib chart as a PNG on disk
+(`kernel/client.py` writes image/png display data to a session path), but
+both execute loops in loop.py filter DisplayItems out (`elif not
+isinstance(ev, DisplayItem)`), so the paths are never recorded — the PNGs
+are orphans. The system prompt even advertises "matplotlib is set up
+inline: charts appear automatically when you plot."
+
+Smallest change with the biggest Phase 3 payoff: collect DisplayItem paths
+during the turn and attach them to the answer card (a `images: [paths]`
+field on CardReady/card). The wrapper side (mine) then exposes
+`Answer.images` and renders them in the notebook card — model-drawn
+charts-on-answers with no new capability, just not discarding what already
+exists. This complements §3's `peek()` (host-side plotting of `result`);
+if you take only one of the two, this one is cheaper and more visible.
+
 ## Also queued behind these (no review needed, noted for transparency)
 
 - query.py `_required_key()` currently hardcodes deepseek/claude; once the
