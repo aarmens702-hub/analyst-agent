@@ -967,7 +967,8 @@ def test_a_verified_fix_is_snapshotted_before_the_next_one_runs(session, monkeyp
     ]
     drive(session.clean("df"))
 
-    snapshots = [c for c in FakeClient.executed if "_pickle" in c]
+    # _ser is the snapshot template's serializer alias (dill-or-pickle, W3/H7)
+    snapshots = [c for c in FakeClient.executed if "_ser.dumps" in c]
     assert snapshots, "no snapshot cell ran after the verified fix"
     assert "kernel_state" in snapshots[0]
 
@@ -1220,7 +1221,7 @@ def test_recovery_restores_the_snapshot_not_just_the_loads(session, monkeypatch)
     FakeClient.script = [diag([finding()]), baseline(), dead_kernel()]
     drive(session.clean("df"))
 
-    restores = [c for c in FakeClient.executed if "_pickle.load" in c]
+    restores = [c for c in FakeClient.executed if "_ser.load" in c]
     assert restores, "recovery must restore the snapshot, not just the loads"
     assert "kernel_state" in restores[0]
 
