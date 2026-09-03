@@ -1,4 +1,4 @@
-# Proving Ground results (smoke, 2026-09-02)
+# Proving Ground results (smoke, 2026-09-03)
 
 All numbers are the **deterministic mode baseline** — keyless
 `crivo.clean()`, no LLM. Diseases without a deterministic fixer are
