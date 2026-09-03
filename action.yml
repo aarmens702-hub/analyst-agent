@@ -1,0 +1,36 @@
+name: "crivo data check"
+description: >-
+  Lint a data file the way ruff lints code: run crivo's detection engine and
+  fail the job when findings at or above the chosen grade appear. Keyless —
+  no model, no network, no configuration.
+branding:
+  icon: "filter"
+  color: "orange"
+
+inputs:
+  path:
+    description: "Data file to check (csv, parquet, xlsx, json, ...)"
+    required: true
+  fail-on:
+    description: >-
+      Grade that fails the job: AUTO (strictest — any finding), GATE
+      (default — anything needing a person), HUMAN, or never (report only).
+    required: false
+    default: "GATE"
+  python-version:
+    description: "Python version to run with"
+    required: false
+    default: "3.12"
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install crivo
+      shell: bash
+      run: pip install --quiet crivo
+    - name: Diagnose
+      shell: bash
+      run: crivo diagnose "${{ inputs.path }}" --fail-on "${{ inputs.fail-on }}"

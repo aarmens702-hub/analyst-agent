@@ -179,6 +179,21 @@ admission; the sandbox and a person do.
 
 </details>
 
+## In CI — a linter for data
+
+`crivo diagnose` exits like a linter: `0` clean, `1` findings at or above
+`--fail-on` (default `GATE`, "anything needing a person"), `2` broken input.
+As a GitHub Action:
+
+```yaml
+- uses: aarmens702-hub/crivo@main
+  with:
+    path: data/latest-export.csv
+    fail-on: GATE
+```
+
+Or anywhere else: `crivo diagnose file.csv --fail-on AUTO --json`.
+
 ## Benchmarks
 
 <!-- bench:start -->
