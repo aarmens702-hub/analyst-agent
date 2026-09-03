@@ -22,8 +22,8 @@ _COMPRESSION = {".gz", ".zip", ".bz2", ".xz"}
 
 SUPPORTED = (
     ".csv .tsv .txt .parquet .pq .xlsx .xls .json .jsonl .ndjson .feather .orc "
-    "(text formats also with a .gz/.zip/.bz2/.xz suffix; parquet as a directory "
-    "of parts)"
+    ".dta .sas7bdat (text formats also with a .gz/.zip/.bz2/.xz suffix; parquet "
+    "as a directory of parts; format='fwf' for fixed-width)"
 )
 
 
@@ -79,12 +79,35 @@ def read_file(path, **kwargs) -> pd.DataFrame:
         ) from exc
 
 
-def _read_file_raw(p: Path, **kwargs) -> pd.DataFrame:
+# format= overrides extension dispatch: for shapes with no reliable
+# extension. fwf is the first citizen; each entry is sentinel-safe where the
+# underlying reader allows (binary stat formats encode missingness natively)
+_FORMATS = {
+    "fwf": lambda p, **kw: pd.read_fwf(p, dtype=str, keep_default_na=False, **kw),
+    "stata": lambda p, **kw: pd.read_stata(p, **kw),
+    "sas": lambda p, **kw: pd.read_sas(p, **kw),
+}
+
+
+def _read_file_raw(p: Path, format: str | None = None, **kwargs) -> pd.DataFrame:
+    if format is not None:
+        try:
+            reader = _FORMATS[format]
+        except KeyError:
+            known = " ".join(sorted(_FORMATS))
+            raise ValueError(
+                f"unknown format={format!r} for {p.name}; known: {known}"
+            ) from None
+        return reader(p, **kwargs)
     # a partitioned parquet dataset is a directory of parts; read it whole
     # before any suffix logic (a directory name may still carry a dot)
     if p.is_dir():
         return pd.read_parquet(p, **kwargs)
     suffix = p.suffix.lower()
+    if suffix == ".dta":
+        return pd.read_stata(p, **kwargs)
+    if suffix == ".sas7bdat":
+        return pd.read_sas(p, **kwargs)
     if suffix in {".gz", ".zip"}:
         _bomb_check(p, suffix)
     if suffix == ".zip":
@@ -118,7 +141,32 @@ def _read_file_raw(p: Path, **kwargs) -> pd.DataFrame:
     if suffix in _VIA_CHECKUP:
         return _checkup.load(p, **kwargs)
     if suffix in {".xlsx", ".xls"}:
-        return pd.read_excel(p, keep_default_na=False, dtype=str, **kwargs)
+        try:
+            # .xls always means the xlrd engine in pandas; naming it here makes
+            # the missing-dependency failure deterministic instead of shape-dependent
+            book = pd.ExcelFile(p, engine="xlrd" if suffix == ".xls" else None)
+        except ImportError as exc:
+            if "xlrd" in str(exc):
+                # we advertise .xls but don't ship its engine — say so
+                raise ImportError(
+                    f"{p.name}: .xls needs the xlrd package "
+                    "(pip install xlrd) — or resave as .xlsx"
+                ) from exc
+            raise
+        with book:
+            frame = pd.read_excel(book, keep_default_na=False, dtype=str, **kwargs)
+            if "sheet_name" not in kwargs and len(book.sheet_names) > 1:
+                cells = frame.astype(str).to_numpy()
+                filled = int((cells != "").sum()) if cells.size else 0
+                if frame.shape[1] < 2 or filled < 3:
+                    # an 'Instructions' cover tab silently diagnosed as the
+                    # data is worse than an error that teaches sheet_name=
+                    names = ", ".join(repr(n) for n in book.sheet_names)
+                    raise ValueError(
+                        f"{p.name}: the first sheet looks like a cover page — "
+                        f"pick the real one with sheet_name=...; sheets: {names}"
+                    )
+        return frame
     if suffix == ".json":
         return pd.read_json(p, **kwargs).astype(object)
     if suffix in {".jsonl", ".ndjson"}:

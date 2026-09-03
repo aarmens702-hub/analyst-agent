@@ -218,12 +218,18 @@ def read(source, **kwargs) -> pd.DataFrame:
 
     The source is dispatched (see `crivo.readers`):
     - a local path — csv/tsv/txt, parquet (file or directory), xlsx/xls, json,
-      jsonl/ndjson, feather, orc, optionally .gz/.zip/.bz2 compressed;
-    - a database — a DBAPI connection or a SQLAlchemy URL, with `query=...`;
+      jsonl/ndjson, feather, orc, Stata .dta, SAS .sas7bdat, optionally
+      .gz/.zip/.bz2 compressed; `format="fwf"` overrides extension dispatch
+      for fixed-width files (SPSS .sav needs pyreadstat — not bundled);
+    - a sqlite file (.db/.sqlite) — opened, queried (`query=...`), and closed
+      for you; other databases — a DBAPI connection or a SQLAlchemy URL;
     - an http(s) URL — json or csv, `records_path=...` to pluck nested json.
 
     Missing-value tokens ("N/A", "-") are preserved as strings, not silently
-    coerced to NaN — the detection engine must see them to report them.
+    coerced to NaN — the detection engine must see them to report them. CSV
+    metadata preambles (bank/ERP exports) are skipped conservatively and the
+    skip is stamped on the frame (`.attrs["preamble_rows"]`); big-data note:
+    for files beyond memory, load into duckdb and pass the `duckdb://` URL.
     """
     from crivo import readers
 
@@ -240,8 +246,9 @@ def read_sql(query: str, connection) -> pd.DataFrame:
 def write(frame: pd.DataFrame, path, **kwargs) -> Path:
     """Write a DataFrame, format inferred from the extension.
 
-    Supported: .csv, .parquet/.pq, .xlsx, .json, .jsonl/.ndjson. The cleaned
-    data is the deliverable; the original file is never touched.
+    Supported: .csv, .parquet/.pq, .xlsx, .json, .jsonl/.ndjson, .feather,
+    .orc. The cleaned data is the deliverable; the original file is never
+    touched.
     """
     p = Path(path)
     suffix = p.suffix.lower()
@@ -256,10 +263,16 @@ def write(frame: pd.DataFrame, path, **kwargs) -> Path:
         frame.to_json(p, orient="records", indent=2, **kwargs)
     elif suffix in {".jsonl", ".ndjson"}:
         frame.to_json(p, orient="records", lines=True, **kwargs)
+    elif suffix == ".feather":
+        # feather has no index=False switch; dropping it here keeps parity
+        # with every other writer
+        frame.reset_index(drop=True).to_feather(p, **kwargs)
+    elif suffix == ".orc":
+        frame.to_orc(p, index=False, **kwargs)
     else:
         raise ValueError(
             f"unsupported extension {suffix!r} for {p.name}; supported: "
-            ".csv .parquet .xlsx .json .jsonl"
+            ".csv .parquet .xlsx .json .jsonl .feather .orc"
         )
     return p
 

@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 
 from crivo.detect import SINGLE_FRAME, detect_all
+from crivo.readers import _sniff
 
 GRADE_NOTE = {
     "AUTO": "safe to fix automatically",
@@ -116,8 +117,50 @@ def load(path, **kwargs) -> pd.DataFrame:
         "low_memory": False,
     }
     read_kwargs.update(kwargs)  # the caller's options win over the sniffed ones
-    frame = pd.read_csv(path, **read_kwargs)
+    # the preamble sniffer never runs when the caller pinned the layout
+    user_pinned = "skiprows" in kwargs or "header" in kwargs
+    try:
+        frame = pd.read_csv(path, **read_kwargs)
+    except pd.errors.ParserError:
+        if user_pinned:
+            raise
+        retried = _preamble_retry(path, head, read_kwargs, encoding)
+        if retried is None:
+            raise
+        return retried
     frame.attrs["encoding"] = encoding
+    if user_pinned or not _sniff.is_degenerate(frame.columns):
+        return frame
+    retried = _preamble_retry(path, head, read_kwargs, encoding)
+    if retried is not None:
+        return retried
+    if _sniff.unnamed_flood(frame.columns):
+        # >50% Unnamed columns is a shape no real header produces, and no
+        # consistent table exists below — garbage out would be a lie
+        raise ValueError(
+            f"{path.name}: no consistent table found below the junk header; "
+            f"first lines: {_sniff.preview(head)}"
+        )
+    return frame  # a genuine single-column file is legal; leave it alone
+
+
+def _preamble_retry(path, head, read_kwargs, encoding):
+    """Re-read past a metadata preamble when a stable table shape exists
+    below it (arc P2-polish, group C). Returns the reframed table stamped
+    with what was skipped, or None when there is nothing better to do."""
+    start = _sniff.find_table_start(head)
+    if start is None or start[0] == 0:
+        return None
+    skiprows, sep = start
+    retry_kwargs = dict(read_kwargs, skiprows=skiprows, sep=sep)
+    try:
+        frame = pd.read_csv(path, **retry_kwargs)
+    except pd.errors.ParserError:
+        return None
+    if _sniff.is_degenerate(frame.columns):
+        return None
+    frame.attrs["encoding"] = encoding
+    frame.attrs["preamble_rows"] = skiprows
     return frame
 
 

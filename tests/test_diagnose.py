@@ -161,7 +161,9 @@ def test_the_transaction_fixture_scores_against_its_own_ground_truth(tmp_path) -
     assert "N/A" in report or "sentinel" in report
 
 
-def test_render_console_styles_findings_without_corrupting_the_facts(tmp_path) -> None:
+def test_render_console_styles_findings_without_corrupting_the_facts(
+    tmp_path, monkeypatch
+) -> None:
     """The terminal report is styled for a person, but the facts must survive:
     the slug, the columns, and the counts are all still there in the captured
     output. rich degrades to plain text off a TTY, so a pipe or a test sees no
@@ -171,6 +173,12 @@ def test_render_console_styles_findings_without_corrupting_the_facts(tmp_path) -
     from rich.console import Console
 
     from crivo import checkup
+
+    # a developer shell exporting FORCE_COLOR/COLORTERM makes rich colour even
+    # a StringIO console — correct rich behaviour, but this test asserts the
+    # UNFORCED default, so neutralise the forcing the way CI's env has it
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("COLORTERM", raising=False)
 
     path = write_csv(tmp_path)
     frame = checkup.load(path)

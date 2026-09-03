@@ -47,6 +47,14 @@ def _is_pathlike(source) -> bool:
 
 def read(source, *, query=None, **kwargs):
     """Dispatch `source` to the right reader. See the module docstring."""
+    if hasattr(source, "read") and not _is_pathlike(source):
+        # a BytesIO/file object would fall through to the SQL branch and die
+        # with "needs a query" — a lie about what went wrong
+        raise TypeError(
+            "crivo.read takes a path, URL, or DB connection — not an open "
+            "file object. Write the buffer to a temp file first, or hand it "
+            "to pandas directly and pass the DataFrame to crivo."
+        )
     scheme = _scheme(source)
     if scheme in {"http", "https"}:
         from crivo.readers import remote
@@ -58,6 +66,17 @@ def read(source, *, query=None, **kwargs):
             "with fsspec or your cloud client and pass the DataFrame straight to "
             "crivo.diagnose/crivo.clean (they stamp lineage on any frame)."
         )
+    if (
+        not scheme  # "sqlite:///file.db" is a URL for SQLAlchemy, not a bare file
+        and _is_pathlike(source)
+        and str(source).lower().endswith((".db", ".sqlite", ".sqlite3"))
+    ):
+        # a bare sqlite file: open/query/close it ourselves — demanding a
+        # pre-opened connection for the most common local-database case was
+        # pure ceremony
+        from crivo.readers import sql
+
+        return sql.read_sqlite_file(source, query=query, **kwargs)
     if (
         query is not None
         or scheme.split("+")[0] in _SQL_SCHEMES

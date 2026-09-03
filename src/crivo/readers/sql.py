@@ -11,6 +11,30 @@ connection (which needs no SQLAlchemy at all) is.
 import pandas as pd
 
 
+def read_sqlite_file(path, query=None, **kwargs) -> pd.DataFrame:
+    """Open a local sqlite file, run `query`, close — always close. Without a
+    query the error teaches: it lists the tables the file actually holds."""
+    import sqlite3
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"no such database file: {p}")
+    conn = sqlite3.connect(p)
+    try:
+        if query is None:
+            rows = conn.execute(
+                "select name from sqlite_master where type='table' order by name"
+            ).fetchall()
+            tables = ", ".join(name for (name,) in rows) or "(no tables)"
+            raise ValueError(
+                f"{p.name}: pass query='select ...' — tables here: {tables}"
+            )
+        return pd.read_sql(query, conn, **kwargs)
+    finally:
+        conn.close()
+
+
 def read_sql(source, query=None, **kwargs) -> pd.DataFrame:
     """Read `query` against `source` into a DataFrame.
 
