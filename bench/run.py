@@ -21,6 +21,7 @@ from bench import corpus
 from bench.external import load_scored_pair
 from bench.score import score_end_to_end, score_pair
 from bench.truth import GroundTruth
+from crivo.detect import detect_all
 
 EXTERNAL = ["hospital", "flights", "beers", "rayyan"]
 _MARK_START, _MARK_END = "<!-- bench:start -->", "<!-- bench:end -->"
@@ -247,6 +248,28 @@ def run(
     if write_readme:
         _write_readme(readme, report)
     return report
+
+
+def sweep(entries: list[dict] | None = None, seeds: int = 10) -> list[dict]:
+    """The corpus as a fuzzer (arc W3/H2): run detect+clean over expanded
+    entries hunting EXCEPTIONS, not scores. Returns the ledger — one entry
+    per crash with the dataset name and error — and an empty ledger is the
+    acceptance bar. Never raises for a single dataset's failure."""
+    from crivo.autoclean import clean as _clean
+
+    if entries is None:
+        entries = corpus.full_corpus(seeds=seeds)
+    ledger = []
+    for entry in entries:
+        try:
+            _, dirty, _ = corpus.build(entry)
+            detect_all(dirty, name=entry["name"])
+            _clean(dirty)
+        except Exception as exc:  # noqa: BLE001 - the whole point is catching them
+            ledger.append(
+                {"name": entry["name"], "error": f"{type(exc).__name__}: {exc}"}
+            )
+    return ledger
 
 
 def main(argv: list[str] | None = None) -> int:

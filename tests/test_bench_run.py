@@ -52,6 +52,27 @@ def test_run_smoke_scores_corpus_and_writes_artifacts(tmp_path):
     }
 
 
+def test_sweep_hunts_exceptions_and_reports_a_ledger(monkeypatch):
+    """Arc W3/H2: the corpus doubles as a fuzzer — sweep() runs detect+clean
+    over expanded entries hunting EXCEPTIONS (not scores) and returns the
+    ledger. A healthy slice yields an empty ledger; a booby-trapped detector
+    lands in it with the dataset name and error, never a crash."""
+    from bench import run as bench_run
+    from bench.corpus import SMOKE
+
+    ledger = bench_run.sweep(entries=SMOKE[:2])
+    assert ledger == []
+
+    def boom(df, name="df"):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(bench_run, "detect_all", boom)
+    ledger = bench_run.sweep(entries=SMOKE[:2])
+    assert len(ledger) == 2
+    assert all("kaboom" in entry["error"] for entry in ledger)
+    assert ledger[0]["name"] == SMOKE[0]["name"]
+
+
 def test_readme_rewrite_is_marker_scoped_and_full_only(tmp_path):
     import pytest
 
