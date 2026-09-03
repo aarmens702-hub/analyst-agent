@@ -75,6 +75,8 @@ KEY_ENV_VARS = (
     "CRIVO_MODEL",
     "CRIVO_BASE_URL",
     "CRIVO_API_KEY",
+    "CRIVO_STALL_S",
+    "CRIVO_MAX_CALL_S",
 )
 
 DEFAULT_MODEL = "deepseek-v4-pro"
@@ -86,6 +88,18 @@ TEMPERATURE = 0.0
 # can think without bound. This is the ceiling on one call, start to finish.
 MAX_CALL_S = 420
 STALL_S = 90  # no bytes at all for this long means the stream is dead
+
+
+def stall_budget_s() -> float:
+    """STALL_S, env-tunable (CRIVO_STALL_S): a local model can take minutes
+    loading weights before its first token, which is not a dead stream."""
+    return float(os.environ.get("CRIVO_STALL_S") or STALL_S)
+
+
+def call_budget_s() -> float:
+    """MAX_CALL_S, env-tunable (CRIVO_MAX_CALL_S) for slow local endpoints."""
+    return float(os.environ.get("CRIVO_MAX_CALL_S") or MAX_CALL_S)
+
 
 _client: OpenAI | None = None
 _claude_client = None
@@ -138,6 +152,11 @@ def _get_openai_client() -> OpenAI:
             raise RuntimeError(
                 "CRIVO_PROVIDER=openai needs CRIVO_BASE_URL — the endpoint's /v1 "
                 "root (Ollama example: http://localhost:11434/v1)"
+            )
+        if not base_url.startswith(("http://", "https://")):
+            raise RuntimeError(
+                f"CRIVO_BASE_URL must start with http:// or https:// — got "
+                f"{base_url!r} (a bare host dies deep in the SDK instead)"
             )
         _openai_client = OpenAI(
             api_key=os.environ.get("CRIVO_API_KEY", "local-no-key"),
@@ -240,7 +259,9 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
         # against a real local socket -- it is not just a connect timeout), so
         # it independently catches true wire silence for the real client. The
         # wall-clock checks below no longer assume that is enough on its own.
-        timeout=httpx.Timeout(connect=15.0, read=STALL_S, write=30.0, pool=15.0),
+        timeout=httpx.Timeout(
+            connect=15.0, read=stall_budget_s(), write=30.0, pool=15.0
+        ),
     )
     yield from _watched(stream, _deepseek_text)
 
@@ -271,18 +292,19 @@ def _watched(stream, extract) -> Iterator[str]:
 
     threading.Thread(target=pump, daemon=True).start()
 
+    call_budget, stall_budget = call_budget_s(), stall_budget_s()
     started = last_progress = time.monotonic()
     try:
         while True:
             now = time.monotonic()
-            call_left = MAX_CALL_S - (now - started)
-            stall_left = STALL_S - (now - last_progress)
+            call_left = call_budget - (now - started)
+            stall_left = stall_budget - (now - last_progress)
             if call_left <= 0:
                 raise TimeoutError(
-                    f"gave up after {MAX_CALL_S}s of thinking with no complete reply"
+                    f"gave up after {call_budget:g}s of thinking with no complete reply"
                 )
             if stall_left <= 0:
-                raise TimeoutError(f"gave up after {STALL_S}s of silence")
+                raise TimeoutError(f"gave up after {stall_budget:g}s of silence")
 
             try:
                 item = chunks.get(timeout=min(call_left, stall_left))

@@ -112,6 +112,8 @@ def test_key_env_vars_registry_covers_every_env_var_the_module_reads():
         "CRIVO_MODEL",
         "CRIVO_BASE_URL",
         "CRIVO_API_KEY",
+        "CRIVO_STALL_S",
+        "CRIVO_MAX_CALL_S",
     }
     source = inspect.getsource(llm)
     reads = set(re.findall(r'environ(?:\.get\(|\[)\s*"([A-Z_]+)"', source))
@@ -309,3 +311,24 @@ def test_openai_provider_selects_a_generic_endpoint_behind_the_same_seam(monkeyp
         "model": "llama3.3",
         "temperature": 0.0,
     }
+
+
+def test_seam_hardening_url_scheme_and_env_stream_budgets(monkeypatch):
+    """Arc W3/H6: a CRIVO_BASE_URL that isn't http(s) must fail with the
+    scheme named (a pasted 'localhost:11434' would otherwise die deep in the
+    SDK), and the stream budgets must be env-tunable — a local model's slow
+    first token would be killed as a dead stream at the hardcoded 90s."""
+    monkeypatch.setenv("CRIVO_PROVIDER", "openai")
+    monkeypatch.setattr(llm, "_openai_client", None, raising=False)
+    monkeypatch.setenv("CRIVO_BASE_URL", "localhost:11434/v1")
+    with pytest.raises(RuntimeError, match="http"):
+        list(llm.generate([{"role": "user", "content": "hi"}]))
+
+    monkeypatch.setenv("CRIVO_STALL_S", "240")
+    monkeypatch.setenv("CRIVO_MAX_CALL_S", "900")
+    assert llm.stall_budget_s() == 240.0
+    assert llm.call_budget_s() == 900.0
+    monkeypatch.delenv("CRIVO_STALL_S")
+    monkeypatch.delenv("CRIVO_MAX_CALL_S")
+    assert llm.stall_budget_s() == llm.STALL_S
+    assert llm.call_budget_s() == llm.MAX_CALL_S
