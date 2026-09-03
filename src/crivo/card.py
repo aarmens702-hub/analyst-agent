@@ -24,6 +24,18 @@ class AnswerCard:
     intent: dict = field(default_factory=dict)  # P3 intent gate verdict
     created: str = ""
 
+    @property
+    def images(self) -> list:
+        """Chart/image paths the kernel saved while this card's cells ran —
+        aggregated from the per-cell records (P3 §5): a chart drawn on the
+        way to an answer is part of the answer, not an orphan file."""
+        out: list = []
+        for cell in self.cells:
+            for path in cell.get("display_paths") or ():
+                if path not in out:
+                    out.append(path)
+        return out
+
     def to_markdown(self) -> str:
         lines = [f"## answer card {self.card_id}", "", f"**Q:** {self.question}", ""]
         lines += [self.answer.strip(), ""]

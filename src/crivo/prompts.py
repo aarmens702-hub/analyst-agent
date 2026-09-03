@@ -18,6 +18,9 @@ neither:
 
 <answer>
 Your final answer to the user's question, in plain language with the key numbers.
+Then ONE short paragraph starting "How this was computed:" saying, in plain
+English, what the executed code did and what the assert checks verified —
+for a reader who will never open the code.
 </answer>
 
 You may think briefly in plain text before the tag, but only the tag's content
@@ -102,7 +105,8 @@ FORCED_ANSWER_PROMPT = """\
 You have reached the cell budget for this question. You must now respond with a
 single <answer>...</answer> tag and nothing else. Summarize what you established
 from the cells that ran; if the question could not be fully answered, state
-plainly what is missing and why.
+plainly what is missing and why. End with the same one-paragraph
+"How this was computed:" note describing what actually executed.
 """
 
 

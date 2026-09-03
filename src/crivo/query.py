@@ -59,6 +59,12 @@ class Answer:
     def lineage(self) -> dict:
         return self.card.lineage
 
+    @property
+    def images(self) -> list:
+        """Chart paths the kernel saved on the way to this answer (P3 §5) —
+        the notebook card embeds the ones that still exist as data URIs."""
+        return self.card.images
+
     def __repr__(self) -> str:
         return self.card.to_markdown()
 

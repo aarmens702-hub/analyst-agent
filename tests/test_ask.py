@@ -23,6 +23,41 @@ def test_ask_without_a_key_raises_before_any_session_spins_up(monkeypatch):
     assert not spun, "no session may be constructed without a key"
 
 
+def test_answer_images_delegate_and_render_as_data_uris(tmp_path):
+    """P3 §5 wrapper: Answer.images mirrors the card's aggregated chart
+    paths, and the notebook card embeds existing files as self-contained
+    data URIs (inline-only doctrine — the card must survive export);
+    a missing file is skipped, never a crash, never a broken img tag."""
+    import base64
+
+    from crivo import notebook
+    from crivo.card import AnswerCard
+    from crivo.query import Answer
+
+    png = tmp_path / "chart-001.png"
+    png.write_bytes(b"png-bytes-for-embedding")
+    card = AnswerCard(
+        card_id="c1",
+        session="s1",
+        question="plot revenue?",
+        answer="Done.",
+        cells=[
+            {
+                "status": "ok",
+                "code": "plt.plot(...)",
+                "display_paths": [str(png), str(tmp_path / "gone.png")],
+            }
+        ],
+    )
+    answer = Answer(card, [])
+    assert answer.images == [str(png), str(tmp_path / "gone.png")]
+
+    html = notebook.answer_html(answer)
+    expected = base64.b64encode(png.read_bytes()).decode()
+    assert f"data:image/png;base64,{expected}" in html
+    assert "gone.png" not in html
+
+
 def test_ask_gate_matches_the_configured_provider(monkeypatch):
     """P3: the gate demands what the CONFIGURED provider actually needs —
     openai wants an endpoint and model (keys optional: local servers ignore

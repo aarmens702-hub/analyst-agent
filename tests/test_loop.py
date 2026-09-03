@@ -106,6 +106,36 @@ def test_parse_tags():
     assert parse_tags("<execute>a</execute><answer>b</answer>")[0] == "malformed"
 
 
+def test_model_drawn_charts_land_on_the_card(session, monkeypatch):
+    """P3 §5 (Aarmen-approved 2026-09-03): the kernel already saves every
+    image/png the model draws; the loop used to filter DisplayItems out,
+    leaving orphan files. A chart made while answering belongs ON the card —
+    while dropped-oversize items and non-image display data stay off it."""
+    from crivo.kernel.client import DisplayItem
+
+    monkeypatch.setattr(
+        llm,
+        "generate",
+        scripted_generate(
+            [
+                "<execute>result = 1\nassert result == 1\nresult</execute>",
+                "<answer>Chart drawn.</answer>",
+            ]
+        ),
+    )
+    FakeClient.script = [
+        [
+            DisplayItem("image/png", "img-001.png"),
+            DisplayItem("image/png", "(dropped: 9000000 bytes)", True),
+            DisplayItem("text/html", "<table>x</table>"),
+            ok_result(value="1", registry=[{"name": "result", "type": "int"}]),
+        ]
+    ]
+
+    card = card_from(drive(session.run_turn("plot something")))
+    assert card.images == ["img-001.png"]
+
+
 def test_full_turn_produces_card_with_lifted_checks(session, monkeypatch):
     monkeypatch.setattr(
         llm,

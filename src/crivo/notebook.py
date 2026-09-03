@@ -13,7 +13,9 @@ functions RETURN the HTML string; they never call `display()`.
 Identity tokens are the project's 'verified ledger' look — docs/assets/terminal.svg.
 """
 
+import base64
 import html
+from pathlib import Path
 
 from crivo.detect import SINGLE_FRAME
 
@@ -261,6 +263,17 @@ def answer_html(answer):
         parts.append(
             f'<div style="margin:1px 0;">'
             f"{_span('no checks lifted — see flags', GRADE['GATE'], italic=True)}"
+            f"</div>"
+        )
+    for image_path in getattr(answer, "images", []):
+        p = Path(image_path)
+        if not p.is_file():
+            continue  # a missing chart file is a skip, never a broken img
+        encoded = base64.b64encode(p.read_bytes()).decode()
+        parts.append(
+            f'<div style="margin:6px 0 4px;">'
+            f'<img src="data:image/png;base64,{encoded}" alt="chart" '
+            f'style="max-width:100%;border:1px solid {BORDER};border-radius:6px;"/>'
             f"</div>"
         )
     if answer.code:
