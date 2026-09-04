@@ -7,7 +7,7 @@ by the hand-written session generators (run_turn for questions, clean for
 
 import json
 
-from crivo import provenance
+from crivo import llm, provenance
 from crivo.events import (
     ArtifactSaved,
     CardReady,
@@ -56,6 +56,46 @@ def _manifest(session) -> str:
     )
 
 
+class _TurnInterrupts:
+    """Scope Ctrl-C for one turn (A0 R2): the first press cancels the
+    in-flight model call via llm.request_cancel and the turn fails cleanly a
+    beat later (CallCancelled through the turn's own error path); the second
+    press exits as before. Installed only around a turn, so an interrupt at
+    the prompt still means leaving. Off the main thread (no signal access)
+    it degrades to today's behavior."""
+
+    def __init__(self, print_fn) -> None:
+        self.print_fn = print_fn
+        self.pressed = 0
+        self._prev = None
+        self._installed = False
+
+    def handle(self, signum=None, frame=None) -> None:
+        self.pressed += 1
+        if self.pressed == 1:
+            llm.request_cancel()
+            self.print_fn("\n· canceling the model call (Ctrl-C again to exit)")
+            return
+        raise KeyboardInterrupt
+
+    def __enter__(self):
+        import signal
+
+        try:
+            self._prev = signal.signal(signal.SIGINT, self.handle)
+            self._installed = True
+        except ValueError:  # not the main thread
+            self._installed = False
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        if self._installed:
+            import signal
+
+            signal.signal(signal.SIGINT, self._prev)
+        return False
+
+
 def run_repl(session, auto_run: bool = False, input_fn=input, print_fn=print) -> None:
     """Drive a session from the terminal until /quit, EOF, or interrupt."""
     print_fn(BANNER)
@@ -76,18 +116,19 @@ def run_repl(session, auto_run: bool = False, input_fn=input, print_fn=print) ->
                 print_fn(_LAST_TRACE[0] if _LAST_TRACE else "no stored traceback")
                 continue
             try:
-                if line.split()[:1] == ["/load"]:
-                    _load(session, line, print_fn)
-                elif line.split()[:1] == ["/clean"]:
-                    _clean(session, line, auto_run, input_fn, print_fn)
-                elif line.split()[:1] == ["/skills"]:
-                    _skills(session, line, print_fn)
-                elif line.split()[:1] == ["/why"]:
-                    _why(session, line, print_fn)
-                elif line.split()[:1] == ["/clean-family"]:
-                    _clean_family(session, line, auto_run, input_fn, print_fn)
-                else:
-                    _drive(session.run_turn(line), auto_run, input_fn, print_fn)
+                with _TurnInterrupts(print_fn):
+                    if line.split()[:1] == ["/load"]:
+                        _load(session, line, print_fn)
+                    elif line.split()[:1] == ["/clean"]:
+                        _clean(session, line, auto_run, input_fn, print_fn)
+                    elif line.split()[:1] == ["/skills"]:
+                        _skills(session, line, print_fn)
+                    elif line.split()[:1] == ["/why"]:
+                        _why(session, line, print_fn)
+                    elif line.split()[:1] == ["/clean-family"]:
+                        _clean_family(session, line, auto_run, input_fn, print_fn)
+                    else:
+                        _drive(session.run_turn(line), auto_run, input_fn, print_fn)
             except (EOFError, KeyboardInterrupt):
                 raise
             except Exception as exc:  # noqa: BLE001 — one turn must not strand the rest

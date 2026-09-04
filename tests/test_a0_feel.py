@@ -59,6 +59,34 @@ def test_telemetry_span_writes_jsonl(tmp_path, monkeypatch):
     assert row["dur_s"] >= 0
 
 
+def test_turn_interrupts_first_press_cancels_second_exits(monkeypatch):
+    """A0 R2 wiring: mid-turn Ctrl-C cancels the in-flight call and keeps the
+    session; pressing again means leaving, as before."""
+    from crivo import repl
+
+    canceled: list = []
+    monkeypatch.setattr(repl.llm, "request_cancel", lambda: canceled.append(1))
+    printed: list = []
+    ti = repl._TurnInterrupts(printed.append)
+
+    ti.handle()
+    assert canceled == [1]
+    assert any("Ctrl-C again" in p for p in printed)
+    with pytest.raises(KeyboardInterrupt):
+        ti.handle()
+
+
+def test_turn_interrupts_installs_and_restores_the_handler():
+    import signal
+
+    from crivo import repl
+
+    prev = signal.getsignal(signal.SIGINT)
+    with repl._TurnInterrupts(lambda *_: None) as ti:
+        assert signal.getsignal(signal.SIGINT) == ti.handle
+    assert signal.getsignal(signal.SIGINT) is prev
+
+
 def test_generate_emits_call_span(tmp_path, monkeypatch):
     path = tmp_path / "trace.jsonl"
     monkeypatch.setenv("CRIVO_TELEMETRY", str(path))
