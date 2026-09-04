@@ -265,6 +265,13 @@ def main(argv: list[str] | None = None) -> int:
         help="auto = one ENFORCE policy batching every AUTO disease with a "
         "registered fixer (the M1 batched arm; T1.4)",
     )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="run each case N times and report pass^k consistency (A4); "
+        "N model runs per case, so this is a paid choice",
+    )
     args = parser.parse_args(argv)
     args.policy_records = []
     if args.policies == "auto":
@@ -290,25 +297,32 @@ def main(argv: list[str] | None = None) -> int:
         picked = [e for e in picked if e["name"] in wanted]
 
     suffix = ".ceiling" if args.human_gates == "approve" else ""
+    repeat = max(1, args.repeat)
     rows = []
     for entry in picked:
-        out = RESULTS_DIR / f"{entry['name']}{suffix}.json"
-        if out.exists() and not args.force:
-            rows.append(json.loads(out.read_text()))
-            print(f"{entry['name']}: already on disk, skipped (R5)")
-            continue
-        row = _run_case(entry, args)
-        out.write_text(json.dumps(row, indent=2, default=str))
-        repair = (row.get("scores") or {}).get("repair", {})
-        calls = row.get("calls") or {}
-        print(
-            f"{row['name']}: {row['status']}"
-            f" | repair F1 {repair.get('f1')}"
-            f" | {row['wall_secs']}s | {row.get('events', 0)} events"
-            f" | {calls.get('count', 0)} calls"
-            f" | {calls.get('new_work_tokens', 0)} new-work tok"
-        )
-        rows.append(row)
+        for run_i in range(repeat):
+            # a repeated case needs a distinct file per run so pass^k has k
+            # rows to score; a single run keeps the plain name (resume/skip)
+            tag = f".r{run_i + 1}" if repeat > 1 else ""
+            out = RESULTS_DIR / f"{entry['name']}{suffix}{tag}.json"
+            if out.exists() and not args.force:
+                rows.append(json.loads(out.read_text()))
+                print(f"{entry['name']}{tag}: already on disk, skipped (R5)")
+                continue
+            row = _run_case(entry, args)
+            if repeat > 1:
+                row["run"] = run_i + 1
+            out.write_text(json.dumps(row, indent=2, default=str))
+            repair = (row.get("scores") or {}).get("repair", {})
+            calls = row.get("calls") or {}
+            print(
+                f"{row['name']}{tag}: {row['status']}"
+                f" | repair F1 {repair.get('f1')}"
+                f" | {row['wall_secs']}s | {row.get('events', 0)} events"
+                f" | {calls.get('count', 0)} calls"
+                f" | {calls.get('new_work_tokens', 0)} new-work tok"
+            )
+            rows.append(row)
 
     ok = [r for r in rows if r.get("status") == "ok" and r.get("scores")]
     ok_calls = [r.get("calls") or {} for r in ok]
@@ -321,6 +335,20 @@ def main(argv: list[str] | None = None) -> int:
         f" | new-work tokens mean "
         f"{_mean([c.get('new_work_tokens') for c in ok_calls])}"
     )
+
+    if repeat > 1:
+        from bench import consistency
+
+        agg = consistency.aggregate_consistency(consistency.group_by_case(rows))
+        print(
+            f"\nconsistency (k={repeat}): mean pass^k "
+            f"{round(agg['mean_pass_k'], 3)} | mean pass@1 "
+            f"{round(agg['mean_pass_at_1'], 3)}"
+        )
+        if agg["flaky"]:
+            print(f"  flaky (solved some runs, not all): {', '.join(agg['flaky'])}")
+        if agg["stable_solved"]:
+            print(f"  stable solved every run: {', '.join(agg['stable_solved'])}")
     return 0 if ok else 1
 
 

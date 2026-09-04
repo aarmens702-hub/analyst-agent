@@ -100,7 +100,9 @@ def test_drive_approve_policy_runs_human_gates_but_never_admissions():
     seen = []
 
     def gen():
-        a = yield GateRequest(code="fix()", iteration=1, grade="HUMAN", title="d12 · person call")
+        a = yield GateRequest(
+            code="fix()", iteration=1, grade="HUMAN", title="d12 · person call"
+        )
         seen.append(a)
         a = yield GateRequest(
             code="admit",
@@ -183,6 +185,39 @@ def test_run_case_gives_each_case_an_isolated_skills_dir(tmp_path, monkeypatch):
     assert row["model"]["provider"]  # provenance: every row names its model
     assert "skills_dir" in captured, "Session must get an explicit skills_dir"
     assert captured["skills_dir"].startswith(str(tmp_path / "res"))
+
+
+def test_repeat_runs_each_case_k_times_with_distinct_files(tmp_path, monkeypatch):
+    """--repeat k gives pass^k k rows per case under distinct .rN names, and
+    tags each row with its run index (A4)."""
+    monkeypatch.setenv(agent_run.KEY_VARS[0], "sk-test")
+    monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(
+        agent_run.corpus,
+        "SMOKE",
+        [{"name": "rep_case", "diseases": [4]}],
+        raising=False,
+    )
+    seen: list = []
+
+    def fake_run(entry, args):
+        seen.append(entry["name"])
+        return {
+            "name": entry["name"],
+            "status": "ok",
+            "wall_secs": 0.1,
+            "scores": {"repair": {"f1": 1.0}},
+        }
+
+    monkeypatch.setattr(agent_run, "_run_case", fake_run)
+    agent_run.main(["--sample", "1", "--repeat", "3"])
+
+    assert seen == ["rep_case"] * 3
+    files = sorted(p.name for p in tmp_path.glob("rep_case.r*.json"))
+    assert files == ["rep_case.r1.json", "rep_case.r2.json", "rep_case.r3.json"]
+    import json as _json
+
+    assert _json.loads((tmp_path / "rep_case.r2.json").read_text())["run"] == 2
 
 
 def test_policies_auto_mints_one_record_and_reaches_the_session(
@@ -337,9 +372,7 @@ def test_call_stats_sums_client_call_spans_and_tolerates_gaps(tmp_path):
     }
 
 
-def test_main_prints_calls_per_case_and_in_the_aggregate(
-    tmp_path, monkeypatch, capsys
-):
+def test_main_prints_calls_per_case_and_in_the_aggregate(tmp_path, monkeypatch, capsys):
     """T1.5: the per-case line and the final aggregate carry the calls
     summary (count, new-work tokens) alongside the scores."""
     monkeypatch.setenv(agent_run.KEY_VARS[0], "sk-test")
