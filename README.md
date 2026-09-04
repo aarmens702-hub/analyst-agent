@@ -117,6 +117,23 @@ model-written code stops at a gate: you run it, send a note back, or skip it.
 The kernel is a subprocess by default, or a `--network=none` container in
 sandbox mode.
 
+## Models
+
+DeepSeek is the default; the same seam speaks to Anthropic and to any
+OpenAI-compatible endpoint, local models included:
+
+```bash
+DEEPSEEK_API_KEY=sk-...                       # default provider
+CRIVO_PROVIDER=claude ANTHROPIC_API_KEY=...   # Anthropic
+CRIVO_PROVIDER=openai \
+  CRIVO_BASE_URL=http://localhost:11434/v1 \
+  CRIVO_MODEL=qwen3:32b python -m crivo       # Ollama, vLLM, OpenRouter, ...
+```
+
+`CRIVO_MODEL` overrides the model on any provider; local servers need no
+key (`CRIVO_API_KEY` if yours does). Slow local endpoints can raise the
+stream budgets with `CRIVO_STALL_S` / `CRIVO_MAX_CALL_S`.
+
 ## MCP server
 
 Any MCP client can drive crivo as tools. The gates follow the same rule
