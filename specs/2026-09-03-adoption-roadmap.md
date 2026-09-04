@@ -6,6 +6,14 @@ This is a plan, not a build; each item gets its own WRAP spec before code.
 
 ## A. Model breadth
 
+**Status correction 2026-09-04:** largely built already at the seam.
+`CRIVO_PROVIDER=openai` + `CRIVO_BASE_URL` serve any OpenAI-compatible
+endpoint including Ollama and vLLM, `CRIVO_API_KEY` is optional for local
+servers, and `CRIVO_MODEL` selects models on every provider (llm.py). What
+remains of this item: README/docs coverage of the env vars, a smoke matrix
+(one recorded/skip-if-no-key run per provider), and bench model stamping
+(rides A0.4 telemetry). The paragraph below stands as the original rationale.
+
 **What.** The analyst currently speaks DeepSeek and Anthropic through the one
 `generate()` seam in `llm.py`. "My key is OpenAI" or "I run local models"
 currently means "cannot use the analyst at all" — the hardest adoption wall we
