@@ -111,6 +111,31 @@ class Plan:
         )
 
 
+def executor_of(origin: str) -> str:
+    """The executor an origin string names (T2.6): 'skill:x' -> skill,
+    'autoclean:dNN' -> autoclean, '' or 'model' -> model."""
+    return origin.split(":", 1)[0] if origin else "model"
+
+
+def trajectory(plan: Plan, actual_by_id: dict) -> list[dict]:
+    """Steps whose executed executor diverged from the plan (T2.6, the mailo
+    trajectory-vs-assertions insight): a step planned for autoclean that fell
+    through to the model is a divergence worth measuring even when the fix
+    still verified. actual_by_id maps finding_id -> the origin string of what
+    ran. Steps with no recorded actual are skipped, not counted as diverged."""
+    out = []
+    for s in plan.steps:
+        origin = actual_by_id.get(s.finding_id)
+        if origin is None:
+            continue
+        actual = executor_of(origin)
+        if actual != s.executor:
+            out.append(
+                {"finding_id": s.finding_id, "planned": s.executor, "actual": actual}
+            )
+    return out
+
+
 def step_id(finding: dict, index: int) -> str:
     """The finding's own "id" when it carries one, else "f{index}" by input
     position. One function so build_plan and any later status-recording match

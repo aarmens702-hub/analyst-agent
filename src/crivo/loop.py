@@ -596,6 +596,22 @@ class Session:
             self.transcript.append(
                 "plan", version=plan_obj.version, plan=plan_obj.to_dict()
             )
+            # trajectory: which planned steps ran on a different executor than
+            # planned (e.g. a deterministic fix that fell through to the
+            # model). Observer-only telemetry (T2.6, mailo trajectory insight)
+            from crivo import telemetry
+
+            actual_by_id = {
+                plan_mod.step_id(fixable[j], j): rec.get("origin", "")
+                for j, rec in enumerate(state["records"])
+            }
+            diverged = plan_mod.trajectory(plan_obj, actual_by_id)
+            telemetry.emit(
+                "crivo.trajectory",
+                planned=len(plan_obj.steps),
+                diverged=len(diverged),
+                divergences=diverged[:20],
+            )
 
         yield from self._skill_pass(var, state["records"], state["admitted"])
         if any(r["status"] == "fixed" for r in state["records"]):

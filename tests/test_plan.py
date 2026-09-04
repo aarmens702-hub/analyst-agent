@@ -146,6 +146,34 @@ def test_diff_plan_flips_status_and_bumps_version():
     }
 
 
+def test_executor_of_maps_origin_strings():
+    from crivo.plan import executor_of
+
+    assert executor_of("autoclean:d04") == "autoclean"
+    assert executor_of("skill:fix-x") == "skill"
+    assert executor_of("model") == "model"
+    assert executor_of("") == "model"
+
+
+def test_trajectory_flags_only_diverged_steps_with_a_recorded_actual():
+    from crivo.plan import trajectory
+
+    findings = [
+        {"id": "a", "disease": 4, "grade": "AUTO", "slug": "sent"},
+        {"id": "b", "disease": 3, "grade": "GATE", "slug": "dates"},
+    ]
+    plan = build_plan(
+        findings,
+        router_fn=lambda f: {
+            "executor": "autoclean" if f["grade"] == "AUTO" else "model"
+        },
+    )
+    # a planned autoclean but ran model (fell through); b planned+ran model; a
+    # third id with no recorded actual must not count as a divergence
+    div = trajectory(plan, {"a": "model", "b": "model"})
+    assert div == [{"finding_id": "a", "planned": "autoclean", "actual": "model"}]
+
+
 def test_diff_plan_unknown_finding_id_raises_naming_it():
     plan = build_plan([_finding(1, "AUTO")], router_fn=_fake_router)
     with pytest.raises(ValueError, match="ghost"):

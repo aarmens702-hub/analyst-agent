@@ -3,7 +3,6 @@ CRIVO_PLAN_FIRST. Flag on: one plan approval arms a policy so the AUTO steps
 then run silently through M1's batched path. Flag off (default): the M1 flow
 is untouched. Driven with the test_clean_loop scripted harness."""
 
-
 import pytest
 from test_clean_loop import (
     REG,
@@ -130,6 +129,34 @@ def test_plan_lists_the_step_and_its_executor(session, monkeypatch):
     assert plan["steps"][0]["executor"] == "autoclean"
     assert plan["steps"][0]["disease"] == 4
     assert plan["steps"][0]["grade"] == "AUTO"
+
+
+def test_trajectory_telemetry_is_emitted_after_a_plan_run(
+    session, monkeypatch, tmp_path
+):
+    """A plan-first run emits one crivo.trajectory span (T2.6, observer-only):
+    the AUTO step ran on autoclean as planned, so zero divergences here."""
+    import json as _json
+
+    tele = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("CRIVO_TELEMETRY", str(tele))
+    monkeypatch.setenv("CRIVO_PLAN_FIRST", "on")
+    monkeypatch.setattr(llm, "generate", gen([FIX_A]))
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # autoclean apply (batched)
+        [ok()],  # verify
+        baseline(),
+        saved(),
+    ]
+    drive(session.clean("df"), decisions=[GateDecision("run")])
+
+    rows = [_json.loads(x) for x in tele.read_text().splitlines()]
+    traj = [r for r in rows if r["name"] == "crivo.trajectory"]
+    assert len(traj) == 1
+    assert traj[0]["attrs"]["planned"] == 1
+    assert traj[0]["attrs"]["diverged"] == 0
 
 
 def test_final_plan_records_the_executed_status(session, monkeypatch):
