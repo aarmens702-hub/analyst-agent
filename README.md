@@ -4,23 +4,24 @@
 
 <br>
 
-**Diagnose and clean a messy dataset in one line. No API key, and every fix is re-checked before it counts.**
+**An AI analyst for messy data. It diagnoses, cleans, and answers questions over your tables, and every fix and answer is re-checked before it counts.**
 
 [![ci](https://github.com/aarmens702-hub/analyst-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/aarmens702-hub/analyst-agent/actions/workflows/ci.yml)
 ![python](https://img.shields.io/badge/python-3.12-0e7a84)
 &nbsp;
-![no api key](https://img.shields.io/badge/no_API_key-0b2b30)
-![sandboxed](https://img.shields.io/badge/sandboxed-0b2b30)
 ![verified fixes](https://img.shields.io/badge/verified_fixes-0b2b30)
+![sandboxed](https://img.shields.io/badge/sandboxed-0b2b30)
+![keyless mode](https://img.shields.io/badge/keyless_mode-0b2b30)
 
-[What it does](#what-it-does) · [How it works](#how-it-works) · [The agent](#the-agent) · [MCP server](#mcp-server)
+[What it does](#what-it-does) · [How it works](#how-it-works) · [The analyst](#the-analyst) · [MCP server](#mcp-server)
 
 </div>
 
-Most tools will chat with your dataframe. None of them check whether the cleaning
-was right. crivo does. It reads a messy table, tells you what is broken,
-fixes the parts that are safe to fix, and re-runs the check on every fix before it
-keeps it. The half that does this needs no API key and no setup.
+Most tools will chat with your dataframe. None of them check whether what came
+back was right. crivo does. It reads a messy table, tells you what is broken,
+fixes what is safe to fix, answers your questions, and re-runs the check on
+every step before it keeps it. When all you need is the diagnosis, that half is
+plain Python and runs without a key.
 
 ## Start here
 
@@ -30,7 +31,22 @@ Not on PyPI yet, so install it from the repo:
 pip install git+https://github.com/aarmens702-hub/analyst-agent
 ```
 
-Then point it at a file or a DataFrame you already have:
+Set a model key and you have an analyst in your terminal:
+
+```bash
+echo 'DEEPSEEK_API_KEY=sk-...' > .env       # or ANTHROPIC_API_KEY
+python -m crivo
+```
+
+```
+/load data/messy.csv sales      load a file as a variable
+which region grew the most?     ask in plain english; the code is gated, then runs
+/clean sales                    diagnose, then fix one at a time
+/why                            where an answer came from, and whether it holds
+/skills                         the fixes it has learned and kept
+```
+
+No key handy? The library half works without one, straight from Python:
 
 ```python
 import crivo as cv
@@ -52,27 +68,28 @@ folders, a database connection, or a JSON API.
 
 ## What it does
 
+- Answers plain-english questions over your data and ships every answer with
+  the code it ran, the checks that passed, and where the numbers came from.
 - Runs 22 checks on any table and grades each finding: safe to fix, fix with a
   check, or needs a person.
 - Fixes the safe ones and re-checks every fix. If the check still fires, it
   throws the fix out and reports it instead of keeping a bad one.
+- Saves a fix that worked as a reusable skill, but only after it passes its own
+  test and you say yes.
 - Reads from files, compressed files, folders, databases, and JSON APIs, all
   through one `crivo.read`.
 - Shows up as a card in a notebook, and a data-quality chart with `.plot()`.
-- Ships every agent answer with the code it ran, the checks that passed, and
-  where the numbers came from.
-- Saves a fix that worked as a reusable skill, but only after it passes its own
-  test and you say yes.
 - Runs as an MCP server, so Claude Desktop, Cursor, or Claude Code can call it.
 - Has a headless mode for CI, where only the safe fixes run and the rest are
   reported.
 
 ## How it works
 
-**Two halves.** The keyless half (`diagnose`, `clean`, `read`) is plain Python.
-No key, no kernel, nothing to trust yet. The agent half writes and runs code for
-the harder fixes, but the model never sees your raw rows, only the schema and a
-few samples, and every step waits for your OK.
+**Two halves.** The analyst half is the model: it writes and runs the code that
+answers your questions and lands the harder fixes, but it never sees your raw
+rows, only the schema and a few samples, and every step waits for your OK. The
+library half (`diagnose`, `clean`, `read`) is plain Python: no key, no kernel,
+nothing to trust yet.
 
 **One rule for both.** A fix counts only when the check that found the problem
 stops firing, and the rows and untouched columns still line up. If it does not
@@ -91,28 +108,14 @@ Every finding gets one of three grades:
 | check | one plausible fix, worth confirming | fixed, then flagged |
 | person | a real judgement call | reported, never decided for you |
 
-## The agent
+## The analyst
 
-The keyless half tells you what is wrong. The agent is the part that fixes the
-hard cases, and it earns that with a stricter contract. Set a model key and run
-it:
-
-```bash
-echo 'DEEPSEEK_API_KEY=sk-...' > .env       # or ANTHROPIC_API_KEY
-python -m crivo
-```
-
-```
-/load data/messy.csv sales      load a file as a variable
-which region grew the most?     ask in plain english; the code is gated, then runs
-/clean sales                    diagnose, then fix one at a time
-/why                            where an answer came from, and whether it holds
-/skills                         the fixes it has learned and kept
-```
-
-Every line of model-written code stops at a gate. You run it, send a note back,
-or skip it. The kernel is a subprocess by default, or a `--network=none`
-container in sandbox mode.
+The analyst is the main event: it turns a question into pandas, runs it, and
+hands back an answer card with the code, the checks that passed, and the lineage
+behind every number. It earns that with a strict contract. Every line of
+model-written code stops at a gate: you run it, send a note back, or skip it.
+The kernel is a subprocess by default, or a `--network=none` container in
+sandbox mode.
 
 ## MCP server
 
@@ -131,8 +134,9 @@ and the calling agent never decides them.
 
 ## In one sentence
 
-It is the one-line report of ydata-profiling and the plain-english querying of
-pandas-ai, but with no API key and a receipt for every fix.
+It is the plain-english analysis of pandas-ai and the one-line report of
+ydata-profiling, but every fix and answer comes with a receipt, and the checks
+still run when there is no key at all.
 
 <details>
 <summary><b>The 22 checks</b></summary>
@@ -150,7 +154,7 @@ claim, not a silence.
 </details>
 
 <details>
-<summary><b>How the agent runs code safely</b></summary>
+<summary><b>How the analyst runs code safely</b></summary>
 
 <br>
 
@@ -197,17 +201,23 @@ Or anywhere else: `crivo diagnose file.csv --fail-on AUTO --json`.
 ## Benchmarks
 
 <!-- bench:start -->
-Numbers land here from `uv run python -m bench.run --full --write-readme`
-(the Proving Ground: synthetic corpus with planted ground truth + the Raha
-external datasets, scored cell-level). Until then, see `bench/RESULTS.md`.
+**Deterministic mode baseline** (2026-09-03, 1450 synthetic + 4 external datasets, cell-level scoring, 0 labels):
+
+| metric | value |
+|---|---|
+| detection micro-F1 (mean, silence = 0) | 0.732 |
+| repair F1, fully-fixable datasets | 0.983 |
+| survived-verification rate | 1.000 |
+
+Full tables: `bench/RESULTS.md`.
 <!-- bench:end -->
 
 ## Where it's at
 
-409 tests pass. The keyless half does no network, subprocess, or Docker work when
-you import it, so it is safe to use in any notebook cell. The agent half needs a
-model key and a kernel. MIT licensed. Not on PyPI yet; publishing is the next
-step.
+409 tests pass. The analyst half needs a model key and a kernel. The library
+half does no network, subprocess, or Docker work when you import it, so it is
+safe to use in any notebook cell. MIT licensed. Not on PyPI yet; publishing is
+the next step.
 
 ## Development
 
