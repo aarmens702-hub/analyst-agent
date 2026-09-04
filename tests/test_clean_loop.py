@@ -1,6 +1,10 @@
 """CLEAN-flow loop tests (P1 AC7): Session.clean() driven with scripted
 decisions, stubbed generate(), fake kernel. Covers fixed / skipped /
-rejected-then-fixed / verify-fail-revert / fail-at-cap / indicators."""
+rejected-then-fixed / verify-fail-revert / fail-at-cap / indicators.
+
+Since T1.4 this module is also the CRIVO_M1=off contract: the pre-M1 flow,
+event for event. M1's autoclean rung, fingerprint short-circuit, and policy
+batching are covered in test_a1_m1_loop.py."""
 
 import json
 from typing import ClassVar
@@ -114,6 +118,13 @@ def drive(turn, decisions=()):
             event = turn.send(answer)
     except StopIteration:
         return events
+
+
+@pytest.fixture(autouse=True)
+def _legacy_arm(monkeypatch):
+    """Pin the pre-M1 flow: these scripts predate the autoclean rung and the
+    fingerprint cells, and the kill switch must keep that flow reachable."""
+    monkeypatch.setenv("CRIVO_M1", "off")
 
 
 @pytest.fixture

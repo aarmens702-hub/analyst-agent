@@ -12,6 +12,14 @@ import sys
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _legacy_arm(monkeypatch):
+    """These scripts drive model-origin fixes into admission and predate the
+    T1.4 autoclean rung; the admission mechanics they check are the same in
+    both arms, so they run on the pinned CRIVO_M1=off flow."""
+    monkeypatch.setenv("CRIVO_M1", "off")
+
 from crivo import llm, skills
 from crivo.events import CardReady, GateDecision, GateRequest, Notice
 from crivo.loop import Session

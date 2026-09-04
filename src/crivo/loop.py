@@ -8,13 +8,14 @@ mechanism here — a traceback is an ordinary observation and the loop continues
 import ast
 import hashlib
 import json
+import os
 import re
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
-from crivo import llm, prompts, skills, snapshot, verify
+from crivo import llm, policy, prompts, router, skills, snapshot, verify
 from crivo.card import AnswerCard, lift_checks
 from crivo.events import (
     ArtifactSaved,
@@ -44,6 +45,12 @@ VALUE_PREVIEW = 300
 # was killed. Past the threshold, everything but the tail is summarised.
 COMPACT_AT_CHARS = 60_000
 COMPACT_KEEP_TURNS = 8  # trailing messages kept verbatim
+
+
+def _m1_enabled() -> bool:
+    """CRIVO_M1=off restores the pre-M1 flow exactly (the bench legacy arm,
+    T1.4 hunk D)."""
+    return os.environ.get("CRIVO_M1", "on") != "off"
 
 
 class KernelLost(RuntimeError):
@@ -99,10 +106,14 @@ class Session:
         preview: bool = True,
         snapshots: bool = True,
         resume: str | None = None,
+        policies: list | None = None,
     ) -> None:
         # R3: gates show consequence computed on a sampled scratch copy;
         # drivers that auto-approve can turn it off, since nobody reads it
         self.preview = preview
+        # T1.4 hunk D: standing approval policies (bench-only in M1; the
+        # interactive arming UX is M2's coherent-unit work)
+        self.policies = list(policies or [])
         # R8: verified fixes survive a kernel death via namespace snapshots
         self.snapshots = snapshots
         self.workspace_root = Path(workspace)
@@ -521,6 +532,12 @@ class Session:
             rec = yield from self._skill_attempt(
                 var, finding, i, len(fixable), baseline_cols
             )
+            if rec is None and _m1_enabled():
+                routed = router.route(finding)
+                if routed["executor"] == "autoclean":
+                    rec = yield from self._autoclean_attempt(
+                        var, finding, i, len(fixable), baseline_cols
+                    )
             if rec is None:
                 rec = yield from self._fix_mini_turn(
                     var, finding, i, len(fixable), baseline_cols
@@ -1037,6 +1054,19 @@ class Session:
         status, fix_source, verify_info = "failed", None, {}
         case: dict = {}
 
+        # T1.4 hunk C: one pre-fix content fingerprint per mini turn. Failed
+        # attempts revert the frame, so it stays valid across the loop; an
+        # empty stream (a harness kernel without crivo) disables the hook.
+        fp_cell = (
+            "from crivo.fingerprint import frame_fingerprint\n"
+            f"print(frame_fingerprint({var}))"
+        )
+        pre_fp = ""
+        if _m1_enabled():
+            _, fp_stream, _, _ = yield from self._exec_events(fp_cell, quiet=True)
+            if fp_stream.strip():
+                pre_fp = fp_stream.strip().splitlines()[-1]
+
         while attempts < CLEAN_MAX_ATTEMPTS:
             try:
                 resp = yield from self._generate_scoped(msgs)
@@ -1099,6 +1129,33 @@ class Session:
                 continue
 
             fix_source = body
+            if pre_fp:
+                _, after_stream, _, _ = yield from self._exec_events(
+                    fp_cell, quiet=True
+                )
+                after_fp = (
+                    after_stream.strip().splitlines()[-1]
+                    if after_stream.strip()
+                    else ""
+                )
+                if after_fp == pre_fp:
+                    # the cell ran and changed nothing: the check's verdict
+                    # cannot have moved either, so the verify pass is skipped
+                    # and the attempt still counts (research gap 1)
+                    verify_info = {"layer1": "skip", "error": "no state change"}
+                    msgs.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"attempt {attempts}/{CLEAN_MAX_ATTEMPTS} not "
+                                f"verified: your cell changed nothing in {var} "
+                                "(identical content fingerprint). Edit the "
+                                "data before finishing, or explain why no "
+                                "change is needed."
+                            ),
+                        }
+                    )
+                    continue
             vres, _, _, v_ev = yield from self._exec_events(
                 verify.verify_cell(var, finding, baseline_cols), quiet=True
             )
@@ -1215,6 +1272,99 @@ class Session:
             return {}, ev_id
         info["path"] = kernel_path
         return info, ev_id
+
+    def _autoclean_attempt(
+        self, var: str, finding: dict, i: int, n: int, baseline_cols: list[str]
+    ):
+        """The taxonomy's own fixer before paying a model call (M1, T1.4).
+
+        Only reachable for AUTO findings whose disease has a registered
+        deterministic fixer (router.route pins that). A standing policy may
+        batch the gate; otherwise the gate yields exactly like a skill's.
+        Verification and revert are the same cells every fix passes. Returns
+        None when the fix fails or is rejected, handing the finding to the
+        model exactly as a failed skill does."""
+        disease = finding["disease"]
+        fix_source = f"from crivo.autoclean import FIXERS\nfix = FIXERS[{disease}]"
+        code = verify.skill_apply_cell(var, fix_source, finding["columns"])
+        verdict = policy.evaluate(finding, self.policies)
+        silent = verdict["batched"]
+        decision_note = ""
+        t0 = time.monotonic()
+        evs: list[int] = []
+        title = (
+            f"autoclean {i}/{n} · d{disease:02d} {finding['slug']} · "
+            f"{finding['grade']} · {finding['evidence'][:60]}"
+        )
+
+        if silent:
+            decision_note = f"policy:{verdict['policy_id']}"
+            evs.append(
+                self.transcript.append("gate", action="run", note=decision_note)
+            )
+        else:
+            pv = yield from self._preview(var, code)
+            decision = yield GateRequest(
+                code, 1, title=title, preview=pv, grade=finding["grade"]
+            )
+            if not isinstance(decision, GateDecision):
+                decision = GateDecision("run")
+            evs.append(
+                self.transcript.append(
+                    "gate", action=decision.action, note=decision.note
+                )
+            )
+            if decision.action == "skip":
+                return {
+                    "finding": finding,
+                    "status": "skipped",
+                    "attempts": 0,
+                    "fix_source": fix_source,
+                    "verify": {},
+                    "transcript_evs": evs,
+                    "elapsed_s": round(time.monotonic() - t0, 1),
+                    "origin": f"autoclean:d{disease:02d}",
+                    "case": {},
+                }
+            if decision.action == "reject":
+                return None  # to the model, matching skill-reject behavior
+
+        result, _, _, ev_id = yield from self._exec_events(code, quiet=True)
+        evs.append(ev_id)
+        if result.status == "ok":
+            self._stamp_registry(result.registry, ev_id)
+            vres, _, _, v_ev = yield from self._exec_events(
+                verify.verify_cell(var, finding, baseline_cols), quiet=True
+            )
+            evs.append(v_ev)
+            if vres.status == "ok":
+                yield Notice(
+                    "autoclean",
+                    f"d{disease:02d} {finding['slug']} fixed with no model call"
+                    + (f" ({decision_note})" if silent else ""),
+                )
+                return {
+                    "finding": finding,
+                    "status": "fixed",
+                    "attempts": 0,
+                    "fix_source": fix_source,
+                    "verify": {"layer1": "pass", "by": f"autoclean:d{disease:02d}"},
+                    "transcript_evs": evs,
+                    "elapsed_s": round(time.monotonic() - t0, 1),
+                    "origin": f"autoclean:d{disease:02d}",
+                    "case": {},
+                }
+
+        _, _, _, rev_ev = yield from self._exec_events(
+            verify.revert_cell(var), quiet=True
+        )
+        evs.append(rev_ev)
+        yield Notice(
+            "autoclean",
+            f"d{disease:02d} deterministic fix did not verify — "
+            "handing to the model",
+        )
+        return None
 
     def _skill_attempt(
         self, var: str, finding: dict, i: int, n: int, baseline_cols: list[str]
