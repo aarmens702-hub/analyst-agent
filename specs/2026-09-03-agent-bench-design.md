@@ -37,6 +37,22 @@ loop.py R3 note).
 - R7 **Key from the project's own .env**; refuse to start without one, naming
   which vars were checked. Model choice is whatever `crivo.llm` resolves.
 
+## Addendum: the two-arm design (owner-approved 2026-09-03)
+
+- R8 **Governed arm (default).** HUMAN gates are skipped: a person's
+  authorisation is not the bench's to give. This is the product as shipped.
+- R9 **Ceiling arm (`--human-gates approve`).** Applies the owner's standing
+  pre-authorisation to judgement-call fix gates (the mechanism
+  `events.GateRequest.grade` was designed for). A skill admission (title
+  "admit skill …") is governance and stays skipped in every mode. Results
+  carry a `.ceiling` filename suffix and a `human_gates` field; the two arms
+  are reported as separate columns, and the governed-vs-ceiling gap is itself
+  a published number: the measured price of safety.
+- R10 **Gate visibility.** Every case records how many gates ran vs were
+  skipped, so a changed-nothing case explains itself. `--only` restricts a
+  pass to named cases, so the ceiling arm reruns only where gates were
+  skipped.
+
 ## Acceptance
 
 - `uv run python -m bench.agent_run --sample 2` completes on a machine with a

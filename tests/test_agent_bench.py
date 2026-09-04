@@ -71,6 +71,58 @@ def test_drive_skips_human_gates():
     assert seen[0].action == "skip"
 
 
+def test_drive_collects_gate_actions():
+    """The lane must record what it decided at each gate, so a case that
+    changed nothing can say WHY (skipped judgement calls are a result)."""
+    import time
+
+    from crivo.events import GateRequest
+
+    def gen():
+        yield GateRequest(code="a", iteration=1)
+        yield GateRequest(code="b", iteration=1, grade="HUMAN")
+
+    gates: list = []
+    agent_run._drive(
+        gen(), max_events=10, wall_cap=60.0, t0=time.monotonic(), gates=gates
+    )
+    assert gates == ["run", "skip"]
+
+
+def test_drive_approve_policy_runs_human_gates_but_never_admissions():
+    """--human-gates approve is the owner's standing pre-authorisation for
+    judgement-call fixes (the ceiling arm). Skill admission is governance and
+    stays skipped in every mode."""
+    import time
+
+    from crivo.events import GateRequest
+
+    seen = []
+
+    def gen():
+        a = yield GateRequest(code="fix()", iteration=1, grade="HUMAN", title="d12 · person call")
+        seen.append(a)
+        a = yield GateRequest(
+            code="admit",
+            iteration=1,
+            grade="HUMAN",
+            title="admit skill fix-x · d3 · reproduces the case it came from",
+        )
+        seen.append(a)
+
+    gates: list = []
+    agent_run._drive(
+        gen(),
+        max_events=10,
+        wall_cap=60.0,
+        t0=time.monotonic(),
+        gates=gates,
+        human_gates="approve",
+    )
+    assert [d.action for d in seen] == ["run", "skip"]
+    assert gates == ["run", "skip"]
+
+
 def test_drive_event_cap_aborts():
     import time
 
@@ -122,7 +174,9 @@ def test_run_case_gives_each_case_an_isolated_skills_dir(tmp_path, monkeypatch):
     df = pd.DataFrame({"a": [1, 2]})
     monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, None))
     monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
-    args = argparse.Namespace(docker=False, max_events=10, wall_cap=5.0)
+    args = argparse.Namespace(
+        docker=False, max_events=10, wall_cap=5.0, human_gates="skip"
+    )
 
     row = agent_run._run_case({"name": "iso_case", "diseases": [1]}, args)
     assert row["status"] == "no_cleaned_output"

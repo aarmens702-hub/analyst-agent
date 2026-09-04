@@ -55,10 +55,21 @@ def _require_key() -> None:
         )
 
 
-def _drive(gen, max_events: int, wall_cap: float, t0: float) -> int:
-    """repl._drive, headless: run plain gates, skip HUMAN ones, swallow the
-    rendering. HUMAN gates are a person's pre-authorisation to give, and the
-    bench has no person (events.GateRequest.grade)."""
+def _drive(
+    gen,
+    max_events: int,
+    wall_cap: float,
+    t0: float,
+    gates: list | None = None,
+    human_gates: str = "skip",
+) -> int:
+    """repl._drive, headless: run plain gates, swallow the rendering.
+
+    HUMAN gates default to skip — a person's authorisation is not the bench's
+    to give. `human_gates="approve"` applies the owner's standing
+    pre-authorisation to judgement-call fixes (the ceiling arm), but a skill
+    admission (title "admit skill …") is governance and stays skipped in
+    every mode."""
     from crivo.events import GateDecision, GateRequest
 
     events = 0
@@ -74,8 +85,13 @@ def _drive(gen, max_events: int, wall_cap: float, t0: float) -> int:
                 raise CaseAborted(f"wall cap {wall_cap:.0f}s hit")
             answer = None
             if isinstance(event, GateRequest):
-                action = "skip" if event.grade == "HUMAN" else "run"
+                approved = human_gates == "approve" and not event.title.startswith(
+                    "admit skill "
+                )
+                action = "run" if event.grade != "HUMAN" or approved else "skip"
                 answer = GateDecision(action)
+                if gates is not None:
+                    gates.append(action)
             event = gen.send(answer)
     except StopIteration:
         return events
@@ -108,9 +124,11 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
         "diseases": entry["diseases"],
         "date": datetime.now(tz=UTC).isoformat(timespec="seconds"),
         "handoff": fmt,
+        "human_gates": args.human_gates,
         "status": "ok",
     }
     t0 = time.monotonic()
+    gates: list = []
     session = Session(
         workspace=str(work / "ws"),
         data_dir=str(work / "data"),
@@ -121,7 +139,14 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
     )
     try:
         session.load(str(dirty_path), "df")
-        row["events"] = _drive(session.clean("df"), args.max_events, args.wall_cap, t0)
+        row["events"] = _drive(
+            session.clean("df"),
+            args.max_events,
+            args.wall_cap,
+            t0,
+            gates=gates,
+            human_gates=args.human_gates,
+        )
         cleaned_path = Path(session.session_dir) / "cleaned" / "df.parquet"
         if cleaned_path.exists():
             cleaned = pd.read_parquet(cleaned_path)
@@ -134,6 +159,7 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
         row["status"] = f"error: {type(exc).__name__}: {exc}"
     finally:
         session.close()
+    row["gates"] = {"run": gates.count("run"), "skip": gates.count("skip")}
     row["wall_secs"] = round(time.monotonic() - t0, 1)
     return row
 
@@ -152,6 +178,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--docker", action="store_true", help="sandbox kernel")
     parser.add_argument("--max-events", type=int, default=8000)
     parser.add_argument("--wall-cap", type=float, default=300.0, help="secs/case")
+    parser.add_argument(
+        "--human-gates",
+        choices=("skip", "approve"),
+        default="skip",
+        help="approve = owner pre-authorises judgement-call fixes (ceiling arm); "
+        "skill admissions are skipped in every mode",
+    )
+    parser.add_argument(
+        "--only",
+        default="",
+        help="comma-separated case names; restricts the sampled set",
+    )
     args = parser.parse_args(argv)
 
     _load_dotenv()
@@ -160,10 +198,14 @@ def main(argv: list[str] | None = None) -> int:
 
     entries = corpus.full_corpus() if args.full else list(corpus.SMOKE)
     picked = random.Random(args.seed).sample(entries, min(args.sample, len(entries)))
+    if args.only:
+        wanted = {n.strip() for n in args.only.split(",") if n.strip()}
+        picked = [e for e in picked if e["name"] in wanted]
 
+    suffix = ".ceiling" if args.human_gates == "approve" else ""
     rows = []
     for entry in picked:
-        out = RESULTS_DIR / f"{entry['name']}.json"
+        out = RESULTS_DIR / f"{entry['name']}{suffix}.json"
         if out.exists() and not args.force:
             rows.append(json.loads(out.read_text()))
             print(f"{entry['name']}: already on disk, skipped (R5)")
