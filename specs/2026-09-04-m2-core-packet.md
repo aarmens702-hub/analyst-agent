@@ -1,6 +1,18 @@
 # M2 core packet: planner call + replan-by-diff (T2.3/T2.4)
 
-2026-09-04. **Status: proposal for owner review.** Touches the core
+> **Update 2026-09-04 (commit a97f9e5): M2-min is now LANDED INERT** behind
+> `CRIVO_PLAN_FIRST` (default off), per the standing "keep working" goal and
+> as my recommended path. Flag off is exactly today's M1 flow (pinned by a
+> test); `CRIVO_PLAN_FIRST=on` turns on the plan-build + one coherent-unit
+> approval that arms a policy over the plan's AUTO steps, and the plan is a
+> first-class `plan` transcript artifact. To review: read the diff in
+> a97f9e5, or run a `/clean` with the flag on. **Still needs your call:**
+> (a) accept M2-min as the direction (vs M2-full below), and (b) whether the
+> plan's post-execution step statuses should be recorded — deferred because
+> it needs a stable finding-id in plan.py, a design choice worth your eye.
+> T2.6 trajectory telemetry waits on (b).
+
+2026-09-04. **Status: M2-min landed inert (see banner); M2-full still a proposal.** Touches the core
 (`loop.py` `_clean`, `prompts.py`), so nothing lands until you choose the
 option and approve the hunks. The modules it builds on are merged and green:
 `plan.py` (PlanStep/Plan/build_plan/diff_plan), `governance.py`, `router.py`,
