@@ -111,6 +111,13 @@ class Plan:
         )
 
 
+def step_id(finding: dict, index: int) -> str:
+    """The finding's own "id" when it carries one, else "f{index}" by input
+    position. One function so build_plan and any later status-recording match
+    on the same id (avoids the two-places-derive-the-same-key drift, T2.1)."""
+    return finding.get("id", f"f{index}")
+
+
 def build_plan(
     findings: list[dict], router_fn: Callable[[dict], dict] | None = None
 ) -> Plan:
@@ -128,10 +135,9 @@ def build_plan(
     steps = []
     for index, finding in enumerate(findings):
         routed = router_fn(finding)
-        finding_id = finding.get("id", f"f{index}")
         steps.append(
             PlanStep(
-                finding_id=finding_id,
+                finding_id=step_id(finding, index),
                 disease=finding["disease"],
                 grade=finding["grade"],
                 executor=routed["executor"],

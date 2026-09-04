@@ -543,9 +543,10 @@ class Session:
 
         baseline_cols = yield from self._snapshot_baseline(var)
         fixable = state["fixable"]
+        plan_obj = None
         if _plan_first_enabled() and fixable:
-            plan, proceed = yield from self._build_and_approve_plan(fixable)
-            state["plan"] = plan.to_dict()
+            plan_obj, proceed = yield from self._build_and_approve_plan(fixable)
+            state["plan"] = plan_obj.to_dict()
             if not proceed:
                 yield from self._save_report(state)
                 return
@@ -582,6 +583,19 @@ class Session:
             if rec["status"] == "fixed":
                 baseline_cols = yield from self._snapshot_baseline(var)
         state["inflight"] = None
+
+        if plan_obj is not None:
+            # record what each planned step became, so the plan artifact tells
+            # the truth about the run, not just the intent (M2-min)
+            statuses = {}
+            for j, rec in enumerate(state["records"]):
+                if rec["status"] in plan_mod.STATUSES:
+                    statuses[plan_mod.step_id(fixable[j], j)] = rec["status"]
+            plan_obj = plan_mod.diff_plan(plan_obj, statuses)
+            state["plan"] = plan_obj.to_dict()
+            self.transcript.append(
+                "plan", version=plan_obj.version, plan=plan_obj.to_dict()
+            )
 
         yield from self._skill_pass(var, state["records"], state["admitted"])
         if any(r["status"] == "fixed" for r in state["records"]):

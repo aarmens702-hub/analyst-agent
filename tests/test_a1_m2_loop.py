@@ -93,7 +93,7 @@ def test_plan_first_on_approves_once_then_autoclean_runs_silent(session, monkeyp
     events = drive(session.clean("df"), decisions=[GateDecision("run")])
 
     plans = _plan_events(session)
-    assert len(plans) == 1 and plans[0]["version"] == 1
+    assert [p["version"] for p in plans] == [1, 2]  # intent, then outcome
     rep = report_of(session)
     assert [f["status"] for f in rep["fixes"]] == ["fixed"]
     assert rep["fixes"][0]["origin"] == "autoclean:d04"
@@ -130,3 +130,24 @@ def test_plan_lists_the_step_and_its_executor(session, monkeypatch):
     assert plan["steps"][0]["executor"] == "autoclean"
     assert plan["steps"][0]["disease"] == 4
     assert plan["steps"][0]["grade"] == "AUTO"
+
+
+def test_final_plan_records_the_executed_status(session, monkeypatch):
+    """The plan artifact tells the truth about the run: after execution a
+    second plan version records each step's outcome (M2-min)."""
+    monkeypatch.setenv("CRIVO_PLAN_FIRST", "on")
+    monkeypatch.setattr(llm, "generate", gen([FIX_A]))
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # autoclean apply (batched)
+        [ok()],  # verify
+        baseline(),
+        saved(),
+    ]
+    drive(session.clean("df"), decisions=[GateDecision("run")])
+
+    plans = _plan_events(session)
+    assert [p["version"] for p in plans] == [1, 2]  # intent, then outcome
+    assert plans[0]["plan"]["steps"][0]["status"] == "pending"
+    assert plans[1]["plan"]["steps"][0]["status"] == "fixed"
