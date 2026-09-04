@@ -1,0 +1,19 @@
+{
+  "policies": [
+    {
+      "id": "example-log-only",
+      "disease_ids": [1, 2],
+      "approver": "aarmen",
+      "expires": "2026-12-31",
+      "mode": "LOG_ONLY"
+    }
+  ],
+  "judge": {
+    "enabled": false,
+    "sample_rate": 0.0,
+    "rubric": ""
+  },
+  "routing": {
+    "escalate_after_fail": true
+  }
+}
