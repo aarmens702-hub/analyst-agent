@@ -185,6 +185,30 @@ def test_run_case_gives_each_case_an_isolated_skills_dir(tmp_path, monkeypatch):
     assert captured["skills_dir"].startswith(str(tmp_path / "res"))
 
 
+def test_policies_auto_mints_one_record_and_reaches_the_session(
+    tmp_path, monkeypatch, capsys
+):
+    """T1.4 bench arm: --policies auto builds the bench-auto ENFORCE record
+    over every fixer-backed disease and passes it into the Session."""
+    monkeypatch.setenv(agent_run.KEY_VARS[0], "sk-test")
+    monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
+    entry = {"name": "pol_case", "diseases": [4]}
+    monkeypatch.setattr(agent_run.corpus, "SMOKE", [entry], raising=False)
+    captured = {}
+
+    def grab(args_entry, args):
+        captured["policies"] = args.policy_records
+        return {"name": "pol_case", "status": "error: stub", "wall_secs": 0.1}
+
+    monkeypatch.setattr(agent_run, "_run_case", grab)
+    agent_run.main(["--sample", "1", "--policies", "auto"])
+
+    records = captured["policies"]
+    assert len(records) == 1 and records[0].id == "bench-auto"
+    assert records[0].mode == "ENFORCE"
+    assert set(records[0].disease_ids) == set(agent_run.FIXERS)
+
+
 def _fake_session(tmp_path, monkeypatch, on_init=None):
     """The FakeSession pattern from the isolated-skills-dir test, shared by
     the telemetry tests (T1.5): no model, no kernel, no cleaned output."""

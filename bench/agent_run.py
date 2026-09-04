@@ -27,6 +27,8 @@ import pandas as pd
 from bench import corpus
 from bench.score import score_end_to_end
 from crivo import llm
+from crivo.autoclean import FIXERS
+from crivo.policy import PolicyRecord
 
 KEY_VARS = ("DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY")
 RESULTS_DIR = Path("bench/results/agent")
@@ -193,6 +195,7 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
             skills_dir=str(work / "skills"),
             preview=False,
             snapshots=False,
+            policies=getattr(args, "policy_records", None),
         )
         try:
             session.load(str(dirty_path), "df")
@@ -255,7 +258,26 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="comma-separated case names; restricts the sampled set",
     )
+    parser.add_argument(
+        "--policies",
+        choices=("none", "auto"),
+        default="none",
+        help="auto = one ENFORCE policy batching every AUTO disease with a "
+        "registered fixer (the M1 batched arm; T1.4)",
+    )
     args = parser.parse_args(argv)
+    args.policy_records = []
+    if args.policies == "auto":
+        args.policy_records = [
+            PolicyRecord(
+                id="bench-auto",
+                disease_ids=tuple(sorted(FIXERS)),
+                approver="bench",
+                expires="2099-01-01",
+                mode="ENFORCE",
+                valid_disease_ids=set(FIXERS),
+            )
+        ]
 
     _load_dotenv()
     _require_key()
