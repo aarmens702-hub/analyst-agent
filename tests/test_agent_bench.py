@@ -185,6 +185,161 @@ def test_run_case_gives_each_case_an_isolated_skills_dir(tmp_path, monkeypatch):
     assert captured["skills_dir"].startswith(str(tmp_path / "res"))
 
 
+def _fake_session(tmp_path, monkeypatch, on_init=None):
+    """The FakeSession pattern from the isolated-skills-dir test, shared by
+    the telemetry tests (T1.5): no model, no kernel, no cleaned output."""
+    import pandas as pd
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            if on_init is not None:
+                on_init()
+            self.session_dir = tmp_path / "sess"
+
+        def load(self, path, name):
+            pass
+
+        def clean(self, var):
+            return iter(())
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("crivo.loop.Session", FakeSession)
+    df = pd.DataFrame({"a": [1, 2]})
+    monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, None))
+    monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
+
+
+def test_run_case_points_telemetry_at_a_fresh_per_case_file_and_restores_env(
+    tmp_path, monkeypatch
+):
+    """T1.5: CRIVO_TELEMETRY names a per-case JSONL under RESULTS_DIR before
+    the Session exists, stale spans from an earlier run are removed first,
+    and the previous env value is restored so nothing leaks between cases."""
+    import argparse
+    import json
+    import os
+
+    expected = tmp_path / "res" / "telemetry" / "tele_case.jsonl"
+    expected.parent.mkdir(parents=True)
+    expected.write_text(json.dumps({"name": "gen_ai.client.call", "dur_s": 9.9}) + "\n")
+    seen = {}
+    _fake_session(
+        tmp_path,
+        monkeypatch,
+        on_init=lambda: seen.update(env=os.environ.get("CRIVO_TELEMETRY")),
+    )
+    monkeypatch.setenv("CRIVO_TELEMETRY", "sentinel-before")
+    args = argparse.Namespace(
+        docker=False, max_events=10, wall_cap=5.0, human_gates="skip"
+    )
+
+    row = agent_run._run_case({"name": "tele_case", "diseases": [1]}, args)
+    assert seen["env"] == str(expected)
+    assert os.environ["CRIVO_TELEMETRY"] == "sentinel-before"
+    assert not expected.exists(), "stale telemetry must be removed before the run"
+    assert row["calls"] == {"count": 0, "model_wait_s": 0.0, "new_work_tokens": 0}
+
+
+def test_run_case_ceiling_arm_gets_its_own_telemetry_file_and_unsets_cleanly(
+    tmp_path, monkeypatch
+):
+    """T1.5: the approve arm writes name.ceiling.jsonl so the two arms never
+    share spans, and a previously unset env var ends the case unset."""
+    import argparse
+    import os
+
+    seen = {}
+    _fake_session(
+        tmp_path,
+        monkeypatch,
+        on_init=lambda: seen.update(env=os.environ.get("CRIVO_TELEMETRY")),
+    )
+    monkeypatch.delenv("CRIVO_TELEMETRY", raising=False)
+    args = argparse.Namespace(
+        docker=False, max_events=10, wall_cap=5.0, human_gates="approve"
+    )
+
+    agent_run._run_case({"name": "tele_case", "diseases": [1]}, args)
+    assert seen["env"] == str(
+        tmp_path / "res" / "telemetry" / "tele_case.ceiling.jsonl"
+    )
+    assert "CRIVO_TELEMETRY" not in os.environ
+
+
+def test_call_stats_sums_client_call_spans_and_tolerates_gaps(tmp_path):
+    """T1.5: calls per case, model wait, and token sums come only from the
+    gen_ai.client.call spans; missing rows, fields, or junk lines degrade to
+    zeros/absent keys, never an exception."""
+    import json
+
+    tele = tmp_path / "case.jsonl"
+    spans = [
+        {
+            "name": "gen_ai.client.call",
+            "dur_s": 1.5,
+            "attrs": {
+                "gen_ai.usage.input_tokens": 100,
+                "gen_ai.usage.output_tokens": 10,
+                "crivo.cache.hit_tokens": 60,
+                "crivo.cache.miss_tokens": 40,
+            },
+        },
+        {"name": "kernel.exec", "dur_s": 9.0, "attrs": {}},
+        {
+            "name": "gen_ai.client.call",
+            "dur_s": 0.25,
+            "attrs": {"gen_ai.usage.input_tokens": 50},
+        },
+        {"name": "gen_ai.client.call"},
+    ]
+    tele.write_text("\n".join(json.dumps(s) for s in spans) + "\nnot json\n")
+
+    stats = agent_run._call_stats(tele)
+    assert stats == {
+        "count": 3,
+        "model_wait_s": 1.75,
+        "input_tokens": 150,
+        "output_tokens": 10,
+        "cache_hit_tokens": 60,
+        "cache_miss_tokens": 40,
+        "new_work_tokens": 150 - 60 + 10,
+    }
+    assert agent_run._call_stats(tmp_path / "absent.jsonl") == {
+        "count": 0,
+        "model_wait_s": 0.0,
+        "new_work_tokens": 0,
+    }
+
+
+def test_main_prints_calls_per_case_and_in_the_aggregate(
+    tmp_path, monkeypatch, capsys
+):
+    """T1.5: the per-case line and the final aggregate carry the calls
+    summary (count, new-work tokens) alongside the scores."""
+    monkeypatch.setenv(agent_run.KEY_VARS[0], "sk-test")
+    monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path)
+    entry = {"name": "fresh_case", "diseases": [1]}
+    monkeypatch.setattr(agent_run.corpus, "SMOKE", [entry], raising=False)
+    row = {
+        "name": "fresh_case",
+        "status": "ok",
+        "wall_secs": 3.2,
+        "events": 7,
+        "scores": {"repair": {"f1": 0.5, "recall": 0.5}},
+        "calls": {"count": 4, "model_wait_s": 2.1, "new_work_tokens": 200},
+    }
+    monkeypatch.setattr(agent_run, "_run_case", lambda entry, args: row)
+
+    assert agent_run.main(["--sample", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "4 calls" in out
+    assert "200 new-work tok" in out
+    assert "calls mean 4.0" in out
+    assert "new-work tokens mean 200.0" in out
+
+
 def test_main_skips_cases_already_on_disk(tmp_path, monkeypatch):
     """R5: a finished case is never rerun without --force, never re-billed."""
     import json

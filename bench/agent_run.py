@@ -108,6 +108,52 @@ def _handoff(dirty: pd.DataFrame, target: Path) -> str:
         return "csv"
 
 
+_TOKEN_ATTRS = (
+    ("input_tokens", "gen_ai.usage.input_tokens"),
+    ("output_tokens", "gen_ai.usage.output_tokens"),
+    ("cache_hit_tokens", "crivo.cache.hit_tokens"),
+    ("cache_miss_tokens", "crivo.cache.miss_tokens"),
+)
+
+
+def _call_stats(path: Path) -> dict:
+    """Sum a case's gen_ai.client.call spans into the T1.5 columns: calls,
+    model wait, token usage, and new_work_tokens (input minus cache hits
+    plus output, the cost basis that excludes cache reads). A missing file,
+    junk line, or absent field degrades to zeros/absent keys, never raises:
+    telemetry must not be able to fail a case."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        lines = []
+    count = 0
+    wait = 0.0
+    sums: dict = {}
+    for line in lines:
+        try:
+            span = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(span, dict) or span.get("name") != "gen_ai.client.call":
+            continue
+        count += 1
+        dur = span.get("dur_s")
+        if isinstance(dur, (int, float)):
+            wait += dur
+        attrs = span.get("attrs") or {}
+        for key, attr in _TOKEN_ATTRS:
+            value = attrs.get(attr)
+            if isinstance(value, (int, float)):
+                sums[key] = sums.get(key, 0) + value
+    stats = {"count": count, "model_wait_s": round(wait, 2), **sums}
+    stats["new_work_tokens"] = (
+        sums.get("input_tokens", 0)
+        - sums.get("cache_hit_tokens", 0)
+        + sums.get("output_tokens", 0)
+    )
+    return stats
+
+
 def _run_case(entry: dict, args: argparse.Namespace) -> dict:
     from crivo.loop import Session
 
@@ -131,36 +177,53 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
     }
     t0 = time.monotonic()
     gates: list = []
-    session = Session(
-        workspace=str(work / "ws"),
-        data_dir=str(work / "data"),
-        docker=args.docker,
-        skills_dir=str(work / "skills"),
-        preview=False,
-        snapshots=False,
-    )
+    # T1.5: per-case telemetry file, per arm; the generate() calls run in
+    # this host process and read CRIVO_TELEMETRY per call (crivo/telemetry.py)
+    suffix = ".ceiling" if args.human_gates == "approve" else ""
+    tele_path = RESULTS_DIR / "telemetry" / f"{name}{suffix}.jsonl"
+    tele_path.parent.mkdir(parents=True, exist_ok=True)
+    tele_path.unlink(missing_ok=True)  # stale spans must not count in this run
+    prev_tele = os.environ.get("CRIVO_TELEMETRY")
+    os.environ["CRIVO_TELEMETRY"] = str(tele_path)
     try:
-        session.load(str(dirty_path), "df")
-        row["events"] = _drive(
-            session.clean("df"),
-            args.max_events,
-            args.wall_cap,
-            t0,
-            gates=gates,
-            human_gates=args.human_gates,
+        session = Session(
+            workspace=str(work / "ws"),
+            data_dir=str(work / "data"),
+            docker=args.docker,
+            skills_dir=str(work / "skills"),
+            preview=False,
+            snapshots=False,
         )
-        cleaned_path = Path(session.session_dir) / "cleaned" / "df.parquet"
-        if cleaned_path.exists():
-            cleaned = pd.read_parquet(cleaned_path)
-            row["scores"] = score_end_to_end(pristine, dirty, cleaned, truth)
-        else:
-            row["status"] = "no_cleaned_output"
-    except CaseAborted as exc:
-        row["status"] = f"aborted: {exc}"
-    except Exception as exc:  # noqa: BLE001 — one broken case must not kill the run (R4)
-        row["status"] = f"error: {type(exc).__name__}: {exc}"
+        try:
+            session.load(str(dirty_path), "df")
+            row["events"] = _drive(
+                session.clean("df"),
+                args.max_events,
+                args.wall_cap,
+                t0,
+                gates=gates,
+                human_gates=args.human_gates,
+            )
+            cleaned_path = Path(session.session_dir) / "cleaned" / "df.parquet"
+            if cleaned_path.exists():
+                cleaned = pd.read_parquet(cleaned_path)
+                row["scores"] = score_end_to_end(pristine, dirty, cleaned, truth)
+            else:
+                row["status"] = "no_cleaned_output"
+        except CaseAborted as exc:
+            row["status"] = f"aborted: {exc}"
+        except Exception as exc:  # noqa: BLE001 — one broken case must not kill the run (R4)
+            row["status"] = f"error: {type(exc).__name__}: {exc}"
+        finally:
+            session.close()
     finally:
-        session.close()
+        # restore, never leak: the next case (and the test suite) must see
+        # the environment it started with
+        if prev_tele is None:
+            os.environ.pop("CRIVO_TELEMETRY", None)
+        else:
+            os.environ["CRIVO_TELEMETRY"] = prev_tele
+    row["calls"] = _call_stats(tele_path)
     row["gates"] = {"run": gates.count("run"), "skip": gates.count("skip")}
     row["wall_secs"] = round(time.monotonic() - t0, 1)
     return row
@@ -215,19 +278,26 @@ def main(argv: list[str] | None = None) -> int:
         row = _run_case(entry, args)
         out.write_text(json.dumps(row, indent=2, default=str))
         repair = (row.get("scores") or {}).get("repair", {})
+        calls = row.get("calls") or {}
         print(
             f"{row['name']}: {row['status']}"
             f" | repair F1 {repair.get('f1')}"
             f" | {row['wall_secs']}s | {row.get('events', 0)} events"
+            f" | {calls.get('count', 0)} calls"
+            f" | {calls.get('new_work_tokens', 0)} new-work tok"
         )
         rows.append(row)
 
     ok = [r for r in rows if r.get("status") == "ok" and r.get("scores")]
+    ok_calls = [r.get("calls") or {} for r in ok]
     print(
         f"\nagent lane: {len(ok)}/{len(rows)} scored"
         f" | repair F1 mean {_mean([r['scores']['repair'].get('f1') for r in ok])}"
         f" | repair recall mean "
         f"{_mean([r['scores']['repair'].get('recall') for r in ok])}"
+        f" | calls mean {_mean([c.get('count') for c in ok_calls])}"
+        f" | new-work tokens mean "
+        f"{_mean([c.get('new_work_tokens') for c in ok_calls])}"
     )
     return 0 if ok else 1
 
