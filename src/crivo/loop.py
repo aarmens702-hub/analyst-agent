@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from crivo import llm, policy, prompts, router, skills, snapshot, verify
+from crivo import plan as plan_mod
 from crivo.card import AnswerCard, lift_checks
 from crivo.events import (
     ArtifactSaved,
@@ -51,6 +52,25 @@ def _m1_enabled() -> bool:
     """CRIVO_M1=off restores the pre-M1 flow exactly (the bench legacy arm,
     T1.4 hunk D)."""
     return os.environ.get("CRIVO_M1", "on") != "off"
+
+
+def _plan_first_enabled() -> bool:
+    """CRIVO_PLAN_FIRST=on turns on M2-min: build a plan, approve it as one
+    unit, arm a policy over its AUTO steps, then run M1's loop under it.
+    Default off, so the shipped flow is unchanged until it is chosen
+    (specs/2026-09-04-m2-core-packet.md, M2-min)."""
+    return os.environ.get("CRIVO_PLAN_FIRST", "off") == "on"
+
+
+def _plan_table(plan) -> str:
+    """One line per step: order, executor, grade, expected check (T2.2)."""
+    lines = [plan.summary()]
+    for i, s in enumerate(plan.steps, 1):
+        lines.append(
+            f"  {i:2d}. {s.executor:9s} {s.grade:5s} d{s.disease:02d} "
+            f"{s.expected_check}"
+        )
+    return "\n".join(lines)
 
 
 class KernelLost(RuntimeError):
@@ -523,6 +543,12 @@ class Session:
 
         baseline_cols = yield from self._snapshot_baseline(var)
         fixable = state["fixable"]
+        if _plan_first_enabled() and fixable:
+            plan, proceed = yield from self._build_and_approve_plan(fixable)
+            state["plan"] = plan.to_dict()
+            if not proceed:
+                yield from self._save_report(state)
+                return
         for i, finding in enumerate(fixable, 1):
             # watermark before the attempts: if the kernel dies mid-fix, the
             # handler attributes every event after this point to THIS finding,
@@ -1272,6 +1298,49 @@ class Session:
             return {}, ev_id
         info["path"] = kernel_path
         return info, ev_id
+
+    def _build_and_approve_plan(self, fixable: list[dict]):
+        """Build a plan from the findings and gate it as one coherent unit
+        (M2-min, T2.4). Approving arms an in-session ENFORCE policy over the
+        plan's AUTO+autoclean disease ids, so those steps then run silently
+        through M1's batched path; GATE and HUMAN steps still gate per finding.
+        The plan is emitted to stdout and recorded in the transcript, so /why
+        can cite it. Returns (Plan, proceed: bool)."""
+        built = plan_mod.build_plan(fixable)
+        yield StreamText("stdout", "\n" + _plan_table(built) + "\n")
+        self.transcript.append("plan", version=built.version, plan=built.to_dict())
+        auto_ids = sorted(
+            {
+                s.disease
+                for s in built.steps
+                if s.executor == "autoclean" and s.grade == "AUTO"
+            }
+        )
+        if not auto_ids:
+            return built, True  # nothing batchable; per-finding gates as today
+
+        decision = yield GateRequest(
+            _plan_table(built), 1, title=f"approve {built.summary()}", grade="PLAN"
+        )
+        if not isinstance(decision, GateDecision):
+            decision = GateDecision("run")
+        self.transcript.append("gate", action=decision.action, note="plan")
+        if decision.action == "run":
+            from crivo.detect import SLUGS
+
+            expires = (datetime.now().astimezone().date()).isoformat()
+            self.policies = [
+                *self.policies,
+                policy.PolicyRecord(
+                    id=f"plan-v{built.version}",
+                    disease_ids=tuple(auto_ids),
+                    approver="plan-approval",
+                    expires=expires,
+                    mode="ENFORCE",
+                    valid_disease_ids=set(SLUGS),
+                ),
+            ]
+        return built, decision.action != "skip"
 
     def _autoclean_attempt(
         self, var: str, finding: dict, i: int, n: int, baseline_cols: list[str]

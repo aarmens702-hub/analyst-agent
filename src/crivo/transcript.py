@@ -2,7 +2,10 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-KINDS = frozenset({"session_meta", "user", "model", "gate", "exec", "card"})
+KINDS = frozenset(
+    # "plan" is the M2-min plan artifact, recorded so /why can cite it
+    {"session_meta", "user", "model", "gate", "exec", "card", "plan"}
+)
 
 
 class Transcript:
