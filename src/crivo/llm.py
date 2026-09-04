@@ -101,6 +101,20 @@ def call_budget_s() -> float:
     return float(os.environ.get("CRIVO_MAX_CALL_S") or MAX_CALL_S)
 
 
+class CallCancelled(RuntimeError):
+    """The user canceled the in-flight model call (A0 R2)."""
+
+
+# One-shot cancel channel: the REPL's interrupt path sets it, the in-flight
+# _watched loop raises CallCancelled and clears it. A fresh call always
+# starts clean, so a cancel with nothing in flight targets nobody.
+_cancel = threading.Event()
+
+
+def request_cancel() -> None:
+    _cancel.set()
+
+
 _client: OpenAI | None = None
 _claude_client = None
 _openai_client: OpenAI | None = None  # CRIVO_PROVIDER=openai: generic endpoint
@@ -218,8 +232,39 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
     The loop joins chunks before parsing tags; drivers may render them live.
     The provider switch changes which client produces the stream and how one
     stream item becomes text; the watchdog around them is shared, because a
-    hung stream hangs identically whoever serves it.
+    hung stream hangs identically whoever serves it. Every call emits one
+    telemetry span (A0 R4) carrying model, duration, and usage when the
+    provider reports it (cache hit/miss tokens included on DeepSeek).
     """
+    from crivo import telemetry
+
+    # observer only: a misconfigured provider must raise its own error from
+    # the seam below, in the same order as before telemetry existed
+    try:
+        requested = model or model_name()
+    except RuntimeError:
+        requested = ""
+    usage_box: list = []
+    with telemetry.span(
+        "gen_ai.client.call",
+        **{"gen_ai.system": _provider(), "gen_ai.request.model": requested},
+    ) as extra:
+        yield from _generate(messages, model, usage_box.append)
+        for usage in usage_box[-1:]:
+            for src, dst in (
+                ("prompt_tokens", "gen_ai.usage.input_tokens"),
+                ("completion_tokens", "gen_ai.usage.output_tokens"),
+                ("prompt_cache_hit_tokens", "crivo.cache.hit_tokens"),
+                ("prompt_cache_miss_tokens", "crivo.cache.miss_tokens"),
+            ):
+                value = getattr(usage, src, None)
+                if value is not None:
+                    extra[dst] = value
+
+
+def _generate(
+    messages: Iterable[dict], model: str | None, usage_sink
+) -> Iterator[str]:
     if _provider() == "faux":
         if not _faux_responses:
             raise RuntimeError(
@@ -228,7 +273,9 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
             )
         # one queued reply per call, through the same watchdog as the real
         # providers so a faux run exercises the code path callers get
-        yield from _watched(iter([_faux_responses.pop(0)]), lambda item: item)
+        yield from _watched(
+            iter([_faux_responses.pop(0)]), lambda item: item, usage_sink
+        )
         return
 
     if _provider() == "claude":
@@ -243,7 +290,7 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
             temperature=TEMPERATURE,
             stream=True,
         )
-        yield from _watched(stream, _claude_text)
+        yield from _watched(stream, _claude_text, usage_sink)
         return
 
     # deepseek and the generic openai provider share the wire format; only
@@ -254,6 +301,9 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
         messages=list(messages),
         temperature=TEMPERATURE,
         stream=True,
+        # the final stream chunk then carries usage, including DeepSeek's
+        # prompt_cache_hit_tokens / prompt_cache_miss_tokens (A0 R4/R5)
+        stream_options={"include_usage": True},
         # First line of defense, not the only one: httpx re-applies this read
         # timeout to every socket read for the life of the stream (confirmed
         # against a real local socket -- it is not just a connect timeout), so
@@ -263,10 +313,10 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
             connect=15.0, read=stall_budget_s(), write=30.0, pool=15.0
         ),
     )
-    yield from _watched(stream, _deepseek_text)
+    yield from _watched(stream, _deepseek_text, usage_sink)
 
 
-def _watched(stream, extract) -> Iterator[str]:
+def _watched(stream, extract, usage_sink=None) -> Iterator[str]:
     """Enforce the call and stall budgets around any provider's stream.
 
     Consuming the stream happens on a background thread so both budgets below
@@ -276,6 +326,7 @@ def _watched(stream, extract) -> Iterator[str]:
     chunks at all -- confirmed to be exactly what one real ~15-minute
     production hang was, back when only MAX_CALL_S existed.
     """
+    _cancel.clear()  # a cancel with nothing in flight targets nobody
     done = object()
     chunks: queue.Queue = queue.Queue()
     stop = threading.Event()
@@ -296,6 +347,9 @@ def _watched(stream, extract) -> Iterator[str]:
     started = last_progress = time.monotonic()
     try:
         while True:
+            if _cancel.is_set():
+                _cancel.clear()
+                raise CallCancelled("model call canceled by user")
             now = time.monotonic()
             call_left = call_budget - (now - started)
             stall_left = stall_budget - (now - last_progress)
@@ -307,15 +361,21 @@ def _watched(stream, extract) -> Iterator[str]:
                 raise TimeoutError(f"gave up after {stall_budget:g}s of silence")
 
             try:
-                item = chunks.get(timeout=min(call_left, stall_left))
+                # capped short so cancel (above) answers in a beat, not at the
+                # end of a stall budget
+                item = chunks.get(timeout=min(call_left, stall_left, 0.25))
             except queue.Empty:
-                continue  # a budget just ran out; the checks above will raise
+                continue  # re-check cancel and budgets
 
             last_progress = time.monotonic()
             if item is done:
                 return
             if isinstance(item, Exception):
                 raise item
+            if usage_sink is not None:
+                usage = getattr(item, "usage", None)
+                if usage is not None:
+                    usage_sink(usage)
             text = extract(item)
             if text is not None:
                 yield text

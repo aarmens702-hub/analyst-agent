@@ -26,6 +26,7 @@ import pandas as pd
 
 from bench import corpus
 from bench.score import score_end_to_end
+from crivo import llm
 
 KEY_VARS = ("DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY")
 RESULTS_DIR = Path("bench/results/agent")
@@ -125,6 +126,7 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
         "date": datetime.now(tz=UTC).isoformat(timespec="seconds"),
         "handoff": fmt,
         "human_gates": args.human_gates,
+        "model": llm.model_info(),
         "status": "ok",
     }
     t0 = time.monotonic()

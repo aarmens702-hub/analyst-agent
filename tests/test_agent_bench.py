@@ -180,6 +180,7 @@ def test_run_case_gives_each_case_an_isolated_skills_dir(tmp_path, monkeypatch):
 
     row = agent_run._run_case({"name": "iso_case", "diseases": [1]}, args)
     assert row["status"] == "no_cleaned_output"
+    assert row["model"]["provider"]  # provenance: every row names its model
     assert "skills_dir" in captured, "Session must get an explicit skills_dir"
     assert captured["skills_dir"].startswith(str(tmp_path / "res"))
 
