@@ -120,7 +120,10 @@ def main(argv: list[str] | None = None) -> int:
     if both:
         rows.append(_means_row(both))
     _print_table(rows)
-    for label, extra in (("A", sorted(set(a) - set(b))), ("B", sorted(set(b) - set(a)))):
+    for label, extra in (
+        ("A", sorted(set(a) - set(b))),
+        ("B", sorted(set(b) - set(a))),
+    ):
         if extra:
             print(f"only in {label}: {', '.join(extra)}")
     return 0

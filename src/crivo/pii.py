@@ -91,9 +91,7 @@ def scan(df: pd.DataFrame) -> list[dict]:
         s = df[col]
         # object OR string dtype (pandas may infer pure-string columns as the
         # string dtype, not object); numeric/bool/datetime are never PII text
-        if not (
-            pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s)
-        ):
+        if not (pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s)):
             continue
         counts: dict[str, int] = {}
         first: dict[str, str] = {}

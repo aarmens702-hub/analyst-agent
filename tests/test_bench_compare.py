@@ -63,8 +63,12 @@ def test_compare_table_columns_stay_aligned(tmp_path, capsys):
     a, b = tmp_path / "a", tmp_path / "b"
     _write(a, "tiny", _row(f1=0.5, wall=1.0, count=1, tokens=1))
     _write(b, "tiny", _row(f1=0.5, wall=2.0, count=2, tokens=2))
-    _write(a, "a-much-longer-case-name", _row(f1=1.0, wall=100.0, count=10, tokens=12345))
-    _write(b, "a-much-longer-case-name", _row(f1=1.0, wall=200.0, count=20, tokens=54321))
+    _write(
+        a, "a-much-longer-case-name", _row(f1=1.0, wall=100.0, count=10, tokens=12345)
+    )
+    _write(
+        b, "a-much-longer-case-name", _row(f1=1.0, wall=200.0, count=20, tokens=54321)
+    )
 
     assert compare.main([str(a), str(b)]) == 0
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]

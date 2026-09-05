@@ -20,6 +20,7 @@ def _legacy_arm(monkeypatch):
     both arms, so they run on the pinned CRIVO_M1=off flow."""
     monkeypatch.setenv("CRIVO_M1", "off")
 
+
 from crivo import llm, skills
 from crivo.events import CardReady, GateDecision, GateRequest, Notice
 from crivo.loop import Session

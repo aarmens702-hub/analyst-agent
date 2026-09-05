@@ -63,8 +63,12 @@ def test_generate_scoped_appends_volatile_registry_last(monkeypatch):
     import tempfile
 
     with tempfile.TemporaryDirectory() as d:
-        s = Session(workspace=d, data_dir=d, skills_dir=d, preview=False, snapshots=False)
-        s._registry = [{"name": "df", "type": "DataFrame", "shape": [3, 2], "mem_mb": 0.0}]
+        s = Session(
+            workspace=d, data_dir=d, skills_dir=d, preview=False, snapshots=False
+        )
+        s._registry = [
+            {"name": "df", "type": "DataFrame", "shape": [3, 2], "mem_mb": 0.0}
+        ]
         msgs = [
             {"role": "system", "content": "STABLE-PREFIX"},
             {"role": "user", "content": "the question"},

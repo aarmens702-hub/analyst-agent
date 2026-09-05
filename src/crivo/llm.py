@@ -262,9 +262,7 @@ def generate(messages: Iterable[dict], model: str | None = None) -> Iterator[str
                     extra[dst] = value
 
 
-def _generate(
-    messages: Iterable[dict], model: str | None, usage_sink
-) -> Iterator[str]:
+def _generate(messages: Iterable[dict], model: str | None, usage_sink) -> Iterator[str]:
     if _provider() == "faux":
         if not _faux_responses:
             raise RuntimeError(

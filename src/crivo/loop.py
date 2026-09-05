@@ -1398,9 +1398,7 @@ class Session:
 
         if silent:
             decision_note = f"policy:{verdict['policy_id']}"
-            evs.append(
-                self.transcript.append("gate", action="run", note=decision_note)
-            )
+            evs.append(self.transcript.append("gate", action="run", note=decision_note))
         else:
             pv = yield from self._preview(var, code)
             decision = yield GateRequest(
@@ -1460,8 +1458,7 @@ class Session:
         evs.append(rev_ev)
         yield Notice(
             "autoclean",
-            f"d{disease:02d} deterministic fix did not verify — "
-            "handing to the model",
+            f"d{disease:02d} deterministic fix did not verify — handing to the model",
         )
         return None
 
