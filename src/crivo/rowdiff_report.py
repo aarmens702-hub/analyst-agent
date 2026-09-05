@@ -24,7 +24,7 @@ from html import escape
 import pandas as pd
 
 from crivo.compare_report import _STYLE, _cols_html, _pair
-from crivo.reconcile import reconcile
+from crivo.rowdiff import reconcile
 
 # the four buckets that partition the matchable key space, with the color class
 # reused from compare_report so added reads green and removed reads red here too

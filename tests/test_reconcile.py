@@ -9,17 +9,15 @@ receipt as a real partition invariant, bounded evidence (rows and columns), and
 keyless import.
 """
 
-import importlib
-
 import pandas as pd
 import pytest
 
 import crivo
-from crivo.reconcile_report import reconcile_report
 
-# crivo.reconcile is now the public wrapper function, so reach the submodule
-# object explicitly to test its internals (_EXAMPLE_CAP, _COLUMN_CAP).
-reconcile = importlib.import_module("crivo.reconcile")
+# the reconcile() feature lives in crivo.rowdiff (named to avoid shadowing the
+# public crivo.reconcile wrapper); reach the module for its internals.
+from crivo import rowdiff as reconcile
+from crivo.rowdiff_report import reconcile_report
 
 
 def test_basic_added_removed_changed_unchanged():
@@ -340,7 +338,7 @@ def test_import_is_keyless_and_pulls_no_core_module():
     import sys
 
     code = (
-        "import sys, crivo.reconcile\n"
+        "import sys, crivo.rowdiff\n"
         "bad=[m for m in ('crivo.loop','crivo.prompts','crivo.skills',"
         "'crivo.provenance','crivo.llm') if m in sys.modules]\n"
         "print(bad); sys.exit(1 if bad else 0)\n"

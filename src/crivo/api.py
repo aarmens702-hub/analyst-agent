@@ -271,7 +271,7 @@ def reconcile(a: pd.DataFrame, b: pd.DataFrame, keys: str | list[str]) -> dict:
     added, removed, changed, and unchanged, excluding duplicate and null keys,
     and ride a partition receipt (P7 design spec decision 3). `keys` is the key
     column or columns. Keyless and pure; returns the result dict."""
-    from crivo.reconcile import reconcile as _reconcile
+    from crivo.rowdiff import reconcile as _reconcile
 
     return _reconcile(a, b, keys)
 
@@ -281,7 +281,7 @@ def reconcile_report(a: pd.DataFrame, b: pd.DataFrame, keys: str | list[str]) ->
     self-contained HTML document (P7 design spec decision 3, fast-follow): the
     HTML twin of `reconcile`, reusing the compare report styling. Keyless;
     returns the HTML document."""
-    from crivo.reconcile_report import reconcile_report as _reconcile_report
+    from crivo.rowdiff_report import reconcile_report as _reconcile_report
 
     return _reconcile_report(a, b, keys)
 
