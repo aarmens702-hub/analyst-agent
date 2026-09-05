@@ -13,6 +13,14 @@ The LLM-authored cleaning with gates and provenance is the agent surface,
 
 # importing the accessor module registers the `df.crivo` accessor as a side effect
 from crivo import accessor as _accessor  # noqa: F401
+
+# the reconcile submodules share a name with their public wrappers imported from
+# crivo.api below. Load the submodules first so the wrapper names win the
+# crivo.reconcile / crivo.reconcile_report attributes: whichever import runs
+# last sets the attribute, and a later first import of a submodule would
+# otherwise replace the callable wrapper with the module object.
+from crivo import reconcile as _reconcile_submodule  # noqa: F401
+from crivo import reconcile_report as _reconcile_report_submodule  # noqa: F401
 from crivo.api import (
     CleanSummary,
     Report,
@@ -25,6 +33,8 @@ from crivo.api import (
     load_example,
     read,
     read_sql,
+    reconcile,
+    reconcile_report,
     write,
 )
 from crivo.query import Answer, ask
@@ -44,6 +54,8 @@ __all__ = [
     "main",
     "read",
     "read_sql",
+    "reconcile",
+    "reconcile_report",
     "write",
 ]
 

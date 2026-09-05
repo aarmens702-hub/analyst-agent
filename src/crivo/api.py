@@ -33,6 +33,8 @@ __all__ = [
     "load_example",
     "read",
     "read_sql",
+    "reconcile",
+    "reconcile_report",
     "write",
 ]
 
@@ -262,6 +264,26 @@ def compare(before, after, name_before="before", name_after="after") -> str:
     from crivo.compare_report import compare_to_html
 
     return compare_to_html(before, after, name_before, name_after)
+
+
+def reconcile(a: pd.DataFrame, b: pd.DataFrame, keys: str | list[str]) -> dict:
+    """The keyed twin of `compare`: sort two frames' rows onto a key into
+    added, removed, changed, and unchanged, excluding duplicate and null keys,
+    and ride a partition receipt (P7 design spec decision 3). `keys` is the key
+    column or columns. Keyless and pure; returns the result dict."""
+    from crivo.reconcile import reconcile as _reconcile
+
+    return _reconcile(a, b, keys)
+
+
+def reconcile_report(a: pd.DataFrame, b: pd.DataFrame, keys: str | list[str]) -> str:
+    """Reconcile two frames on a key and render the result as one
+    self-contained HTML document (P7 design spec decision 3, fast-follow): the
+    HTML twin of `reconcile`, reusing the compare report styling. Keyless;
+    returns the HTML document."""
+    from crivo.reconcile_report import reconcile_report as _reconcile_report
+
+    return _reconcile_report(a, b, keys)
 
 
 def export_notebook(source, path) -> Path:
