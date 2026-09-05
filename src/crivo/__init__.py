@@ -16,6 +16,7 @@ from crivo import accessor as _accessor  # noqa: F401
 from crivo.api import (
     CleanSummary,
     Report,
+    analyze_excel,
     clean,
     compare,
     diagnose,
@@ -32,6 +33,7 @@ __all__ = [
     "Answer",
     "CleanSummary",
     "Report",
+    "analyze_excel",
     "ask",
     "clean",
     "compare",

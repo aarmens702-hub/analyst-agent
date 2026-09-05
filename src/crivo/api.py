@@ -24,6 +24,7 @@ from crivo.detect import SINGLE_FRAME, detect_all
 __all__ = [
     "CleanSummary",
     "Report",
+    "analyze_excel",
     "clean",
     "compare",
     "diagnose",
@@ -233,6 +234,16 @@ def drivers(
     from crivo.decompose import decompose_sum
 
     return decompose_sum(before, after, value_col, by_col)
+
+
+def analyze_excel(path) -> list[dict]:
+    """Inspect a real workbook's structure before reading it (B2.1): one
+    finding per sheet naming the true header row, preamble rows above it, and
+    how many tables the sheet holds, so a title-and-notes or multi-table
+    sheet is caught instead of silently mangled. Keyless."""
+    from crivo.excel_structure import analyze_workbook
+
+    return analyze_workbook(path)
 
 
 def compare(before, after, name_before="before", name_after="after") -> str:

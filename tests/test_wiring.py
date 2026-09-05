@@ -72,4 +72,21 @@ def test_export_notebook_writes_a_valid_ipynb(tmp_path):
 
 
 def test_new_surface_is_exported():
-    assert {"compare", "export_notebook"} <= set(crivo.__all__)
+    assert {"compare", "export_notebook", "analyze_excel"} <= set(crivo.__all__)
+
+
+def test_analyze_excel_reads_a_messy_workbook(tmp_path):
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "sheet1"
+    for row in [["Report Title"], [], ["region", "amount"], ["west", 10]]:
+        ws.append(row)
+    p = tmp_path / "book.xlsx"
+    wb.save(p)
+
+    findings = crivo.analyze_excel(p)
+    assert findings[0]["sheet"] == "sheet1"
+    assert findings[0]["header_row"] == 3  # under the title + blank
+    assert findings[0]["kind"] == "header-below-row-1"
