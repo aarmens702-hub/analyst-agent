@@ -25,8 +25,10 @@ __all__ = [
     "CleanSummary",
     "Report",
     "clean",
+    "compare",
     "diagnose",
     "drivers",
+    "export_notebook",
     "load_example",
     "read",
     "read_sql",
@@ -140,6 +142,15 @@ class Report:
 
         return _pii.scan(self._frame)
 
+    def semantic_types(self) -> list[dict]:
+        """The inferred semantic type of each column (B4.1): email, url,
+        phone, zip_code, currency_amount, country, or identifier, each with
+        its match rate as evidence. Conservative: an ambiguous column yields
+        nothing. Keyless."""
+        from crivo import semantic_types as _st
+
+        return _st.infer_types(self._frame)
+
     def to_html(self, path) -> Path:
         """Write the report as ONE standalone, self-contained HTML file — the
         notebook card wrapped in a document shell, every style inline, no
@@ -222,6 +233,27 @@ def drivers(
     from crivo.decompose import decompose_sum
 
     return decompose_sum(before, after, value_col, by_col)
+
+
+def compare(before, after, name_before="before", name_after="after") -> str:
+    """A self-contained side-by-side HTML report of what changed between two
+    frames (B3.3): row-count delta, columns added and removed, dtype changes,
+    and per-column numeric summaries. Keyless; returns the HTML document."""
+    from crivo.compare_report import compare_to_html
+
+    return compare_to_html(before, after, name_before, name_after)
+
+
+def export_notebook(source, path) -> Path:
+    """Write a runnable Jupyter notebook that reloads and re-diagnoses
+    `source` (B3.2): the analysis as a reproducible .ipynb a colleague can
+    open. Reads and diagnoses the source to seed the finding cells; returns
+    the written path."""
+    from crivo.notebook_export import diagnosis_to_notebook
+
+    frame = read(source)
+    findings = detect_all(frame, Path(str(source)).name)["findings"]
+    return diagnosis_to_notebook(source, findings, path)
 
 
 def diagnose(data, name: str | None = None) -> Report:

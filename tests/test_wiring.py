@@ -43,3 +43,33 @@ def test_drivers_is_a_top_level_keyless_call():
 
 def test_drivers_is_exported():
     assert "drivers" in crivo.__all__
+
+
+def test_report_exposes_semantic_types():
+    report = crivo.diagnose(pd.DataFrame({"email": ["a@x.com", "b@y.com"]}))
+    types = report.semantic_types()
+    assert any(t["semantic_type"] == "email" and t["column"] == "email" for t in types)
+
+
+def test_compare_is_a_top_level_keyless_call():
+    before = pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
+    after = pd.DataFrame({"a": [1, 2, 3]})  # b removed, rows grew
+    html = crivo.compare(before, after)
+    assert html.lower().startswith("<!doctype html")
+    assert "http://" not in html and "https://" not in html
+    assert "b" in html  # the removed column is reported
+
+
+def test_export_notebook_writes_a_valid_ipynb(tmp_path):
+    import json
+
+    src = tmp_path / "data.csv"
+    src.write_text("amount,city\n1,burnaby\n2,vancouver\n")
+    out = crivo.export_notebook(str(src), tmp_path / "analysis.ipynb")
+    nb = json.loads(out.read_text())
+    assert nb["nbformat"] == 4
+    assert any(c["cell_type"] == "code" for c in nb["cells"])
+
+
+def test_new_surface_is_exported():
+    assert {"compare", "export_notebook"} <= set(crivo.__all__)
