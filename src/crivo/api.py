@@ -152,6 +152,15 @@ class Report:
 
         return _st.infer_types(self._frame)
 
+    def cross_column(self, threshold: float = 0.9) -> list[dict]:
+        """Cross-column contradictions (P7): near functional-dependency
+        violations, where one column determines another for most rows and a
+        few break the rule (a city that disagrees with its state). Each is
+        graded HUMAN, a discovered rule being a judgement call. Keyless."""
+        from crivo import crosscol as _cc
+
+        return _cc.find_fd_violations(self._frame, threshold=threshold)
+
     def to_html(self, path) -> Path:
         """Write the report as ONE standalone, self-contained HTML file — the
         notebook card wrapped in a document shell, every style inline, no

@@ -75,6 +75,18 @@ def test_new_surface_is_exported():
     assert {"compare", "export_notebook", "analyze_excel"} <= set(crivo.__all__)
 
 
+def test_report_exposes_cross_column_contradictions():
+    df = pd.DataFrame(
+        {
+            "city": ["SF", "SF", "SF", "SF", "LA", "LA"],
+            "state": ["CA", "CA", "CA", "TX", "CA", "CA"],  # one SF mislabeled
+        }
+    )
+    issues = crivo.diagnose(df).cross_column(threshold=0.8)
+    fd = next(f for f in issues if f["columns"] == ["city", "state"])
+    assert fd["violations"] == 1 and fd["grade"] == "HUMAN"
+
+
 def test_analyze_excel_reads_a_messy_workbook(tmp_path):
     import openpyxl
 
