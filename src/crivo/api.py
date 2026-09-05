@@ -26,6 +26,7 @@ __all__ = [
     "Report",
     "clean",
     "diagnose",
+    "drivers",
     "load_example",
     "read",
     "read_sql",
@@ -132,21 +133,35 @@ class Report:
 
         return charts.overview(self._name, self.findings, self.clear, ax=ax)
 
+    def pii(self) -> list[dict]:
+        """The PII scan for this frame (B0.1): one HUMAN-graded finding per
+        column carrying personal data, with a masked sample. Keyless."""
+        from crivo import pii as _pii
+
+        return _pii.scan(self._frame)
+
     def to_html(self, path) -> Path:
         """Write the report as ONE standalone, self-contained HTML file — the
         notebook card wrapped in a document shell, every style inline, no
         scripts, no external assets — for sending to someone who will never
-        install anything. Returns the written path; parents are created."""
+        install anything. The PII ship-gate (B0.1) runs first and its masked
+        section is injected above the card, so a report that travels never
+        carries raw personal data. Returns the written path; parents made."""
+        from crivo import htmlreport as _htmlreport
         from crivo import notebook as _notebook
 
         card = _notebook.report_html(self._name, self._frame, self._result)
+        pii_gate = _htmlreport.pii_section_html(self._frame)
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(
             '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
             f"<title>crivo report — {self._name}</title></head>\n"
-            f'<body style="margin:0;padding:24px;background:#f4f4f2">{card}</body></html>\n'
+            '<body style="margin:0;padding:24px;background:#f4f4f2">'
+            '<div style="max-width:900px;margin:0 auto"><h2 style="font:600 '
+            '15px system-ui,sans-serif;color:#1d3a3e">Personal data</h2>'
+            f"{pii_gate}</div>{card}</body></html>\n"
         )
         return p
 
@@ -196,6 +211,17 @@ class Report:
         seen: set[str] = set()
         deduped = [q for q in out if not (q in seen or seen.add(q))]
         return deduped[:k]
+
+
+def drivers(
+    before: pd.DataFrame, after: pd.DataFrame, value_col: str, by_col: str
+) -> dict:
+    """Explain a metric change: rank each category's contribution to the
+    change in sum(value_col), with the exact receipt that contributions sum
+    to the observed delta (B1.2). Keyless and pure."""
+    from crivo.decompose import decompose_sum
+
+    return decompose_sum(before, after, value_col, by_col)
 
 
 def diagnose(data, name: str | None = None) -> Report:

@@ -57,7 +57,10 @@ def _findings_table(findings: list[dict]) -> str:
     )
 
 
-def _pii_section(df: pd.DataFrame) -> str:
+def pii_section_html(df: pd.DataFrame) -> str:
+    """The PII ship-gate block (B0.1) as standalone HTML: masked samples
+    only, so it can be injected into any report without carrying raw
+    values. Public so Report.to_html can gate the shared card with it."""
     hits = pii.scan(df)
     if not hits:
         return '<p class="none">PII scan: none detected.</p>'
@@ -108,7 +111,7 @@ def diagnose_to_html(df: pd.DataFrame, findings: list[dict]) -> str:
         "<h1>Data diagnosis</h1>"
         f"<p class='sub'>{rows} rows &times; {cols} columns</p>"
         "<h2>Personal data</h2>"
-        + _pii_section(df)
+        + pii_section_html(df)
         + "<h2>Findings</h2>"
         + _findings_table(findings)
         + "<h2>Columns</h2>"
