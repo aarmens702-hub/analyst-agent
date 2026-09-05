@@ -99,12 +99,27 @@ later tuning pass); not schema inference across unrelated files; not
 imputation of the contradictions it finds (report, never guess). Warehouse-
 scale execution of these checks is B2.2 DuckDB, a separate track.
 
-## Open questions for the owner
+## Decisions (owner, 2026-09-05)
 
-1. FD/key discovery candidate cap: pairs only first, or pairs + 3-tuples?
-2. Should temporal checks assume a column named/typed as datetime, or also
-   sniff string-date columns via the role model (slower, broader)?
-3. `reconcile` as a top-level `crivo.reconcile(a, b, keys)` plus an HTML
-   render like `compare`, or data-only first?
-4. Who lands the `detect.py` registrations: you, or Claude behind reviewed
-   diffs (the substrate and each detector as small packets)?
+1. **Cross-column search: pairs by blind search, complex by nomination.**
+   Blind search covers column *pairs* only (cheap, exhaustive). Multi-column
+   dependencies (3+ columns, e.g. total = price * qty * (1 - discount)) are
+   NOT brute-forced; the model nominates the specific relationship on the R2
+   budget and the checker verifies it deterministically. So depth comes from
+   nominate-then-verify, not from widening the blind search. This resolves
+   the concern that pairs-first caps complexity: it does not, because the
+   complex cases arrive through nomination.
+2. **Time column comes from the role model, not a bespoke sniffer.** Temporal
+   checks ask the column-role model (the extended `semantic_types`) which
+   column is the time axis, rather than sniffing dates themselves. A datetime
+   dtype qualifies automatically; a string-date column qualifies only if the
+   role model already types it as a date (conservative, evidence-carrying).
+   Plus an optional explicit user hint (name the time column) that overrides
+   the guess. One disciplined detector, not two.
+3. **`reconcile` ships data-first.** `reconcile(a, b, keys)` returns
+   added / removed / changed / unchanged keyed row sets with the partition
+   receipt; the HTML render (reusing the `compare` styling) is a fast
+   follow, not v1. (Distinct from `compare`, which diffs table shape;
+   `reconcile` diffs rows by key.)
+4. **Claude drafts the `detect.py` registrations behind owner review** — the
+   substrate and each detector as small reviewed diff packets, as M1/M2 ran.
