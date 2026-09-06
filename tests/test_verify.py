@@ -44,7 +44,15 @@ def test_baseline_cell_snapshots_backup_rows_and_hashes():
     pd.testing.assert_frame_equal(ns["_clean_backup"], frame)
     assert ns["_clean_rows"] == len(frame)
     assert set(ns["_clean_hashes"]) == set(BASELINE_COLS)
-    assert all(isinstance(h, int) for h in ns["_clean_hashes"].values())
+    # one list of hex digests per NAME, one entry per COLUMN carrying it, so
+    # a name two columns share records two digests instead of one overwriting
+    # the other. Not the old commutative sum of row hashes either.
+    assert all(
+        isinstance(digests, list)
+        and digests
+        and all(isinstance(h, str) and h for h in digests)
+        for digests in ns["_clean_hashes"].values()
+    )
     # the cell's value is the JSON list of baseline columns the host reads
     assert json.loads(value) == sorted(frame.columns)
 
@@ -82,8 +90,8 @@ def _finding(disease=4, slug="sentinel-missing", columns=("a",), stats=None):
     }
 
 
-def _loop_line(code: str) -> str:
-    return next(ln for ln in code.splitlines() if ln.startswith("for _c in "))
+def _untouched_line(code: str) -> str:
+    return next(ln for ln in code.splitlines() if ln.startswith("_untouched = "))
 
 
 def test_preview_cell_shows_consequence_without_touching_the_frame():
@@ -241,11 +249,13 @@ def test_a_detector_crash_reads_as_uncheckable_not_as_a_failed_fix():
 
     This one executes (unlike the string-contract tests below): the crash
     fires on the detect_one line, before the cell touches any kernel-only
-    names, and the invariant is behavioral."""
+    names, and the invariant is behavioral. The frame has to carry every
+    baseline column, or the untouched-column guard refuses it first and the
+    detector is never reached."""
     import pytest
 
     code = verify_cell("df", _finding(disease=99), BASELINE_COLS)
-    namespace = {"df": pd.DataFrame({"a": ["x", "y"]})}
+    namespace = {"df": pd.DataFrame({"a": ["x", "y"], "b": [1, 2], "c": [3, 4]})}
 
     with pytest.raises(RuntimeError, match="^uncheckable: ValueError"):
         exec(compile(code, "<v-crash>", "exec"), namespace)  # noqa: S102
@@ -288,11 +298,101 @@ def test_verify_cell_reruns_detector_and_holds_rows_constant():
 
 def test_verify_cell_untouched_loop_excludes_only_the_fix_targets():
     code = verify_cell("df", _finding(columns=["a"]), BASELINE_COLS)
-    loop = _loop_line(code)
-    assert '"b"' in loop and '"c"' in loop  # every other baseline column
-    assert '"a"' not in loop  # the target is allowed to change
+    listed = _untouched_line(code)
+    assert '"b"' in listed and '"c"' in listed  # every other baseline column
+    assert '"a"' not in listed  # the target is allowed to change
     # the finding's own columns ride into detect_one json-encoded
     assert json.dumps(["a"]) in code
+
+
+# --- the untouched-column guard, executed against real frames ---
+
+
+def _guard_frame() -> pd.DataFrame:
+    """One repairable target column ('flow', d04 sentinels) and two columns a
+    fix aimed at 'flow' has no business touching."""
+    return pd.DataFrame(
+        {
+            "flow": ["N/A", "N/A"] + [str(v) for v in range(8)],
+            "site": [f"site-{v}" for v in range(10)],
+            "note": [f"note {v}" for v in range(10)],
+        }
+    )
+
+
+def _repair(frame: pd.DataFrame) -> pd.DataFrame:
+    """The honest fix for the target column: the sentinels become missing."""
+    out = frame.copy()
+    out["flow"] = out["flow"].replace("N/A", pd.NA)
+    return out
+
+
+def _verify_after(fix) -> None:
+    """The kernel's round trip: baseline snapshot, the fix cell's effect on the
+    live variable, then the verify cell. Returns when the fix verifies, raises
+    whatever the verify cell raises when it does not."""
+    namespace = {"df": _guard_frame()}
+    exec(compile(baseline_cell("df"), "<g-baseline>", "exec"), namespace)  # noqa: S102
+    namespace["df"] = fix(namespace["df"])
+    code = verify_cell("df", _finding(columns=("flow",)), ["flow", "note", "site"])
+    exec(compile(code, "<g-verify>", "exec"), namespace)  # noqa: S102
+
+
+def test_the_untouched_guard_passes_a_fix_that_only_repairs_its_target():
+    """The control for the three refusals below: an honest repair of the target
+    column, and nothing else moved, still verifies."""
+    _verify_after(_repair)
+
+
+def test_a_fix_that_drops_an_unrelated_column_fails_verification():
+    """The guard walked the baseline columns and skipped any that were no
+    longer in the frame, so deleting a whole column it was not aiming at was
+    invisible to it: the detector cleared, the row count held, and the loop
+    recorded the fix as verified while a column of data was gone."""
+    import pytest
+
+    with pytest.raises(AssertionError, match="were not fix targets"):
+        _verify_after(lambda f: _repair(f).drop(columns=["note"]))
+
+
+def test_a_fix_that_renames_an_unrelated_column_fails_verification():
+    """A rename is a drop plus an arrival under the old guard: the baseline name
+    was skipped as absent and the new name was never in the baseline list, so
+    nothing checked it. Downstream code keyed on the old name silently reads
+    nothing."""
+    import pytest
+
+    with pytest.raises(AssertionError, match="were not fix targets"):
+        _verify_after(lambda f: _repair(f).rename(columns={"note": "notes"}))
+
+
+def test_a_fix_that_shuffles_an_unrelated_column_fails_verification():
+    """The per-column digest was a .sum() of the row hashes, and a sum is
+    commutative: permuting a column's rows left the digest identical. So a fix
+    that tore one column loose from its rows passed the untouched check while
+    corrupting every record in the frame."""
+    import pytest
+
+    def shuffle_note(frame: pd.DataFrame) -> pd.DataFrame:
+        out = _repair(frame)
+        out["note"] = list(out["note"])[::-1]
+        return out
+
+    with pytest.raises(AssertionError, match="was not a fix target"):
+        _verify_after(shuffle_note)
+
+
+def test_the_baseline_digest_is_order_dependent():
+    """Same values, different order, must digest differently, or the guard
+    above has nothing to compare."""
+    ns, _ = _exec_baseline(_frame())
+    reversed_b = _frame()
+    reversed_b["b"] = list(reversed_b["b"])[::-1]
+    ns2, _ = _exec_baseline(reversed_b)
+
+    assert ns2["_clean_hashes"]["a"] == ns["_clean_hashes"]["a"]
+    assert ns2["_clean_hashes"]["c"] == ns["_clean_hashes"]["c"]
+    assert ns2["_clean_hashes"]["b"] != ns["_clean_hashes"]["b"]
 
 
 def test_verify_cell_exact_row_delta_for_duplicate_rows():
@@ -352,3 +452,68 @@ def test_a_frozen_case_still_trips_the_detector_it_was_carved_from() -> None:
     assert detect_one(thin, 4, ["flow"]) is not None, (
         "a disease with only a handful of sick rows must survive the carve too"
     )
+
+
+# --- integration pass: the guard's keying, executed against real frames ------
+
+
+def _verify_frame(frame: pd.DataFrame, fix, columns) -> None:
+    """The kernel round trip over an arbitrary frame: baseline, fix, verify.
+    `columns` is the baseline column list the host reads back from the
+    baseline cell, so the two sides agree the way the loop makes them agree."""
+    namespace = {"df": frame}
+    exec(compile(baseline_cell("df"), "<k-baseline>", "exec"), namespace)  # noqa: S102
+    namespace["df"] = fix(namespace["df"])
+    code = verify_cell("df", _finding(columns=("flow",)), columns)
+    exec(compile(code, "<k-verify>", "exec"), namespace)  # noqa: S102
+
+
+def test_a_non_string_column_name_does_not_break_the_guard():
+    """The guard recorded untouched names as str() and then subscripted the
+    frame with the recorded string, so one integer-named bystander raised
+    KeyError on every finding in the frame: no fix on it could ever verify,
+    and the model burned its whole attempt budget on the lookup. Reachable
+    through crivo's own reader on any spreadsheet with year headers."""
+    frame = _guard_frame().rename(columns={"site": 2020})
+
+    _verify_frame(frame, _repair, ["2020", "flow", "note"])
+
+
+def test_a_lossless_whole_frame_reorder_still_verifies():
+    """The digest read values in frame order, so sorting or sampling the whole
+    frame, every column moving together and nothing lost, failed the untouched
+    check. Pairing each value with its index label and folding the pairs in
+    sorted order keeps the tear-loose refusal below while letting the lossless
+    move through."""
+    _verify_after(lambda f: _repair(f).sort_values("site", ascending=False))
+
+
+def test_a_fix_that_wipes_a_name_shadowed_column_fails_verification():
+    """The baseline kept ONE digest per NAME, and it keyed by str(name), so of
+    two columns whose names str() alike only the survivor of the dict write
+    was addressed by anything: the integer-named one could be emptied and the
+    cell still reported VERIFIED. crivo manufactures this shape itself:
+    _fix_headers str()s every name during a d18 repair, and the loop then
+    re-snapshots the baseline over the collided names."""
+    import pytest
+
+    frame = _guard_frame().rename(columns={"site": 1, "note": "1"})
+    assert list(frame.columns) == ["flow", 1, "1"]
+
+    def wipe_the_shadowed(f: pd.DataFrame) -> pd.DataFrame:
+        out = _repair(f)
+        out.iloc[:, 1] = "WIPED"  # the integer-named column
+        return out
+
+    with pytest.raises(AssertionError, match="was not a fix target"):
+        _verify_frame(frame, wipe_the_shadowed, ["1", "flow"])
+
+
+def test_a_frame_with_duplicate_column_names_can_still_verify_an_honest_fix():
+    """The other side of it: keying by name also meant the digest was computed
+    over a two-column DataFrame at verify time and a single column at baseline
+    time, so a frame carrying a duplicate name could never verify anything at
+    all, however honest the fix."""
+    frame = _guard_frame().rename(columns={"site": "note"})
+
+    _verify_frame(frame, _repair, ["flow", "note"])

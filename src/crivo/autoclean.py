@@ -12,36 +12,209 @@ decided — the same AUTO / GATE / HUMAN line the agent honours.
 """
 
 import json as _json
+import re
 
 import pandas as pd
 
 from crivo.detect import (
     LEADING_NUMBER,
     MISSING_TOKENS,
+    NUMERIC_WITH_UNIT,
+    UNIT_LETTERS,
     ZERO_WIDTH,
+    _date_families,
+    _slot_ambiguity,
     _ws_tidy,
     detect_all,
     detect_one,
 )
 
+# Why every fixer below refuses instead of doing its best: a fixer that
+# changes a column's dtype puts the column out of its own detector's reach
+# (_text and _present return None for a non-text column), so detect_one sees
+# no finding and clean() records the fix as verified. Absence of a finding is
+# not proof of correctness. A fix that would lose or invent a value therefore
+# leaves the frame untouched, verification honestly fails, and the finding
+# reaches a human in needs_review.
+
+
+def _real(series) -> "pd.Series":
+    """Positional mask of the cells a fixer could actually lose something on.
+
+    A null, a blank and a missing-data token are already absent: coercing one
+    to NaN or NaT deletes nothing, and d04's whole job is to do exactly that.
+    The loss gates below count only the rest. Counting the others refused a
+    clean ISO column over a single stray 'N/A', and refused every external
+    column carrying empty strings.
+
+    Built out of numpy arrays rather than chained boolean Series because a
+    frame on a non-unique index makes Series alignment ambiguous.
+    """
+    text = series.astype(str).str.strip()
+    present = series.notna().to_numpy()
+    blank = (text == "").to_numpy()
+    sentinel = text.str.lower().isin(MISSING_TOKENS).to_numpy()
+    return present & ~blank & ~sentinel
+
+
+# A hyphen between two word characters belongs to the unit's name, as in Raha
+# beers' '12.0 oz. Alumi-Tek'. Anywhere else it is arithmetic.
+INNER_HYPHEN = re.compile(r"(?<=\w)-(?=\w)")
+# What a REPAIR may strip off the end of a number, which is not the set a
+# DETECTION may tolerate. NUMERIC_WITH_UNIT's suffix class carries the hyphen
+# on purpose - a false accept there costs a report - but reused as a repair
+# contract it reads the trailing minus of "1200-" as a unit and strips the
+# sign off every value in the column.
+FIXABLE_RESIDUE = re.compile(r"^[%a-zA-Z°µ²³/.\s]*$")
+# Suffixes that multiply the number instead of naming it. Stripping the 'M'
+# off "1.5M" states 1.5 where the value was 1,500,000, and no trace of the
+# scale survives in the numeric column. A unit is a name for the number, a
+# scale is part of it. 'm' is refused with the rest: metres and millions are
+# the same token and one column cannot tell them apart, so the honest answer
+# is a person, not a guess.
+SCALE_SUFFIXES = frozenset({"k", "m", "b", "bn", "mn", "tn"})
+
 
 def _fix_numbers(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
+    """numbers-as-strings: pull the number out of each cell and coerce the
+    column to numeric.
+
+    Refuses when the parse would drop a value that was really there, when any
+    source string carries characters past the number that are not a unit or
+    currency suffix, and when the suffix is a magnitude token. LEADING_NUMBER
+    is anchored only at the start, so without those gates "approx 12" becomes
+    NaN, the range "12-15" becomes 12.0, the trailing-minus negative "1200-"
+    becomes +1200 and "1.5M" becomes 1.5 - all of them invisible to d01 once
+    the column is numeric.
+    """
     out = frame.copy()
     for c in cols:
-        pulled = out[c].astype(str).str.extract(LEADING_NUMBER)
-        out[c] = pd.to_numeric(
+        series = out[c]
+        text = series.astype(str)
+        pulled = text.str.extract(LEADING_NUMBER)
+        parsed = pd.to_numeric(
             (pulled[0].fillna("") + pulled[1].fillna("")).str.replace(
                 ",", "", regex=False
             ),
             errors="coerce",
         )
+        real = _real(series)
+        if bool((real & parsed.isna().to_numpy()).any()):
+            continue  # the parse would delete values
+        if not bool(text.str.match(NUMERIC_WITH_UNIT).to_numpy()[real].all()):
+            continue  # residue past the number that is not a unit or symbol
+        residue = text.str.replace(LEADING_NUMBER, "", regex=True).str.replace(
+            INNER_HYPHEN, "", regex=True
+        )
+        if not bool(residue.str.match(FIXABLE_RESIDUE).to_numpy()[real].all()):
+            continue  # a sign or other arithmetic the extraction did not consume
+        token = residue.str.lower().str.extract(UNIT_LETTERS, expand=False)
+        if bool(token[real].isin(SCALE_SUFFIXES).any()):
+            continue  # the suffix multiplies the number, it does not name it
+        out[c] = parsed
     return out
 
 
+# family -> the separator its day/month/year slots use
+_SLOT_SEPARATORS = {"slash": "/", "dash": "-", "dot": "."}
+# families that spell the month out or carry no day/month slots at all, so no
+# inferred format can silently swap the two. One strftime string does not
+# cover them ("5 Jan 2020" and "05 January 2020" are the same family), so they
+# are parsed without a format and held to the same null gate as the rest.
+_UNSWAPPABLE_FAMILIES = frozenset({"iso-zoned", "day-month-name", "month-name-day"})
+# A time of day carries no date, and pd.to_datetime supplies the missing one
+# from the clock: "08:00:00" becomes today at 08:00. Nothing is deleted, so
+# the loss gate stays quiet, and the column is datetime64 afterwards, so d02
+# cannot see it again. The invented date also changes from run to run, which
+# breaks the reproducibility the whole tool rests on. Inventing is worse than
+# losing, so the family is refused outright. 'epoch' is here for the same
+# reason it is in _date_families' own guard - ten digits alone are an id, not
+# an instant - though d02 cannot reach it: _date_families deletes a lone
+# epoch match and d02 skips any column with more than one family.
+_UNPARSEABLE_FAMILIES = frozenset({"time", "epoch"})
+_INFER = "infer"  # _date_format's "no format needed, and none can be built"
+# How much evidence settles day-first vs month-first. A slot above 12 can only
+# be a day, but ONE such value is an outlier, not a convention: on a column of
+# month-first dates whose day slot never exceeds 12, a single stray "25/06"
+# used to derive %d/%m and transpose every other value in the column, with no
+# NaT to show for it. A genuinely day-first column puts ~61% of its days above
+# 12, so a fifth of the column is a floor that reads the real thing and
+# refuses the outlier.
+_ORDER_SUPPORT = 0.2
+
+
+def _date_format(values) -> str | None:
+    """The one format the column's date family implies, `_INFER` when the
+    family cannot confuse day with month, or None when the column has no
+    single readable format and must be left alone."""
+    families = [f for f, share in _date_families(values).items() if share >= 0.05]
+    if len(families) != 1:
+        return None
+    family = families[0]
+    if family in _UNPARSEABLE_FAMILIES:
+        return None
+    if family == "iso":
+        return "ISO8601"
+    if family == "compact":
+        return "%Y%m%d"
+    if family in _UNSWAPPABLE_FAMILIES:
+        return _INFER
+    if family not in _SLOT_SEPARATORS:
+        return None
+    sep = _SLOT_SEPARATORS[family]
+    esc = re.escape(sep)
+    slots = values.str.extract(rf"^(\d{{1,2}}){esc}(\d{{1,2}}){esc}(\d{{2,4}})$")
+    left = pd.to_numeric(slots[0], errors="coerce")
+    right = pd.to_numeric(slots[1], errors="coerce")
+    widths = slots[2].dropna().str.len().unique()
+    if len(widths) != 1:
+        return None  # two-digit and four-digit years in one column
+    year = "%Y" if int(widths[0]) == 4 else "%y"
+    # Slots above 12 settle the order, but only with corroboration: the
+    # deciding side needs a real share of the column and the other side needs
+    # none at all. Neither side exceeding 12 is _slot_ambiguity's case, both
+    # exceeding it means no order fits, and a lone dissenter means the column
+    # does not agree with itself.
+    slotted = int(left.notna().sum())
+    floor = max(2, int(slotted * _ORDER_SUPPORT))
+    left_high, right_high = int((left > 12).sum()), int((right > 12).sum())
+    if left_high >= floor and right_high == 0:
+        return f"%d{sep}%m{sep}{year}"
+    if right_high >= floor and left_high == 0:
+        return f"%m{sep}%d{sep}{year}"
+    return None
+
+
 def _fix_dates(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
+    """dates-as-strings: parse the column to datetime64 under an explicit
+    format derived from its detected family.
+
+    Refuses when `_slot_ambiguity` says day and month cannot be told apart,
+    when no single format covers the column, and when the parse would produce
+    a NaT where the input really had a date. A coerced NaT is a deleted date
+    and a swapped slot is a wrong one, and d02 sees neither once the column is
+    datetime64: pandas picks one format from the first value, so an unguarded
+    coerce read "05-01-2020" as May 1 and turned half a day-first column
+    into NaT while clean() recorded it verified.
+    """
     out = frame.copy()
     for c in cols:
-        out[c] = pd.to_datetime(out[c], errors="coerce")
+        series = out[c]
+        text = series.dropna().astype(str).str.strip()
+        text = text[text != ""]
+        if len(text) == 0 or _slot_ambiguity(text):
+            continue
+        fmt = _date_format(text)
+        if fmt is None:
+            continue
+        parsed = (
+            pd.to_datetime(series, errors="coerce")
+            if fmt == _INFER
+            else pd.to_datetime(series, format=fmt, errors="coerce")
+        )
+        if bool((_real(series) & parsed.isna().to_numpy()).any()):
+            continue  # the parse would delete values
+        out[c] = parsed
     return out
 
 
@@ -53,20 +226,31 @@ def _fix_sentinels(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
     return out
 
 
+def _strings(series) -> pd.Series:
+    """Mask of the cells that really are strings. An object column holds
+    whatever the reader put there, and astype(str) over all of it would turn
+    every int, float and bool into text. d06 and d07 stringify for their own
+    checks, so neither would ever see that happen."""
+    return series.map(lambda v: isinstance(v, str))
+
+
 def _fix_whitespace(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
     out = frame.copy()
     for c in cols:
-        mask = out[c].notna()
-        out.loc[mask, c] = _ws_tidy(out[c][mask].astype(str))
+        mask = _strings(out[c])
+        if not bool(mask.any()):
+            continue
+        out.loc[mask, c] = _ws_tidy(out[c][mask])
     return out
 
 
 def _fix_case_variants(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
     out = frame.copy()
     for c in cols:
-        mask = out[c].notna()
-        vals = out[c][mask].astype(str)
-        tidy = vals.str.replace(r"\s+", " ", regex=True).str.strip()
+        mask = _strings(out[c])
+        if not bool(mask.any()):
+            continue
+        tidy = out[c][mask].str.replace(r"\s+", " ", regex=True).str.strip()
         key = tidy.str.lower()
         # each normalised key -> its most frequent real spelling, so 'IT' is
         # preserved over 'it' rather than lowercased
@@ -76,7 +260,21 @@ def _fix_case_variants(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
 
 
 def _drop_constant(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
-    return frame.drop(columns=[c for c in cols if c in frame.columns])
+    """Drop the constant columns a d19 finding named, positionally.
+
+    Refuses when a target name is not carried by exactly one column: dropping
+    by name on a frame with two columns called "x" takes the informative twin
+    with it, and the d19 re-check then finds no column of that name at all and
+    reads the loss as proof the fix worked.
+    """
+    names = [str(c) for c in frame.columns]
+    targets = {str(c) for c in cols}
+    if any(names.count(t) != 1 for t in targets):
+        return frame
+    out = frame.iloc[:, [i for i, n in enumerate(names) if n not in targets]]
+    if len(frame.columns) - len(out.columns) != len(targets):
+        return frame
+    return out
 
 
 _TRUTHY = {"y", "yes", "true", "t", "1"}
@@ -100,19 +298,53 @@ def _fix_booleans(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
     return out
 
 
+def _header_key(value) -> str:
+    """One spelling for a header echo, whatever an earlier fixer did to it."""
+    return " ".join(str(value).split()).casefold()
+
+
+def _repeats_header(frame: pd.DataFrame, names: list) -> bool:
+    """True when a data row spells out `names`. Mirrors _d18's own scan, same
+    200-row window, so the fixer refuses the frames the detector calls
+    header-damaged for that reason.
+
+    Matched on a normalised key, not verbatim like _d18, because by the time
+    this runs the row has been through four other fixers: _ORDER puts d18
+    last, so d06 has already tidied the echo's whitespace and d07 has already
+    recased it. Verbatim, such a row matches neither the damaged names nor the
+    repaired ones, the rename goes ahead, d18 re-runs clean, and the finding
+    is recorded verified with the junk row still in the table.
+    """
+    wanted = [_header_key(n) for n in names]
+    scan = frame.head(200)
+    return any(
+        [_header_key(v) for v in scan.iloc[pos].tolist()] == wanted
+        for pos in range(len(scan))
+    )
+
+
 def _fix_headers(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
     """Repair damaged column NAMES: strip BOM/zero-width residue, collapse
-    padding, replace "Unnamed: N" placeholders, dedupe collisions — renames
+    padding, replace "Unnamed: N" placeholders, dedupe collisions. Renames
     only, never drops, and untargeted healthy names always keep their claim.
-    Header-repeat data ROWS are deliberately out of reach (row deletion is a
-    judgement call), so a frame carrying those fails d18's re-verification
-    and the rename reverts — honest, never half-fixed."""
+
+    Header-repeat data ROWS are out of reach (row deletion is a judgement
+    call), so a frame carrying one is refused outright and d18 goes to review
+    with all of its evidence. Renaming instead would be worse than
+    half-fixing: the row stops matching the repaired names, so d18's residual
+    finding carries no column names (header_rows contributes none), the
+    re-check's name comparison never matches it, and clean() records the whole
+    finding verified while the junk row is still in the table. The proposed
+    names are checked too, for the frame whose row starts matching only after
+    the repair.
+    """
     targeted = {str(c) for c in cols}
     positions = [pos for pos, name in enumerate(frame.columns) if str(name) in targeted]
     taken = {
         str(name) for pos, name in enumerate(frame.columns) if pos not in positions
     }
-    new_names = [str(name) for name in frame.columns]
+    old_names = [str(name) for name in frame.columns]
+    new_names = list(old_names)
     for pos in positions:
         text = new_names[pos]
         for z in ZERO_WIDTH:
@@ -126,6 +358,8 @@ def _fix_headers(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
             candidate = f"{text}_{k}"
         taken.add(candidate)
         new_names[pos] = candidate
+    if _repeats_header(frame, old_names) or _repeats_header(frame, new_names):
+        return frame
     out = frame.copy()
     out.columns = new_names
     return out

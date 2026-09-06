@@ -20,24 +20,59 @@ ROW_DELTA_BOUNDED = {10: "pair_count"}  # merges ≤ candidate pairs
 CASE_SICK_ROWS = 150  # rows the fix actually changed
 CASE_HEALTHY_ROWS = 50  # ... plus untouched ones, so a fix must not harm them
 
+# The per-column digest, written once and shared by the baseline snapshot and
+# the verify cell so the two can never drift apart. It hashes each row as an
+# (index label, value) PAIR, and folds the pairs in sorted order.
+#
+# The pair, because the digest used to read values alone: a fix could then
+# reorder one column's values against the rest of the frame and, since it
+# still held the same multiset of values, match the baseline exactly and
+# verify clean while every record in the table was wrong. Pairing with the
+# index also puts row identity inside the guard, which the case and admission
+# cells rely on: both freeze rows by index label.
+#
+# Sorted, because the pair already carries the row's identity: a fix that
+# sorts or samples the whole frame moves every column together and loses
+# nothing, and an order-dependent digest refused it. Sorting is what makes
+# that lossless move pass while a single column torn loose from its index
+# still fails.
+#
+# Cost is one pass plus a sort over 8 bytes per row.
+COLUMN_DIGEST = (
+    "_hashlib.blake2b("
+    "pd.util.hash_pandas_object({series}, index=True)"
+    ".sort_values().to_numpy().tobytes(), "
+    "digest_size=16).hexdigest()"
+)
+
 BASELINE_TEMPLATE = """\
+import hashlib as _hashlib
 import json as _json
 import pandas as pd
 _clean_backup = {var}.copy()
 _clean_rows = len({var})
 _clean_hashes = {{}}
 for _i in range(len({var}.columns)):
-    _clean_hashes[str({var}.columns[_i])] = int(
-        pd.util.hash_pandas_object({var}.iloc[:, _i], index=False).sum()
-    )
+    _clean_hashes.setdefault(str({var}.columns[_i]), []).append({digest})
 _json.dumps(sorted(_clean_hashes))
 """
 
 
 def baseline_cell(var: str) -> str:
-    """Snapshot rows, per-column hashes, and a revert copy. The cell's value
-    is a JSON list of baseline column names (the host needs it for R9)."""
-    return BASELINE_TEMPLATE.format(var=var)
+    """Snapshot rows, per-column digests, and a revert copy. The cell's value
+    is a JSON list of baseline column names (the host needs it for R9).
+
+    Columns are read positionally and their digests collected per name in a
+    LIST, so a frame carrying two columns under one name records two digests
+    rather than one overwriting the other. Keeping one digest per name left
+    the shadowed column addressed by nothing: it could be emptied, or torn
+    loose from its rows, and the verify cell still reported verified. Names
+    that differ only in type (the integer 1 beside the string "1") collide the
+    same way and are covered by the same list.
+    """
+    return BASELINE_TEMPLATE.format(
+        var=var, digest=COLUMN_DIGEST.format(series=f"{var}.iloc[:, _i]")
+    )
 
 
 def revert_cell(var: str) -> str:
@@ -351,7 +386,36 @@ def verify_cell(var: str, finding: dict, baseline_columns: list[str]) -> str:
     while corrupting every affected word — 'Bud<ZWSP>weiser' must become
     'Budweiser', never 'Bud weiser'. That disease is therefore anchored to the
     reference repair: the fixed column must equal _ws_tidy of the original,
-    which deletes zero-widths by construction."""
+    which deletes zero-widths by construction.
+
+    The untouched-column guard checks presence before it checks content. Both
+    halves were holes: the loop skipped any baseline column that was no longer
+    in the frame, so a fix that dropped or renamed a column it was not aiming
+    at was invisible to it, and the digest ignored row order, so a fix that
+    shuffled an untouched column's rows out of alignment with the rest of the
+    frame matched the baseline exactly. Both cleared verification while
+    destroying data, which is the worst outcome this cell can produce.
+
+    Columns are read POSITIONALLY on both sides and matched by (name, digest)
+    containment, never by subscripting the frame with a recorded name. Two
+    columns can share a name, or share one after str() (the integer 1 beside
+    the string "1"), and a name lookup then answers for one of them and denies
+    the other any check at all; a name that is not a string raises KeyError
+    outright and fails every finding on the frame. Containment asks the honest
+    question instead: every digest the baseline recorded under a name must
+    still be somewhere under that name.
+
+    Presence is checked before detect_one so that a dropped column reads as a
+    failed fix with a specific reason, rather than as whatever the detector
+    makes of the frame it is handed; it reads only the frame's own names, so
+    it still fires in a namespace that carries no baseline digests. Losing one
+    of two columns that share a name is caught a step later, by containment.
+    The guard bounds what a fix may take
+    away, not what it may add: a column arriving under a new name is left to
+    the diff, because the fixes for header damage (d18) rename their targets
+    by construction and a new column loses nothing. Reordering columns passes;
+    the fix's own target columns are exempt from all of it, since d18 renames
+    them and d19 drops them on purpose."""
     targets = set(finding.get("columns", []))
     untouched = [c for c in baseline_columns if c not in targets]
     reference = ""
@@ -370,7 +434,15 @@ def verify_cell(var: str, finding: dict, baseline_columns: list[str]) -> str:
         )
     return (
         "from crivo.detect import detect_one\n"
+        "import hashlib as _hashlib\n"
         "import pandas as pd\n"
+        f"_untouched = {json.dumps(untouched)}\n"
+        f"_now = [str(_c) for _c in {var}.columns]\n"
+        "_gone = [_c for _c in _untouched if _c not in _now]\n"
+        "assert not _gone, (\n"
+        "    f'columns {_gone} left the frame but were not fix targets; "
+        "a fix must not drop or rename a column it was not aiming at'\n"
+        ")\n"
         "try:\n"
         f"    _v = detect_one({var}, {finding['disease']}, "
         f"{json.dumps(finding.get('columns', []))})\n"
@@ -384,12 +456,21 @@ def verify_cell(var: str, finding: dict, baseline_columns: list[str]) -> str:
         "assert _v is None, f\"signal still fires: {_v['evidence']}\"\n"
         f"{reference}"
         f"{_row_invariant(var, finding)}\n"
-        f"for _c in {json.dumps(untouched)}:\n"
-        f"    if _c in {var}.columns:\n"
-        f"        _h = int(pd.util.hash_pandas_object("
-        f"{var}[_c], index=False).sum())\n"
-        "        assert _h == _clean_hashes[_c], "
-        'f"column {_c!r} changed but was not a fix target"\n'
+        "_keep = set(_untouched)\n"
+        "_pool = {}\n"
+        f"for _i in range(len({var}.columns)):\n"
+        f"    _n = str({var}.columns[_i])\n"
+        "    if _n in _keep:\n"
+        f"        _pool.setdefault(_n, []).append("
+        f"{COLUMN_DIGEST.format(series=f'{var}.iloc[:, _i]')})\n"
+        "for _c in _untouched:\n"
+        "    _left = list(_pool.get(_c, []))\n"
+        "    for _h in _clean_hashes[_c]:\n"
+        "        assert _h in _left, (\n"
+        "            f'column {_c!r} changed (values or row identity) but was "
+        "not a fix target'\n"
+        "        )\n"
+        "        _left.remove(_h)\n"
         '"verified"'
     )
 

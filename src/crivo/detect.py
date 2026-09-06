@@ -53,6 +53,15 @@ SLUGS = {
 
 INDICATORS = frozenset({12, 15})  # detected, evidenced, never auto-fixed (R2)
 FAMILY_ONLY = frozenset({20})  # needs several files; see detect_family (R3)
+# The diseases whose repair legitimately changes the column list: 17 splits a
+# packed column into its parts, 18 renames damaged headers, 19 drops the
+# column that carries no information, and 25 drops one of the columns holding
+# identical content. For every other disease a target column that is gone at
+# re-run time was renamed or deleted out from under the check, and detect_one
+# refuses to read that as a repair (R4). Sized against the taxonomy, not
+# against FIXERS: detect_one also verifies the GATE and HUMAN repairs a person
+# or the agent makes, and 17 and 25 have no deterministic fixer.
+COLUMN_CHANGING = frozenset({17, 18, 19, 25})
 SINGLE_FRAME = tuple(d for d in sorted(SLUGS) if d not in FAMILY_ONLY)
 
 REGISTRY: dict = {}  # disease -> fn(df, cols) -> list[finding]
@@ -461,6 +470,55 @@ def _number_families(values) -> dict:
     return shares
 
 
+# The unit a suffix names is its first letter run, lowercased, so '12.0 oz',
+# '12.0 OZ.' and '12.0 oz. Alumi-Tek' are all 'oz'.
+UNIT_LETTERS = re.compile(r"([a-z%°µ²³]+)")
+# A currency symbol is a unit too, and it is worn in front rather than behind.
+# Without it a column of dollars, euros and pounds reads as one uniform shape
+# to every family in NUMBER_FAMILIES, grades AUTO, and comes out of the fixer
+# as one unlabelled numeric column with three currencies added together.
+CURRENCY_SYMBOL = re.compile(r"([$€£¥])")
+# One unit under several spellings. Only spellings this project's data
+# actually mixes are listed (Raha beers' ounces column). Anything unlisted
+# keeps its own spelling and so reads as a DIFFERENT unit, which sends the
+# column to a human. That is the safe direction to be wrong in: a false
+# referral is a message, and a false merge of pounds into kilograms is not
+# recoverable from the cleaned frame.
+UNIT_SPELLINGS = (frozenset({"oz", "ounce", "ounces"}),)
+
+
+def _one_spelling(tokens: set) -> set:
+    """Collapse the tokens that are one unit written more than one way."""
+    for group in UNIT_SPELLINGS:
+        shared = tokens & group
+        if len(shared) > 1:
+            tokens = (tokens - shared) | {min(shared)}
+    # An English plural is the same unit: lb/lbs, hour/hours, tonne/tonnes.
+    # Three characters is the floor because dropping the 's' from a two-letter
+    # token merges milliseconds into metres, and a false merge is exactly what
+    # this whole check exists to prevent.
+    for token in sorted(tokens):
+        if len(token) >= 3 and token.endswith("s") and token[:-1] in tokens:
+            tokens = tokens - {token}
+    return tokens
+
+
+def _units_worn(values) -> set:
+    """The distinct units the values wear, spelling normalised.
+
+    A unit is the currency symbol a value leads with, the letter run its
+    suffix starts with, or both. Only values shaped like a number wearing one
+    are read; a bare number wears nothing and says nothing about the column.
+    """
+    worn = values[values.str.match(NUMERIC_WITH_UNIT)]
+    if not len(worn):
+        return set()
+    suffix = worn.str.replace(LEADING_NUMBER, "", regex=True).str.lower()
+    tokens = set(suffix.str.extract(UNIT_LETTERS, expand=False).dropna().unique())
+    tokens |= set(worn.str.extract(CURRENCY_SYMBOL, expand=False).dropna().unique())
+    return _one_spelling(tokens)
+
+
 @register(1)
 def _d01(df, cols) -> list:
     out = []
@@ -495,10 +553,28 @@ def _d01(df, cols) -> list:
             continue
         # the one genuinely ambiguous mix: '2,447' is 2447 under a thousands
         # comma and 2.447 under a decimal comma — same digits, two readings,
-        # so the fix needs a human eye on the convention split
+        # so the fix needs a human eye on the convention split. A column of
+        # decimal commas ALONE still grades AUTO here, but autoclean's
+        # _fix_numbers refuses it (its residue gate rejects the comma), so
+        # that grade reaches clean() and clean() can never act on it. Left as
+        # it is on purpose: the grade is about what a person is being told,
+        # and the fixer's refusal is the safe half of the mismatch.
         ambiguous = "decimal-comma" in families and (
             "thousands-comma" in families or "symbol" in families
         )
+        # A unit is one shape to the matcher and several units to a reader:
+        # '15 kg', '33 lb' and '12 oz' all match the unit-suffix family, and
+        # '$100', '€50' and '£20' all match the symbol family, so either
+        # column looks uniform and grades AUTO. Stripping the unit then merges
+        # magnitudes that were never commensurable, and the column is numeric
+        # afterwards, so d01 cannot see it again, and verification passes on
+        # the corruption. Which unit should survive and at what factor is
+        # domain knowledge the data does not carry (the same reason _d16's
+        # inferred unit mix is HUMAN), so this is a judgement call, not a
+        # mechanical one. One unit spelled many ways ('12.0 oz', '12.0 ounce')
+        # is not this: _units_worn normalises spelling first.
+        worn = _units_worn(values)
+        mixed_units = len(worn) > 1
         pulled = values.str.extract(LEADING_NUMBER)
         numeric = pd.to_numeric(
             (pulled[0].fillna("") + pulled[1].fillna("")).str.replace(
@@ -513,7 +589,15 @@ def _d01(df, cols) -> list:
             "union": round(union, 3),
             "parse_frac": extract_frac,
             "residue_frac": 1.0 - float(direct),
+            "units": sorted(worn),
         }
+        units_note = (
+            "; the suffixes name more than one unit ("
+            + ", ".join(sorted(worn))
+            + "), so stripping them merges values that were never in the same unit"
+            if mixed_units
+            else ""
+        )
         ranked = sorted(families.items(), key=lambda kv: -kv[1])
         mixed = len(families) >= 2
         if union >= FULL_COVERAGE or (mixed and union >= MIXED_FLOOR):
@@ -533,16 +617,21 @@ def _d01(df, cols) -> list:
                         if ambiguous
                         else ""
                     )
+                    + units_note
                 )
-                grade = "GATE" if ambiguous else "AUTO"
+                if mixed_units:
+                    grade = "HUMAN"
+                else:
+                    grade = "GATE" if ambiguous else "AUTO"
                 confidence = union * (0.85 if ambiguous else 0.95)
             else:
                 dirty = values[values.str.strip() != numeric.astype(str).str.strip()]
                 evidence = (
                     f"{len(values) - int(direct * len(values))}/{len(values)} values "
                     f"carry currency/unit residue; samples: {_samples(dirty)}"
+                    + units_note
                 )
-                grade = "AUTO"
+                grade = "HUMAN" if mixed_units else "AUTO"
                 confidence = min(union, extract_frac)
         else:
             # the zone the old gate spelled as silence: enough of the column
@@ -2114,7 +2203,32 @@ def detect_all(df, name: str = "df") -> dict:
 
 def detect_one(df, disease: int, columns) -> dict | None:
     """Re-run one signal scoped to one target. This is verification layer 1:
-    the fix worked when the signal that found the disease stops firing (R4)."""
+    the fix worked when the signal that found the disease stops firing (R4).
+
+    Returns the residual finding when the disease is still there, None only
+    when the target came back clean. Three things that are not clean and used
+    to return None here, because the check was an exact column-list match:
+
+    - a residual finding that covers SOME of the target columns. Half of a
+      d25 duplicate group repaired is not a repair, but the shorter column
+      list never equalled the original, so it read as one.
+    - a residual finding carrying NO column names. d18's evidence includes
+      data rows that repeat the header, which name no column, so a repair
+      that renamed the damaged headers and left the junk row cleared the
+      check while half the finding was still true.
+    - a target column that is no longer in the frame. Renaming or dropping
+      the diseased column removes it from the detector's reach, which looked
+      exactly like curing it. COLUMN_CHANGING names the diseases whose repair
+      IS a rename, a split or a drop; everywhere else a vanished column is a
+      lost column, and lost is not verified.
+
+    The rule is containment, not overlap: a residual finding counts when
+    every column it names was one of the targets. Overlap alone refuses a
+    complete repair whenever a SEPARATE finding of the same disease happens
+    to share a column, which d11 findings do by construction (each names its
+    own key plus the attributes it contradicts, and two keys contradict the
+    same attributes).
+    """
     if disease not in REGISTRY:
         raise ValueError(
             f"disease {disease} is not a single-frame signal "
@@ -2124,6 +2238,19 @@ def detect_one(df, disease: int, columns) -> dict | None:
         return None
     df = _flat(df)
     wanted = [str(c) for c in (columns or [])]
+    present = {str(c) for c in df.columns}
+    gone = [c for c in wanted if c not in present]
+    if gone and disease not in COLUMN_CHANGING:
+        return _finding(
+            disease,
+            gone,
+            f"{len(gone)} target column(s) are no longer in the frame "
+            f"({_samples(gone)}), so the signal cannot be re-run on them. "
+            "A column that disappeared is not a column that was repaired.",
+            {"missing_columns": gone, "checked": wanted},
+            "HUMAN",  # a vanished column needs a person, not another fixer
+            1.0,
+        )
     scoped = _indices(df, columns) or None
     # No except here, deliberately. This is verification layer 1 — verify.py
     # asserts `detect_one(...) is None` to mean the fix worked, so swallowing a
@@ -2136,8 +2263,30 @@ def detect_one(df, disease: int, columns) -> dict | None:
         findings = REGISTRY[disease](df, scoped)
     finally:
         _VIEWS.clear()  # the frame is mutating between fixes; never reuse a view
+    targets = set(wanted)
+    anchor = wanted[0] if wanted else None
     for finding in findings:
-        if finding["columns"] == wanted:
+        columns = finding["columns"]
+        # Two ways a residual finding counts, and neither is equality.
+        #
+        # It leads with the same column the target does. Every multi-column
+        # finding here leads with the column it is ABOUT (d11's key, d25's
+        # first twin), so this is the finding still firing however many extra
+        # columns it has since picked up.
+        #
+        # Or its columns are a STRICT subset of the targets: less of the
+        # target than the original claimed, which is what a half-repaired
+        # duplicate group looks like, or none of them at all, which is what
+        # d18's header-repeat rows look like. Strict, because two findings of
+        # the same disease can name the very same columns and still be about
+        # different ones - d11 names its key plus the attributes it
+        # contradicts, and two damaged keys contradict the same attributes -
+        # and refusing a complete repair because a sibling finding is still
+        # open is a refusal that no fix can ever clear.
+        #
+        # With no target columns at all (the table-level diseases: duplicate
+        # rows, stray rows) every residual finding counts.
+        if not targets or (columns and columns[0] == anchor) or set(columns) < targets:
             return finding
     return None
 

@@ -57,6 +57,13 @@ def _raha(dataset: str, kind: str) -> pd.DataFrame:
 
 
 def test_d01_numbers_as_strings() -> None:
+    """This fixture mixes dollars, kilograms and ounces in one column, so the
+    finding is real but the repair is not mechanical. The grade assertion was
+    AUTO, and the numeric frame below was literally what the AUTO fixer
+    produced: three incompatible quantities flattened into one float column,
+    and verified, because a numeric column can no longer trip a text signal.
+    The numeric half of the test still stands on its own claim, that a real
+    numeric column is reported clear."""
     dirty = pd.DataFrame(
         {"price": ["$1,200", "$3,400.50", "15 kg", "12.0 oz", "980"] * 4}
     )
@@ -64,17 +71,89 @@ def test_d01_numbers_as_strings() -> None:
     assert 1 in _diseases(res)
     (f,) = _of(res, 1)
     assert f["columns"] == ["price"]
-    assert f["grade"] == "AUTO"
+    assert f["grade"] == "HUMAN"
     assert f["confidence"] >= 0.9
-    clean = pd.DataFrame({"price": [1200.0, 3400.5, 15.0, 12.0, 980.0] * 4})
-    clean_res = detect_all(clean)
-    assert 1 not in _diseases(clean_res)
-    assert 1 in clean_res["clear"]
+    numeric = pd.DataFrame({"price": [1200.0, 3400.5, 15.0, 12.0, 980.0] * 4})
+    numeric_res = detect_all(numeric)
+    assert 1 not in _diseases(numeric_res)
+    assert 1 in numeric_res["clear"]
 
 
 def test_d01_id_like_digit_strings_are_not_flagged() -> None:
     df = pd.DataFrame({"provider_id": [str(10000 + i) for i in range(20)]})
     assert 1 not in _diseases(detect_all(df))
+
+
+MIXED_UNITS = [
+    "15 kg",
+    "33 lb",
+    "12 oz",
+    "8 kg",
+    "150 lb",
+    "24 oz",
+    "3 kg",
+    "90 lb",
+] * 5
+
+
+def test_d01_mixed_unit_suffixes_never_grade_auto() -> None:
+    """The unit-suffix family reads every '<number> <letters>' as one shape,
+    so a column of kilograms, pounds and ounces looked uniform and graded
+    AUTO at confidence 1.0. The fixer then stripped the suffixes and left
+    15, 33, 12 in one numeric column, and verification passed BECAUSE of the
+    damage: the column was no longer text, so d01 could not see it again.
+
+    Which unit survives, and at what factor, is domain knowledge the data
+    does not carry, so the honest answer is to hand the column to a person
+    with the units named."""
+    found = detect_one(pd.DataFrame({"weight": MIXED_UNITS}), 1, ["weight"])
+
+    assert found is not None, "the column is still numbers-as-strings"
+    assert found["grade"] == "HUMAN", found["grade"]
+    assert found["stats"]["units"] == ["kg", "lb", "oz"], found["stats"]
+    for unit in ("kg", "lb", "oz"):
+        assert unit in found["evidence"], found["evidence"]
+
+
+def test_a_mixed_unit_column_survives_clean_untouched() -> None:
+    """The grade is only half the promise. HUMAN keeps the column out of the
+    auto path entirely, so `clean` must hand it back exactly as it found it
+    and file it for review rather than report a verified fix."""
+    from crivo.autoclean import clean
+
+    before = pd.DataFrame({"weight": MIXED_UNITS})
+    after, summary = clean(before)
+
+    assert summary.applied == [], summary.applied
+    assert any(r["disease"] == 1 for r in summary.needs_review), summary.needs_review
+    pd.testing.assert_frame_equal(after, before)
+
+
+def test_d01_one_unit_spelled_many_ways_is_still_an_auto_fix() -> None:
+    """The other side of the refusal, and the line it must not cross. Raha's
+    beers column spells a single unit six ways ('12.0 oz', '12.0 oz.',
+    '12.0 OZ.', '12.0 ounce', '12.0 oz. Alumi-Tek'); every value is ounces,
+    so stripping the suffix loses nothing and the fix stays mechanical.
+    Refusing here would be over-refusal, not caution."""
+    spellings = ["12.0 oz", "16.0 oz.", "12.0 ounce", "16.0 OZ.", "24.0 oz. Alumi-Tek"]
+    found = detect_one(pd.DataFrame({"ounces": spellings * 8}), 1, ["ounces"])
+
+    assert found is not None
+    assert found["grade"] == "AUTO", found["grade"]
+    assert found["stats"]["units"] == ["ounce"], found["stats"]
+
+
+def test_d01_one_stray_unit_is_enough_to_stop_the_auto_fix() -> None:
+    """A single 'kg' among the ounces is not noise to average away: those
+    rows would be merged into the same numeric column at the wrong scale,
+    silently, and nothing downstream could tell. Not all the same unit means
+    a person looks, whatever the minority share."""
+    values = ["12.0 oz", "16.0 oz.", "12.0 ounce"] * 13 + ["15 kg"]
+    found = detect_one(pd.DataFrame({"ounces": values}), 1, ["ounces"])
+
+    assert found is not None
+    assert found["grade"] == "HUMAN", found["grade"]
+    assert found["stats"]["units"] == ["kg", "ounce"], found["stats"]
 
 
 MONEY_STYLES = (
@@ -897,6 +976,77 @@ def test_detect_one_matches_detect_all_and_clears() -> None:
     assert detect_one(fixed, 6, ["city"]) is None
 
 
+def _duplicated_columns() -> pd.DataFrame:
+    body = [f"v{i}" for i in range(20)]
+    return pd.DataFrame({"a": body, "b": body, "c": body, "keep": list(range(20))})
+
+
+def test_detect_one_refuses_a_partial_fix_on_a_multi_column_finding() -> None:
+    """Verification compared the residual finding's column list to the
+    original one for equality, so half a repair passed: three identical
+    columns reported as one d25 finding, one of them made distinct, and the
+    surviving pair came back under a SHORTER list that could never be equal.
+    The signal is still firing on columns the fix claimed to have cleared."""
+    df = _duplicated_columns()
+    ((cols),) = [f["columns"] for f in detect_all(df)["findings"] if f["disease"] == 25]
+    assert cols == ["a", "b", "c"]
+
+    half = df.assign(c=[f"w{i}" for i in range(20)])  # only c made distinct
+    residual = detect_one(half, 25, cols)
+
+    assert residual is not None, "a half-repaired duplicate group is not repaired"
+    assert residual["columns"] == ["a", "b"]
+
+
+def test_detect_one_refuses_a_fix_that_renames_the_diseased_column() -> None:
+    """Renaming the column moves it out of the detector's reach, which used
+    to be indistinguishable from curing it: the re-run found the same
+    whitespace damage under the new name, and the new name never equalled
+    the old one, so the finding was discarded and the fix called verified."""
+    dirty = pd.DataFrame(
+        {"city": ["  Vancouver", "Burnaby ", "Victoria", "Surrey "] * 5}
+    )
+    assert detect_one(dirty, 6, ["city"]) is not None
+
+    renamed = dirty.rename(columns={"city": "city_clean"})  # nothing repaired
+
+    residual = detect_one(renamed, 6, ["city"])
+    assert residual is not None, "a renamed column is not a repaired column"
+    assert residual["columns"] == ["city"]
+    assert "no longer in the frame" in residual["evidence"]
+
+
+def test_detect_one_refuses_a_fix_that_deletes_the_diseased_column() -> None:
+    """The worst version of the same hole: dropping the column deletes the
+    data AND the evidence, and the signal that cannot run then reads as a
+    signal that found nothing. Losing a column is never a repair."""
+    dirty = pd.DataFrame(
+        {"city": ["  Vancouver", "Burnaby ", "Victoria", "Surrey "] * 5, "n": range(20)}
+    )
+    residual = detect_one(dirty.drop(columns=["city"]), 6, ["city"])
+
+    assert residual is not None
+    assert residual["disease"] == 6 and residual["grade"] == "HUMAN"
+
+
+def test_detect_one_still_verifies_rename_and_drop_repairs() -> None:
+    """The exception the missing-column rule has to carry: d18's repair IS a
+    rename and d19's IS a drop, so for those two the original name being gone
+    is the fix working, not the check being dodged (COLUMN_CHANGING)."""
+    from crivo.autoclean import _drop_constant, _fix_headers
+
+    damaged = pd.DataFrame(
+        {"  Region ": range(12), "Unnamed: 1": range(12), "ok": list("abcdefghijkl")}
+    )
+    ((cols),) = [
+        f["columns"] for f in detect_all(damaged)["findings"] if f["disease"] == 18
+    ]
+    assert detect_one(_fix_headers(damaged, cols), 18, cols) is None
+
+    constant = pd.DataFrame({"k": range(12), "dead": ["x"] * 12})
+    assert detect_one(_drop_constant(constant, ["dead"]), 19, ["dead"]) is None
+
+
 def test_detect_one_rejects_bad_disease_numbers() -> None:
     df = pd.DataFrame({"a": [1, 2]})
     with pytest.raises(ValueError):
@@ -1381,3 +1531,113 @@ def test_findings_do_not_depend_on_the_frames_index(shape) -> None:
 
     assert result == baseline
     assert elapsed < 5, f"{elapsed:.1f}s at {n:,} rows — label alignment is quadratic"
+
+
+# --- integration pass: the gaps the attackers found still open ---------------
+
+
+def test_d01_mixed_currency_symbols_never_grade_auto() -> None:
+    """The unit check read alphabetic suffixes only, so the currency half of
+    the same hole stayed open: '$100', '€50' and '£20' are one shape to every
+    family in NUMBER_FAMILIES, the column graded AUTO, and the fixer returned
+    one unlabelled numeric column with three currencies added together. A
+    symbol is a unit worn in front."""
+    values = ["$100", "€50", "£20", "$300", "€75"] * 6
+    found = detect_one(pd.DataFrame({"amt": values}), 1, ["amt"])
+
+    assert found is not None
+    assert found["grade"] == "HUMAN", found["grade"]
+    assert found["stats"]["units"] == ["$", "£", "€"], found["stats"]
+
+
+def test_d01_one_currency_beside_bare_numbers_is_still_an_auto_fix() -> None:
+    """A bare number wears no unit, so it says nothing about the column's.
+    Refusing '$100' beside '980' would refuse most money columns there are."""
+    values = ["$1,200", "980", "$3,400.50", "742", "$15"] * 6
+    found = detect_one(pd.DataFrame({"amt": values}), 1, ["amt"])
+
+    assert found is not None
+    assert found["grade"] == "AUTO", found["grade"]
+    assert found["stats"]["units"] == ["$"], found["stats"]
+
+
+def test_d01_one_unit_written_singular_and_plural_is_still_an_auto_fix() -> None:
+    """UNIT_SPELLINGS listed only the ounces group, so 'lb' beside 'lbs' read
+    as two units and a mechanically fixable column went to a human for
+    nothing. Two characters is the floor for dropping the plural 's', because
+    below it milliseconds would merge into metres."""
+    values = ["5 lb", "3 lbs", "9 lb", "12 lbs"] * 6
+    found = detect_one(pd.DataFrame({"w": values}), 1, ["w"])
+
+    assert found is not None
+    assert found["grade"] == "AUTO", found["grade"]
+    assert found["stats"]["units"] == ["lb"], found["stats"]
+
+
+def test_detect_one_verifies_a_repair_a_sibling_finding_merely_overlaps() -> None:
+    """Overlap refused a complete repair whenever another finding of the same
+    disease happened to share a column, which d11 findings do by
+    construction: each names its own key plus the attributes it contradicts,
+    and two damaged keys contradict the same attributes. Containment asks the
+    right question: is this residual finding ABOUT the target?"""
+    # two independently damaged keys: order_id repeats rows 0-9 at 90-99,
+    # invoice_id repeats rows 20-29 at 80-89. Each one's duplicates disagree
+    # about city and note AND about the other key, so both findings name all
+    # four columns and differ only in which they lead with.
+    order = [f"O{k:03d}" for k in range(90)] + [f"O{k:03d}" for k in range(10)]
+    invoice = [f"I{i:03d}" for i in range(100)]
+    for i in range(80, 90):
+        invoice[i] = f"I{i - 60:03d}"
+    df = pd.DataFrame(
+        {
+            "order_id": order,
+            "invoice_id": invoice,
+            "city": ["east"] * 80 + ["west"] * 20,
+            "note": ["a"] * 80 + ["b"] * 20,
+        }
+    )
+    both = ["order_id", "invoice_id", "city", "note"]
+    leads = [f["columns"][0] for f in detect_all(df)["findings"] if f["disease"] == 11]
+    assert sorted(leads) == ["invoice_id", "order_id"], leads
+
+    repaired = df.assign(order_id=[f"O{i:03d}" for i in range(len(df))])
+
+    assert detect_one(repaired, 11, both) is None
+    assert detect_one(repaired, 11, ["invoice_id", *both[2:]]) is not None
+
+
+def test_detect_one_still_verifies_a_duplicate_column_drop() -> None:
+    """Dropping one of two identical columns is what approving a d25 GATE
+    means, and it removes the target name by construction. COLUMN_CHANGING
+    was sized against FIXERS, the clean() surface, while detect_one also
+    verifies the GATE and HUMAN repairs a person makes."""
+    df = _duplicated_columns()
+
+    assert detect_one(df.drop(columns=["a"]), 25, ["a", "b", "c"]) is not None
+    assert detect_one(df.drop(columns=["a", "b"]), 25, ["a", "b", "c"]) is None
+
+
+def test_detect_one_refuses_a_header_repair_that_leaves_the_echo_row() -> None:
+    """d18's evidence covers damaged NAMES and data ROWS that repeat them.
+    The rows name no column, so the residual finding came back with an empty
+    column list, which matched no target under either equality or overlap:
+    the rename cleared verification while the junk row was still in the
+    table. An empty column list is contained in every target set."""
+    frame = pd.DataFrame(
+        {
+            "  Region ": ["Region"] + ["e", "w"] * 8,
+            "amount": ["amount"] + ["1", "2"] * 8,
+        }
+    )
+    ((cols),) = [
+        f["columns"] for f in detect_all(frame)["findings"] if f["disease"] == 18
+    ]
+    assert cols == ["  Region "]  # the padding is all the detector saw
+
+    renamed = frame.copy()
+    renamed.columns = ["Region", "amount"]  # padding stripped, junk row left
+
+    residual = detect_one(renamed, 18, cols)
+    assert residual is not None, "the header-repeat row is still there"
+    assert residual["columns"] == []
+    assert "repeat the header" in residual["evidence"]
