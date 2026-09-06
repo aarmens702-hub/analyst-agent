@@ -148,6 +148,90 @@ def test_the_preview_screen_refuses_anything_beyond_dataframes():
     assert "parse" in verify.preview_screen("def broken(:\n")
 
 
+def test_the_preview_screen_catches_the_bypasses_it_can_see():
+    """The screen used to read dunders only when they were spelled as
+    attributes, and it never looked at pandas, which carries its own doors to
+    the filesystem. So a cell reached __builtins__ through a subscript, named
+    it through getattr, or called pd.read_pickle (which runs whatever the file
+    unpickles) and still previewed, unapproved. These are the cheap spellings,
+    and they are now named. The expensive ones stay open by construction,
+    which is what the docstring says out loud."""
+    # a dunder reached by string subscript is the same reach as an attribute
+    assert verify.preview_screen("globals()['__builtins__']['eval']('1+1')\n") != ""
+    assert "dunder" in verify.preview_screen("d['__class__']\n")
+    # ... and so is one named as a string to a lookup builtin
+    assert "getattr" in verify.preview_screen("getattr(df, '__class__')\n")
+    assert verify.preview_screen("vars(df)['__dict__']\n") != ""
+
+    # pandas reads and writes files without importing anything the import
+    # check would see; read_pickle executes what it loads
+    assert "read_pickle" in verify.preview_screen("df = pd.read_pickle('x.pkl')\n")
+    assert "read_csv" in verify.preview_screen("df = pd.read_csv('/etc/passwd')\n")
+    assert "to_csv" in verify.preview_screen("df.to_csv('/tmp/out.csv')\n")
+    assert "to_pickle" in verify.preview_screen("df.to_pickle(path='p')\n")
+
+    # but a writer handed no destination returns a string and touches nothing
+    assert verify.preview_screen("s = df.to_csv()\n") == ""
+    assert verify.preview_screen("s = df.to_json(index=False)\n") == ""
+    # and ordinary dataframe work still previews
+    assert verify.preview_screen("df['amount'] = df['amount'].abs()\n") == ""
+
+
+def test_the_preview_screen_still_previews_ordinary_cleaning_code():
+    """The screen matched builtin names against any attribute call, so
+    re.compile() (an allowlisted module's main API, and all over crivo's own
+    fixers) and df.eval()/pd.eval() (restricted pandas expression ops, not
+    Python eval) lost their preview to a reason that misdescribed them. Real
+    dunder-shaped names are collateral of the same kind: '__index_level_0__'
+    is pandas' own index column, written by pandas."""
+    assert verify.preview_screen("import re\npat = re.compile(r'^\\d+$')\n") == ""
+    assert verify.preview_screen("df = df[df.eval('amount > 0')]\n") == ""
+    assert verify.preview_screen("mask = pd.eval('df.amount > 0')\n") == ""
+    assert verify.preview_screen("df = df.drop(columns=['__index_level_0__'])\n") == ""
+    assert verify.preview_screen("src = meta['__source__']\n") == ""
+
+
+def test_the_preview_screen_reads_every_name_in_an_import():
+    """'import pandas, os' is one Import node with two names and only the
+    first was read, so a forbidden module in second position previewed
+    unapproved while the docstring listed imports as a caught pattern."""
+    assert "os" in verify.preview_screen("import pandas, os\n")
+    assert "subprocess" in verify.preview_screen("import numpy as np, subprocess\n")
+
+
+def test_the_preview_screen_sees_numpys_doors_as_well_as_pandas():
+    """numpy is allowlisted and carries the same two doors the fix closed for
+    pandas: np.load runs what it unpickles when allow_pickle is set, and the
+    save/loadtxt family reads and writes files. Closing one and not the other
+    is an asymmetry the docstring does not lead a reader to expect."""
+    assert "np.load" in verify.preview_screen("a = np.load('x.npy', allow_pickle=True)")
+    assert "np.savetxt" in verify.preview_screen("np.savetxt('/tmp/out.csv', a)\n")
+    assert "np.fromfile" in verify.preview_screen("a = numpy.fromfile('/etc/passwd')\n")
+    # a receiver that is not numpy keeps its ordinary meaning
+    assert verify.preview_screen("frame = store.load()\n") == ""
+
+
+def test_the_preview_screen_sees_pandas_constructors_and_to_string_buf():
+    """pd.ExcelFile and pd.HDFStore open files without being spelled read_*,
+    and to_string touches the filesystem only when it is handed buf=."""
+    assert "ExcelFile" in verify.preview_screen("book = pd.ExcelFile('/tmp/x.xlsx')\n")
+    assert "HDFStore" in verify.preview_screen("st = pd.HDFStore('/tmp/x.h5')\n")
+    assert "to_string" in verify.preview_screen("df.to_string(buf='/tmp/out.txt')\n")
+    assert verify.preview_screen("text = df.to_string()\n") == ""
+
+
+def test_the_preview_screen_docstring_refuses_to_claim_containment():
+    """The screen is the last thing standing between model code and the
+    kernel at preview time, which makes it tempting to read as a boundary. It
+    is not one: a name assembled at runtime walks past every check in it. The
+    docstring has to say so, because the next person to lean on this function
+    will read that and nothing else."""
+    doc = verify.preview_screen.__doc__ or ""
+    assert "not a security boundary" in doc
+    assert "best-effort" in doc
+    assert "sandbox" in doc
+
+
 def test_a_detector_crash_reads_as_uncheckable_not_as_a_failed_fix():
     """Inside verify, a detector crash was indistinguishable from a fix that
     did not work: the cell just errored, the revert ran, and the skill ledger

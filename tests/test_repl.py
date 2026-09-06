@@ -254,14 +254,17 @@ def test_auto_run_never_prompts_at_gate() -> None:
     assert GATE_PROMPT not in input_fn.prompts
 
 
-def test_gate_default_answer_runs() -> None:
+def test_gate_answer_that_is_not_a_choice_never_runs() -> None:
+    """This asserted the opposite until 2026-09-06 (P1 item 11): an
+    unrecognized answer used to fall through to run, so the gate was
+    fail-open. An answer nobody understood is not consent."""
     fake = FakeSession(script=[GateRequest("df.mean()", 1), CardReady(FakeCard())])
 
     run_repl(
-        fake, input_fn=scripted_input("q", "x", "/quit"), print_fn=RecordingPrint()
+        fake, input_fn=scripted_input("q", "x", "s", "/quit"), print_fn=RecordingPrint()
     )
 
-    assert fake.decisions == [GateDecision("run")]
+    assert fake.decisions == [GateDecision("skip")]
 
 
 # --- P1 CLEAN extensions: /clean dispatch, gate titles, [s]kip (R8, R11) ---
@@ -641,3 +644,166 @@ def test_headless_clean_accepts_a_per_gate_decide_callback() -> None:
     assert summary["needs_human"] == [
         "fix 2/2 · merge variants (declined via elicitation)"
     ]
+
+
+# --- the gate never fails open (2026-09-06 review, P0 item 5 and P1 item 11) --
+
+
+def _gated_session() -> FakeSession:
+    return FakeSession(script=[GateRequest("df.drop(columns=['v'])", 1)])
+
+
+def test_typing_the_word_skip_skips_the_cell() -> None:
+    """The prompt offers "[s]kip"; an operator who types the word it spells
+    used to have the cell executed instead."""
+    fake = _gated_session()
+    input_fn = scripted_input("q", "skip", "/quit")
+
+    run_repl(fake, input_fn=input_fn, print_fn=RecordingPrint())
+
+    assert fake.decisions == [GateDecision("skip")]
+    assert "note: " not in input_fn.prompts, "skip must not prompt for a note"
+
+
+def test_typing_the_word_reject_rejects_the_cell() -> None:
+    fake = _gated_session()
+
+    run_repl(
+        fake,
+        input_fn=scripted_input("q", "reject", "drops a column", "/quit"),
+        print_fn=RecordingPrint(),
+    )
+
+    assert fake.decisions == [GateDecision("reject", "drops a column")]
+
+
+def test_typing_the_word_run_still_runs_the_cell() -> None:
+    fake = _gated_session()
+
+    run_repl(
+        fake, input_fn=scripted_input("q", "run", "/quit"), print_fn=RecordingPrint()
+    )
+
+    assert fake.decisions == [GateDecision("run")]
+
+
+def test_gibberish_at_the_gate_reprompts_instead_of_executing() -> None:
+    """Nothing runs on an answer the driver did not understand: it says so
+    and asks again, up to GATE_TRIES times."""
+    fake = _gated_session()
+    printer = RecordingPrint()
+    input_fn = scripted_input("q", "yes please", "", "s", "/quit")
+
+    run_repl(fake, input_fn=input_fn, print_fn=printer)
+
+    assert fake.decisions == [GateDecision("skip")]
+    assert input_fn.prompts.count(GATE_PROMPT) == 3, "each bad answer re-prompts"
+    assert any("[r]un" in text for text, _ in printer.calls[1:]), (
+        "the operator is told their answer was not a choice"
+    )
+
+
+def test_policy_all_cannot_approve_a_person_grade_admission_or_plan() -> None:
+    """P0 item 5: policy_decision("all") approved HUMAN findings, HUMAN skill
+    admissions and the PLAN gate, contradicting its own docstring. The
+    pre-authorisation covers AUTO and nothing else, whatever policy string a
+    caller hands it."""
+    from crivo.repl import policy_decision
+
+    deferred = [
+        GateRequest("fix_c", 1, title="fix 3/3 · pick a side", grade="HUMAN"),
+        GateRequest("def fix(df, cols):", 1, title="admit skill fix-x", grade="HUMAN"),
+        GateRequest("plan table", 1, title="approve plan v1", grade="PLAN"),
+        GateRequest("fix_b", 1, title="fix 2/3 · merge variants", grade="GATE"),
+        GateRequest("df.mean()", 1),  # QUERY: no grade is not a licence either
+    ]
+
+    for event in deferred:
+        for policy in ("all", "auto", "anything"):
+            assert policy_decision(event, policy).action == "skip", (
+                f"{event.grade!r} under policy {policy!r} must not be approved"
+            )
+    auto = GateRequest("fix_a", 1, title="fix 1/3 · trailing space", grade="AUTO")
+    assert policy_decision(auto, "all").action == "run"
+
+
+def test_headless_policy_all_defers_person_grades_to_a_human() -> None:
+    """The same hole down the path that exposes it: run_clean_once under
+    policy="all" (the CLI flag, and until this fix a free MCP argument)."""
+    from crivo.repl import run_clean_once
+
+    gates = [
+        GateRequest("fix_a", 1, title="fix 1/3 · trailing space", grade="AUTO"),
+        GateRequest("fix_c", 1, title="fix 2/3 · pick a side", grade="HUMAN"),
+        GateRequest("admit", 1, title="admit skill fix-x", grade="HUMAN"),
+        GateRequest("plan table", 1, title="approve plan v1", grade="PLAN"),
+    ]
+    session = FakeSession(script=gates)
+
+    summary = run_clean_once(session, "data/x.csv", name="x", policy="all")
+
+    assert [d.action for d in session.decisions] == ["run", "skip", "skip", "skip"]
+    assert summary["needs_human"] == [
+        "fix 2/3 · pick a side",
+        "admit skill fix-x",
+        "approve plan v1",
+    ]
+
+
+def test_a_gate_nobody_can_answer_leaves_instead_of_spinning() -> None:
+    """The re-prompt was unbounded and printed every time, so a stdin that
+    never blocks and never ends (`yes | crivo`) span at full CPU: 4.6GB of
+    complaints in two minutes, measured, and no way out. Giving up leaves the
+    session, which is still not a run."""
+    from crivo.repl import GATE_TRIES
+
+    fake = _gated_session()
+    printer = RecordingPrint()
+    asked: list[str] = []
+
+    def never_a_choice(prompt: str = "") -> str:
+        asked.append(prompt)
+        if len(asked) > 100:
+            raise AssertionError("the gate re-prompted without bound")
+        return "q" if prompt == PROMPT else "y"
+
+    run_repl(fake, input_fn=never_a_choice, print_fn=printer)
+
+    assert fake.decisions == [], "an answer nobody understood is never consent"
+    assert asked.count(GATE_PROMPT) == GATE_TRIES
+    assert fake.closed, "the operator gets their session closed, not a spin"
+    assert any("Ctrl-D" in text for text, _ in printer.calls), (
+        "the complaint has to say how to get out of the gate"
+    )
+
+
+def test_headless_clean_treats_a_callback_that_did_not_decide_as_a_skip() -> None:
+    """run_clean_once handed decide()'s return value straight on: None
+    crashed on .action out of a headless path, and anything duck-typed
+    reached loop.py's coercion, which ran the cell."""
+    from crivo.repl import run_clean_once
+
+    session = FakeSession(
+        script=[GateRequest("fix", 1, title="fix 1/1 · pick a side", grade="HUMAN")]
+    )
+
+    summary = run_clean_once(session, "data/x.csv", name="x", decide=lambda event: None)
+
+    assert [d.action for d in session.decisions] == ["skip"]
+    assert summary["needs_human"] == [
+        "fix 1/1 · pick a side (decide() returned NoneType)"
+    ]
+
+
+def test_a_gate_with_no_title_and_no_code_is_still_reported() -> None:
+    """The one input that most needs surfacing: an untitled person-grade gate
+    over an empty cell used to raise IndexError off code.splitlines()[0], so
+    the skip was never reported at all."""
+    from crivo.repl import run_clean_once
+
+    session = FakeSession(script=[GateRequest("", 1, grade="HUMAN")])
+
+    summary = run_clean_once(session, "data/x.csv", name="x")
+
+    assert [d.action for d in session.decisions] == ["skip"]
+    assert summary["needs_human"] == [""]

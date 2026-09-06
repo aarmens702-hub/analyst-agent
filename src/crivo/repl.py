@@ -154,7 +154,11 @@ def _drive(gen, auto_run: bool, input_fn, print_fn) -> None:
                 _print_code_box(event.code, event.iteration, print_fn)
                 if event.preview:
                     print_fn(event.preview)
-                answer = GateDecision("run") if auto_run else _gate_decision(input_fn)
+                answer = (
+                    GateDecision("run")
+                    if auto_run
+                    else _gate_decision(input_fn, print_fn)
+                )
             elif isinstance(event, StreamText):
                 print_fn(event.text, end="")
             elif isinstance(event, ArtifactSaved):
@@ -179,13 +183,44 @@ def _drive(gen, auto_run: bool, input_fn, print_fn) -> None:
         return
 
 
-def _gate_decision(input_fn) -> GateDecision:
-    choice = input_fn(GATE_PROMPT).strip().lower()
-    if choice == "j":
-        return GateDecision("reject", input_fn("note: ").strip())
-    if choice == "s":
-        return GateDecision("skip")
-    return GateDecision("run")
+GATE_TRIES = 5  # unrecognized answers before the gate gives up and leaves
+
+
+def _gate_decision(input_fn, print_fn) -> GateDecision:
+    """Read one gate answer: the letters, or the words the prompt spells out.
+
+    Anything else re-prompts, GATE_TRIES times. A human interface must never
+    default to run: an answer nobody understood is not consent, and the
+    operator most likely to be misread is the one who types "skip" at "[s]kip".
+
+    Running out of tries is not a default to run either. It raises EOFError,
+    which run_repl treats as the operator leaving, so nothing executes. The
+    bound exists because an unbounded re-prompt over a stdin that never blocks
+    and never ends (`yes | crivo`) spins at full CPU writing complaints:
+    measured at 4.6GB of them in about two minutes.
+
+    Ctrl-D leaves immediately. Ctrl-C takes two: the first is caught by
+    _TurnInterrupts to cancel the model request, and only the second exits.
+    """
+    answers = {
+        "r": "run",
+        "run": "run",
+        "j": "reject",
+        "reject": "reject",
+        "s": "skip",
+        "skip": "skip",
+    }
+    for _try in range(GATE_TRIES):
+        action = answers.get(input_fn(GATE_PROMPT).strip().lower())
+        if action == "reject":
+            return GateDecision("reject", input_fn("note: ").strip())
+        if action is not None:
+            return GateDecision(action)
+        print_fn(
+            "· not one of [r]un / [j]eject / [s]kip, or the words themselves: "
+            "nothing ran. Ctrl-D leaves."
+        )
+    raise EOFError(f"no gate answer this driver understood in {GATE_TRIES} tries")
 
 
 def _print_code_box(code: str, iteration: int, print_fn) -> None:
@@ -265,10 +300,18 @@ def _why(session, line: str, print_fn) -> None:
 
 
 def policy_decision(event: GateRequest, policy: str) -> GateDecision:
-    """The human's pre-authorisation, applied by grade. An orchestrator must
-    never approve a judgement call on a person's behalf, so anything that is
-    not AUTO is skipped and reported rather than decided."""
-    if policy == "all" or event.grade == "AUTO":
+    """The human's pre-authorisation, applied by grade: AUTO runs, everything
+    else is skipped and reported rather than decided.
+
+    `policy` is accepted for the callers that still pass one, and cannot
+    widen this. No value of it approves a HUMAN finding, a skill admission
+    (graded HUMAN, because governance is never unattended), or the PLAN gate,
+    because an orchestrator must never approve a judgement call on a person's
+    behalf. An ungraded gate is a judgement call too, so it is skipped as
+    well. Until 2026-09-06 policy="all" approved all three, which is exactly
+    what the sentence above says it must not do.
+    """
+    if event.grade == "AUTO":
         return GateDecision("run")
     return GateDecision("skip")
 
@@ -306,10 +349,19 @@ def run_clean_once(
             if isinstance(event, GateRequest):
                 if decide is not None:
                     answer = decide(event)
+                    if not isinstance(answer, GateDecision):
+                        # a callback that returned None (or anything else) has
+                        # not decided anything, and loop.py would coerce it;
+                        # say so in the note rather than let it mean run
+                        answer = GateDecision(
+                            "skip", f"decide() returned {type(answer).__name__}"
+                        )
                 else:
                     answer = policy_decision(event, policy)
                 if answer.action == "skip":
-                    title = event.title or event.code.splitlines()[0]
+                    # an empty title on an empty cell is not a crash: this is
+                    # the one path that reports a gate nobody answered
+                    title = event.title or (event.code.splitlines() or [""])[0]
                     if answer.note:
                         title = f"{title} ({answer.note})"
                     needs_human.append(title)

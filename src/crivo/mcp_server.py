@@ -27,10 +27,102 @@ def _quiet():
     return contextlib.redirect_stdout(sys.stderr)
 
 
-def _diagnose_file(path: str) -> str:
-    """The free report: no key, no kernel, read-only (R2)."""
+ROOT_ENV = "CRIVO_MCP_ROOT"  # the one directory client paths may name
+SANDBOX_ENV = "CRIVO_MCP_SANDBOX"  # "docker" runs cells in the docker kernel
+NAME_MAX = 64  # a frame name is a variable name, not a payload
+
+
+def _root():
+    """The directory a client path must resolve inside: ROOT_ENV when set,
+    else the directory the server was launched in. Every path a client sends
+    is data the server reads, and without a root the free read-only report
+    reads anything this process can."""
+    import os
+    from pathlib import Path
+
+    return Path(os.environ.get(ROOT_ENV) or Path.cwd()).expanduser().resolve()
+
+
+def _client_path(path: str) -> tuple[str, str | None]:
+    """The path the caller should actually use, and why it is refused.
+
+    Returns the FULLY RESOLVED path, and every tool passes that one
+    downstream: re-resolving the client's original string leaves a window in
+    which a symlink that pointed inside the root when it was checked points
+    outside it by the time pandas opens it. That race was won 257 times in 8
+    seconds against a local symlink flipper.
+
+    Both sides are resolved before the containment test, so a symlink under
+    the root pointing out of it is caught rather than followed, and `~` is
+    expanded because the readers downstream expand it too.
+
+    A root of "/" or of the user's home is refused outright rather than
+    served: MCP stdio clients commonly launch a server with cwd="/", and a
+    root that holds everything is the same as no root at all. The refusal
+    names ROOT_ENV but never its value — a stranger's tool call should not
+    come back carrying the server's directory layout.
+    """
+    from pathlib import Path
+
+    root = _root()
+    if root.parent == root or root == Path.home():
+        return "", (
+            "this server has no usable root: it would serve the whole "
+            f"filesystem or the whole home directory. Set {ROOT_ENV} to the "
+            "directory that holds the data."
+        )
     try:
-        return checkup.report(path, as_json=True)
+        target = Path(path).expanduser().resolve()
+    except (OSError, ValueError) as exc:  # NUL bytes, loops, unreadable parents
+        return "", f"cannot resolve path {path!r}: {type(exc).__name__}"
+    if not target.is_relative_to(root):
+        return "", (
+            f"path {path!r} is outside the directory this server may read. "
+            f"Move the file under it, or set {ROOT_ENV} to a root that holds it."
+        )
+    if target.exists() and not (target.is_file() or target.is_dir()):
+        # a FIFO or a character device inside the root is not a data file:
+        # reading /dev/urandom never returns, and the server has no other
+        # thread to notice
+        return "", f"path {path!r} is not a regular file or a directory"
+    return str(target), None
+
+
+def _name_error(name: str | None) -> str | None:
+    """Why this frame name is refused, or None when it is a plain identifier.
+
+    loop.LOAD_TEMPLATE interpolates the name into the load cell's source
+    unescaped, so anything else is arbitrary code in the server's kernel.
+    `str.isidentifier` is exactly the question being asked, and it is what
+    Python itself would accept: an earlier spelling of this check as a regex
+    refused "_scratch" and "café", which are ordinary variable names that
+    worked before it existed.
+    """
+    import keyword
+
+    if name is None:
+        return None
+    if not name.isidentifier():
+        return (
+            f"name {name!r} is not a variable name: it has to be a plain "
+            "identifier (a letter or underscore, then letters, digits or "
+            "underscores)"
+        )
+    if keyword.iskeyword(name):
+        return f"name {name!r} is a Python keyword"
+    if len(name) > NAME_MAX:
+        return f"name {name!r} is longer than {NAME_MAX} characters"
+    return None
+
+
+def _diagnose_file(path: str) -> str:
+    """The free report: no key, no kernel, read-only, and only inside the
+    configured root (R2)."""
+    try:
+        target, denied = _client_path(path)
+        if denied:
+            return json.dumps({"error": denied})
+        return checkup.report(target, as_json=True)
     except Exception as exc:  # noqa: BLE001 — R6: errors are results, not crashes
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
 
@@ -47,13 +139,37 @@ def _required_key() -> str | None:
 
 
 def _make_session():
-    """Session factory, module-level so tests can swap in a double."""
+    """Session factory, module-level so tests can swap in a double.
+
+    The sandbox is an explicit choice, not an inherited default: SANDBOX_ENV
+    set to "docker" runs cells in the docker kernel, unset runs them in a host
+    subprocess with this user's files and network, and any other value is an
+    error rather than a silent fall back to the weaker one. Unsandboxed stays
+    the default because it is what every v1 deployment already runs, so it is
+    warned about loudly instead of hard-failing on a missing daemon. Whether
+    docker should be required is the owner's call, not this function's.
+    """
     import os
 
     from crivo.loop import Session
 
+    choice = os.environ.get(SANDBOX_ENV, "").strip().lower()
+    if choice not in ("", "docker"):
+        raise ValueError(
+            f"{SANDBOX_ENV}={choice!r} is not a sandbox this server knows. Set "
+            'it to "docker", or unset it to accept the host subprocess.'
+        )
+    docker = choice == "docker"
+    if not docker:
+        print(
+            "WARNING: crivo MCP is about to run model-authored code UNSANDBOXED, "
+            "in a host subprocess with this user's files and network. Set "
+            f"{SANDBOX_ENV}=docker to run cells in the docker kernel instead.",
+            file=sys.stderr,
+        )
     return Session(
         workspace=os.environ.get("CRIVO_WORKSPACE", "workspace"),
+        docker=docker,
         preview=False,  # headless: nobody reads a gate preview here (R7)
     )
 
@@ -67,6 +183,11 @@ def _clean_file(
     if missing:
         return {"error": missing}
     try:
+        target, denied = _client_path(path)
+        refused = _name_error(name) or denied
+        if refused:
+            return {"error": refused}
+
         from crivo import repl
 
         with _quiet():  # construction and load() print to stdout, the RPC wire
@@ -74,7 +195,7 @@ def _clean_file(
         try:
             with _quiet():
                 summary = repl.run_clean_once(
-                    session, path, name=name, policy=policy, decide=decide
+                    session, target, name=name, policy=policy, decide=decide
                 )
             summary["policy"] = policy
             return summary
@@ -121,12 +242,16 @@ def _open_data(path: str) -> dict:
     if missing:
         return {"error": missing}
     try:
+        target, denied = _client_path(path)
+        if denied:
+            return {"error": denied}
+
         import time
         import uuid
 
         with _quiet():  # construction and load() print to stdout, the RPC wire
             session = _make_session()
-            session.load(path)
+            session.load(target)
         datasets = getattr(session, "datasets", None) or []
         if not datasets:
             session.close()
@@ -145,10 +270,34 @@ def _open_data(path: str) -> dict:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+# The grades this driver may answer by itself. AUTO is the loop's "no
+# judgement needed" grade. "" is a QUERY analysis cell (events.py: the grade
+# is empty for QUERY gates), which is the cell `ask` exists to run, under the
+# --auto-run trust position where the calling agent is the operator. Every
+# other grade (GATE, HUMAN, PLAN) is a person's decision, and this connection
+# has no person on it.
+#
+# repl.policy_decision skips an ungraded gate and this runs one, which is a
+# real difference and not an oversight: there the ungraded gate is a
+# harmonize decision about somebody's data on the clean path, and here it is
+# the analysis cell the caller just asked for. What it costs is stated in
+# ask's own description — the caller is running model-authored code as the
+# server user, and only CRIVO_MCP_SANDBOX=docker contains it.
+AUTO_RUNNABLE_GRADES = frozenset({"", "AUTO"})
+
+
 def _ask(session_id: str, question: str) -> dict:
-    """One question over an open session (R3). Gates are auto-approved: the
-    calling agent is the operator — the --auto-run trust position; the
-    sandbox and the card's executed checks still stand."""
+    """One question over an open session (R3). The analyst's own query cells
+    and AUTO-grade requests run: the calling agent is the operator for those,
+    and the card's executed checks still stand. A gate carrying a person's
+    grade (a judgement fix, or the hard-coded HUMAN skill admission) is
+    skipped and reported back in unresolved_gates, because relaying a
+    judgement call as consent is what the grade exists to prevent.
+
+    Running the query cell is still arbitrary code execution as the server
+    user: the body comes from a model whose prompt is the client's question,
+    and only CRIVO_MCP_SANDBOX=docker contains it. The tool description says
+    so to the calling model, because nothing else here does."""
     missing = _required_key()
     if missing:
         return {"error": missing}
@@ -163,24 +312,42 @@ def _ask(session_id: str, question: str) -> dict:
     from crivo.events import CardReady, GateDecision, GateRequest, Notice
 
     notices: list[str] = []
+    unresolved: list[str] = []
+    result: dict = {"error": "the turn produced no answer card", "notices": notices}
+    turn = None
     try:
         turn = session.run_turn(question)
         event = next(turn)
         while True:
             answer = None
             if isinstance(event, GateRequest):
-                answer = GateDecision("run")
+                if event.grade in AUTO_RUNNABLE_GRADES:
+                    answer = GateDecision("run")
+                else:
+                    answer = GateDecision("skip", "no human on this connection")
+                    # an untitled gate over an empty cell is the case that
+                    # most needs reporting, so the title must not raise here
+                    title = event.title or (event.code.splitlines() or [""])[0]
+                    unresolved.append(f"{event.grade}: {title}")
             elif isinstance(event, CardReady):
-                turn.close()
-                return dataclasses.asdict(event.card)
+                result = dataclasses.asdict(event.card)
+                break
             elif isinstance(event, Notice):
                 notices.append(f"{event.kind}: {event.text}")
             event = turn.send(answer)
     except StopIteration:
         pass
     except Exception as exc:  # noqa: BLE001 — R6
-        return {"error": f"{type(exc).__name__}: {exc}", "notices": notices}
-    return {"error": "the turn produced no answer card", "notices": notices}
+        result = {"error": f"{type(exc).__name__}: {exc}", "notices": notices}
+    finally:
+        # the turn holds a kernel and its own cleanup; abandoning it on the
+        # error path leaves both to the garbage collector
+        if turn is not None:
+            with contextlib.suppress(Exception):
+                turn.close()
+    if unresolved:
+        result["unresolved_gates"] = unresolved
+    return result
 
 
 def close_all() -> None:
@@ -234,7 +401,8 @@ def build_server():
         checks (money as text, mixed date formats, sentinels, encoding damage,
         duplicates, contradictions). Returns JSON with findings, checks that
         ran clean, and checks that could not run. Free, keyless, read-only —
-        always safe to call first."""
+        always safe to call first. The path must be inside the server's
+        configured root (CRIVO_MCP_ROOT, default its launch directory)."""
         return _diagnose_file(path)
 
     @app.tool()
@@ -245,15 +413,18 @@ def build_server():
         ctx: Context | None = None,
     ) -> dict:
         """Clean a data file headlessly. Fixes are model-written, executed in
-        a sandboxed kernel, and verified by re-running the detector plus row
-        and hash invariants; failures revert. Under policy="auto" only
-        AUTO-grade fixes run — judgement-grade findings come back in
-        needs_human for a person to decide; if your client supports
+        the server's kernel, and verified by re-running the detector plus row
+        and hash invariants; failures revert. That kernel is a host subprocess
+        with the server user's files and network unless the operator set
+        CRIVO_MCP_SANDBOX=docker, so the fixes it writes run with that access.
+        path must be inside the configured root (CRIVO_MCP_ROOT) and name,
+        when given, must be a plain variable name. Only AUTO-grade fixes run:
+        judgement-grade findings come back in needs_human for a person to
+        decide, and no value of policy changes that, so there is nothing here
+        to relay a human's consent through. If your client supports
         elicitation, GATE-grade fixes are offered to the human one by one
-        instead. policy="all" approves judgement-grade changes unattended and
-        requires explicit human consent relayed by you, the calling agent; do
-        not pass it on your own initiative. Returns fixes, needs_human, and
-        artifact paths (cleaned parquet, lineage, report)."""
+        instead. Returns fixes, needs_human, and artifact paths (cleaned
+        parquet, lineage, report)."""
         import anyio
 
         decide = None
@@ -267,11 +438,13 @@ def build_server():
 
     @app.tool()
     def open_data(path: str) -> dict:
-        """Load a data file into a persistent sandboxed kernel for
-        conversational analysis. Returns a session_id for ask/why/
-        close_session and a schema/stats profile of the data. Use this when
-        multiple questions will be asked over one file; sessions idle for 30
-        minutes are closed automatically."""
+        """Load a data file into a persistent kernel for conversational
+        analysis. That kernel is a host subprocess with the server user's
+        files and network unless the operator set CRIVO_MCP_SANDBOX=docker.
+        The path must be inside the configured root (CRIVO_MCP_ROOT). Returns
+        a session_id for ask/why/close_session and a schema/stats profile of
+        the data. Use this when multiple questions will be asked over one
+        file; sessions idle for 30 minutes are closed automatically."""
         return _open_data(path)
 
     @app.tool()
@@ -279,7 +452,14 @@ def build_server():
         """Ask a question over an open session. The inner analyst writes and
         runs code cells against the loaded data and returns an answer card:
         the answer, the code, executed checks, and lineage back to the source
-        file. Trust the card's checks, not the prose alone."""
+        file. Trust the card's checks, not the prose alone. Calling this runs
+        model-authored code written from your question, un-gated, as the user
+        this server runs as — in a host subprocess with that user's files and
+        network unless the operator set CRIVO_MCP_SANDBOX=docker. Anything the
+        loop graded as a person's decision is skipped rather than approved on
+        that person's behalf, and listed in unresolved_gates when it happens:
+        if that list comes back, the answer was reached without it and a human
+        still owes the decision."""
         return _ask(session_id, question)
 
     @app.tool()

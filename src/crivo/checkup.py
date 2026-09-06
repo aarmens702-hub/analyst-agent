@@ -75,10 +75,17 @@ def load(path, **kwargs) -> pd.DataFrame:
     claim the report never made.
 
     Compression is transparent: .gz/.bz2/.xz/.zip CSVs sniff and read exactly
-    like their plain form (pandas infers the codec from the path). Extra keyword
-    args are forwarded to the pandas reader and override the sniffed defaults.
+    like their plain form (pandas infers the codec from the path), and are
+    refused first if they look like decompression bombs. Extra keyword args are
+    forwarded to the pandas reader and override the sniffed defaults.
     """
+    # this is a door, not a detail: `crivo diagnose` (keyless, aimed at a
+    # stranger's file) and ingest.load_url both reach pandas through here with
+    # nothing else standing between those bytes and the expansion
+    from crivo.readers.files import guard_compressed
+
     path = Path(path)
+    guard_compressed(path)
     if path.suffix.lower() in {".parquet", ".pq"}:
         return pd.read_parquet(path, **kwargs)
     sample = _text_sample(path)

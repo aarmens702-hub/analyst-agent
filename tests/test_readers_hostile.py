@@ -167,3 +167,102 @@ def test_decompression_bomb_is_refused_but_normal_gz_reads(tmp_path):
         fh.write(b"id,note\n1,ok\n2,N/A\n")
     df = read_file(normal)
     assert df["note"].tolist() == ["ok", "N/A"]
+
+
+def test_bomb_guard_covers_bz2_and_xz_not_just_gz(tmp_path):
+    """The guard is per-format or it is nothing: bz2 and xz declare no
+    expanded size, so a bomb in either used to expand unbounded while the
+    guard's docstring claimed otherwise. Both must now be refused with the
+    archive named, and an ordinary compressed CSV in either format must still
+    read sentinel-safely. The payload is valid CSV on purpose: before the fix
+    these read all the way through, they did not fail on a bad parse."""
+    import bz2
+    import lzma
+
+    payload = b"id,note\n" + b"1,ok\n" * (4 * 1024 * 1024)  # 20MB of real rows
+
+    for opener, ext in ((bz2.open, ".bz2"), (lzma.open, ".xz")):
+        bomb = tmp_path / f"bomb.csv{ext}"
+        with opener(bomb, "wb") as fh:
+            fh.write(payload)
+        with pytest.raises(ValueError, match=f"bomb.csv{ext}"):
+            read_file(bomb)
+
+        normal = tmp_path / f"normal.csv{ext}"
+        with opener(normal, "wb") as fh:
+            fh.write(b"id,note\n1,ok\n2,N/A\n")
+        df = read_file(normal)
+        assert df["note"].tolist() == ["ok", "N/A"], ext
+
+
+def test_a_gz_bomb_its_own_trailer_hides_is_still_refused(tmp_path):
+    """gzip's ISIZE trailer is the container's word, and two ordinary files
+    make it a lie with no forgery at all: concatenated members (what `cat
+    a.gz b.gz` produces) declare only the last one, and four bytes of padding
+    make it declare nothing. Both used to sail past the guard, so the guard
+    now measures whenever the declaration does not already condemn."""
+    import gzip
+
+    half = tmp_path / "half.gz"
+    with gzip.open(half, "wb") as fh:
+        fh.write(b"0" * (8 * 1024 * 1024))
+    concatenated = tmp_path / "concatenated.csv.gz"
+    concatenated.write_bytes(half.read_bytes() * 2)  # 16MB, trailer says 8MB
+    with pytest.raises(ValueError, match="concatenated.csv.gz"):
+        read_file(concatenated)
+
+    big = tmp_path / "big.gz"
+    with gzip.open(big, "wb") as fh:
+        fh.write(b"0" * (20 * 1024 * 1024))
+    padded = tmp_path / "padded.csv.gz"
+    padded.write_bytes(big.read_bytes() + b"\0\0\0\0")  # trailer now reads 0
+    with pytest.raises(ValueError, match="padded.csv.gz"):
+        read_file(padded)
+
+
+def test_a_compression_suffix_with_no_inner_one_is_named_unreadable(tmp_path):
+    """'nosuffix.bz2' is an extension crivo cannot read, not a bomb. Running
+    the guard before the routing accused it of being one, which is both a
+    false alarm and the wrong instruction to the user."""
+    import bz2
+
+    unreadable = tmp_path / "nosuffix.bz2"
+    with bz2.open(unreadable, "wb") as fh:
+        fh.write(b"0" * (20 * 1024 * 1024))  # a real archive, ~50 bytes on disk
+
+    with pytest.raises(ValueError, match="unsupported extension"):
+        read_file(unreadable)
+
+
+def test_the_keyless_diagnose_path_refuses_a_bomb_too(tmp_path):
+    """read_file was guarded and checkup.load was not, so `crivo diagnose` —
+    the free, keyless report a stranger points at a file — expanded the whole
+    bomb. ingest.load_url comes through the same door."""
+    import bz2
+
+    from crivo import checkup
+
+    bomb = tmp_path / "diagnosed.csv.bz2"
+    with bz2.open(bomb, "wb") as fh:
+        fh.write(b"id,note\n" + b"1,ok\n" * (4 * 1024 * 1024))
+
+    with pytest.raises(ValueError, match="decompression bomb"):
+        checkup.load(bomb)
+    with pytest.raises(ValueError, match="decompression bomb"):
+        checkup.report(bomb)
+
+
+def test_an_unguarded_compression_format_is_refused_not_read(tmp_path):
+    """The guard is a closed contract: a compressed format with no size check
+    is refused, so a suffix added to _COMPRESSION tomorrow cannot quietly
+    reopen the unbounded path. The set is pinned here for the same reason."""
+    from crivo.readers.files import _COMPRESSION, _bomb_check
+
+    assert set(_COMPRESSION) == {".gz", ".zip", ".bz2", ".xz"}, (
+        "a new compressed suffix needs a bomb guard and a case above"
+    )
+
+    unguarded = tmp_path / "payload.csv.zst"
+    unguarded.write_bytes(b"not really zstd, the guard refuses before reading")
+    with pytest.raises(ValueError, match="no decompression-bomb guard"):
+        _bomb_check(unguarded, ".zst")

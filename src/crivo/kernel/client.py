@@ -10,6 +10,7 @@ of the kernel.
 import base64
 import itertools
 import json
+import os
 import queue
 import subprocess
 import threading
@@ -30,6 +31,65 @@ DOCKER_RUN = [
     "--read-only", "--tmpfs", "/tmp",
     "--user", "1000:1000",
 ]  # fmt: skip
+
+KERNEL_ENV_PASSTHROUGH = (
+    # process basics the interpreter and anything it spawns need
+    "PATH", "HOME", "TMPDIR",
+    "LANG", "LC_ALL", "LC_CTYPE",
+    # local time. Dropping it does not fail, it silently disagrees: the cell
+    # reports one zone and the CLI printing the answer reports another
+    "TZ",
+    # how the supervisor's interpreter resolves crivo and its virtualenv
+    "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV",
+    "CONDA_PREFIX", "CONDA_DEFAULT_ENV",
+    # jupyter_client: kernelspec discovery, config, connection files
+    "JUPYTER_PATH", "JUPYTER_DATA_DIR", "JUPYTER_CONFIG_DIR", "JUPYTER_CONFIG_PATH",
+    "JUPYTER_RUNTIME_DIR", "JUPYTER_PLATFORM_DIRS", "JUPYTER_PREFER_ENV_PATH",
+    "XDG_DATA_HOME", "XDG_CONFIG_HOME",
+    "IPYTHONDIR", "MPLCONFIGDIR",
+    # the operator's own reader tuning, read inside the cell by
+    # readers.remote (crivo.readers.remote.READER_ENV_VARS). Without these a
+    # cell silently uses the defaults while remote.py's refusal tells the user
+    # to raise a limit that no longer reaches it
+    "CRIVO_HTTP_TIMEOUT_S", "CRIVO_HTTP_MAX_BYTES",
+    # where a cell's own TLS trust comes from. A wrong-looking certificate is
+    # an opaque verify failure, not a timeout, so this is worth carrying
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+)  # fmt: skip
+
+# Only the docker transport gets these, and only because the child there is
+# the docker CLI on the host, not a process running model-authored code. In
+# subprocess mode the child IS that process: DOCKER_CONFIG points at registry
+# credentials, DOCKER_CERT_PATH at a TLS client key, and SSH_AUTH_SOCK is a
+# live agent that will sign with the user's keys on request.
+DOCKER_ENV_PASSTHROUGH = (
+    "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
+    "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY",
+    "SSH_AUTH_SOCK",  # DOCKER_HOST=ssh://... has no other way to authenticate
+)  # fmt: skip
+
+# HTTP_PROXY / HTTPS_PROXY / NO_PROXY are deliberately absent: a proxy URL
+# routinely carries user:password, and nothing here would notice, because the
+# name is not key-shaped. A cell behind a corporate egress therefore cannot
+# fetch. That is a known cost, not an oversight.
+
+
+def _child_env(docker: bool = False) -> dict[str, str]:
+    """The environment for the kernel transport: an allowlist, never inheritance.
+
+    Model-authored code runs in that process and can read os.environ, so the
+    host's secrets must not be in it: `load_dotenv` puts DEEPSEEK_API_KEY and
+    ANTHROPIC_API_KEY there for the whole session. Only names the supervisor,
+    jupyter_client, or a cell actually reads are carried over; a name the host
+    has not set stays unset rather than becoming empty.
+
+    This is not containment. In subprocess mode the child is a host process
+    with this user's files, so a cell that wants the key can read .env
+    directly. Trimming the environment removes the easy route, and the
+    sandbox is what removes the rest.
+    """
+    names = KERNEL_ENV_PASSTHROUGH + (DOCKER_ENV_PASSTHROUGH if docker else ())
+    return {k: os.environ[k] for k in names if k in os.environ}
 
 
 @dataclass(frozen=True)
@@ -85,6 +145,7 @@ class KernelClient:
 
     def start(self) -> HelloInfo:
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        docker = self.transport_argv is None  # else the child is the docker CLI
         argv = self.transport_argv or self._container_argv()
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self._stderr_file = (self.workspace_dir / "supervisor.stderr.log").open("ab")
@@ -96,6 +157,7 @@ class KernelClient:
             text=True,
             encoding="utf-8",
             bufsize=1,
+            env=_child_env(docker),
         )
         threading.Thread(target=self._read_events, daemon=True).start()
         result = self._request({"op": "hello"}, timeout=90)

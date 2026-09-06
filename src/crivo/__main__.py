@@ -60,7 +60,9 @@ def main() -> int:
         "--policy",
         choices=["auto", "all"],
         default="auto",
-        help="auto: run only AUTO-grade fixes; all: approve every gate",
+        help="still accepted, and no longer widens anything: only AUTO-grade "
+        "fixes run unattended, and a judgement call waits for a person either "
+        "way (until 2026-09-06 'all' approved them on your behalf)",
     )
     if sys.argv[1:2] == ["diagnose"]:
         sys.argv = [sys.argv[0], "--diagnose", *sys.argv[2:]]

@@ -151,14 +151,124 @@ PREVIEW_ALLOWED_IMPORTS = frozenset(
 _PREVIEW_FORBIDDEN_CALLS = frozenset(
     {"open", "exec", "eval", "compile", "__import__", "input", "breakpoint"}
 )
+# lookups that name what they reach for as a string, which is how a cell gets
+# at a dunder without writing one as an attribute. Only the bare-name spelling
+# counts: eval/exec/compile/__import__ are already refused above by name, and
+# matching an attribute of the same name flags re.compile(), df.eval() and
+# pd.eval() — allowlisted, restricted, ordinary cleaning code
+_PREVIEW_DYNAMIC_CALLS = frozenset({"getattr", "vars"})
+# the dunders a cell reaches for when it is escaping, as opposed to the
+# dunder-shaped names real dataframes carry: '__index_level_0__' is pandas'
+# own index column, and a metadata dict keyed '__source__' is just a dict
+_PREVIEW_ESCAPE_DUNDERS = frozenset(
+    {
+        "__builtins__",
+        "__class__",
+        "__globals__",
+        "__subclasses__",
+        "__bases__",
+        "__base__",
+        "__mro__",
+        "__dict__",
+        "__code__",
+        "__import__",
+        "__loader__",
+        "__getattribute__",
+    }
+)
+# numpy is allowlisted too, and carries the same two doors pandas does: np.load
+# runs what it unpickles when allow_pickle is set, and the rest read or write
+# files. Matched only on an np./numpy. receiver, because "load" and "save"
+# are names any object may have
+_PREVIEW_NUMPY_RECEIVERS = frozenset({"np", "numpy"})
+_PREVIEW_NUMPY_FILES = frozenset(
+    {
+        "load",
+        "save",
+        "savez",
+        "savez_compressed",
+        "savetxt",
+        "loadtxt",
+        "genfromtxt",
+        "fromfile",
+        "memmap",
+    }
+)
+# pandas is its own door to the filesystem: no import the check above would
+# notice, and read_pickle does not merely read, it runs what it unpickles
+_PREVIEW_PANDAS_UNPICKLE = frozenset({"read_pickle"})
+_PREVIEW_PANDAS_READS = frozenset(
+    {
+        "read_csv",
+        "read_table",
+        "read_fwf",
+        "read_excel",
+        "read_json",
+        "read_html",
+        "read_xml",
+        "read_parquet",
+        "read_feather",
+        "read_orc",
+        "read_hdf",
+        "read_stata",
+        "read_sas",
+        "read_spss",
+        "read_sql",
+        "read_sql_query",
+        "read_sql_table",
+        "read_clipboard",
+        # constructors, not read_* functions, but the same door
+        "ExcelFile",
+        "HDFStore",
+    }
+)
+_PREVIEW_PANDAS_WRITES = frozenset(
+    {
+        "to_csv",
+        "to_json",
+        "to_excel",
+        "to_parquet",
+        "to_feather",
+        "to_orc",
+        "to_hdf",
+        "to_stata",
+        "to_pickle",
+        "to_sql",
+        "to_xml",
+        "to_html",
+        "to_latex",
+        "to_markdown",
+        "to_clipboard",
+        "to_string",  # returns a string unless it is handed buf=
+    }
+)
+# the writers only write when handed somewhere to write: to_csv() with no
+# destination returns a string and touches nothing
+_PREVIEW_WRITE_DESTINATIONS = frozenset(
+    {"path", "path_or_buf", "buf", "excel_writer", "con", "fname"}
+)
 
 
 def preview_screen(source: str) -> str:
-    """Why this cell must not be previewed, or "" when it is safe to.
+    """Why this cell smells, or "" when nothing on the list below shows up.
 
-    The scratch copy protects the data; it cannot protect the process. A cell
-    that imports os, opens files, or reaches for dunders runs only after the
-    human says so — the preview degrades to code-only with this reason."""
+    A best-effort smell test, not a security boundary, and nothing downstream
+    should treat it as one. It exists because a preview executes
+    model-authored code BEFORE the human approves it, so the reader of a gate
+    deserves to be told when the cell it is about to preview looks like more
+    than dataframe work: any import outside the allowlist, builtins that open
+    files or execute strings, dunder access spelled as an attribute or as a
+    string subscript, getattr/vars given a literal name, and the filesystem
+    and pickle doors that pandas and numpy carry without importing anything.
+
+    Every one of those has a spelling this function cannot see. An attribute
+    name assembled at runtime, a getattr chain, an alias bound earlier in the
+    cell: any of them walks straight past a syntactic check, and no list of
+    patterns closes that. It also reads only the names in front of it, so an
+    allowlisted module's next filesystem entry point is a gap until someone
+    adds it here. Containment is the sandbox's job. A "" here means only that
+    the cheap checks found nothing, never that the cell is safe.
+    """
     import ast
 
     try:
@@ -167,20 +277,55 @@ def preview_screen(source: str) -> str:
         return f"cell does not parse: {exc.msg}"
     for node in ast.walk(tree):
         if isinstance(node, ast.Import | ast.ImportFrom):
-            module = (
-                node.module if isinstance(node, ast.ImportFrom) else node.names[0].name
+            # every name, not just the first: "import pandas, os" is one node
+            modules = (
+                [node.module]
+                if isinstance(node, ast.ImportFrom)
+                else [alias.name for alias in node.names]
             )
-            root = (module or "").split(".")[0]
-            if root not in PREVIEW_ALLOWED_IMPORTS:
-                return f"cell imports {root!r}, which reaches beyond dataframes"
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id in _PREVIEW_FORBIDDEN_CALLS
-        ):
-            return f"cell calls {node.func.id}()"
+            for module in modules:
+                root = (module or "").split(".")[0]
+                if root not in PREVIEW_ALLOWED_IMPORTS:
+                    return f"cell imports {root!r}, which reaches beyond dataframes"
+        if isinstance(node, ast.Call):
+            receiver = ""
+            if isinstance(node.func, ast.Name):
+                called = node.func.id
+                if called in _PREVIEW_FORBIDDEN_CALLS:
+                    return f"cell calls {called}()"
+                if called in _PREVIEW_DYNAMIC_CALLS and any(
+                    isinstance(a, ast.Constant) and isinstance(a.value, str)
+                    for a in node.args
+                ):
+                    return f"cell calls {called}() with a name written as a string"
+            elif isinstance(node.func, ast.Attribute):
+                called = node.func.attr
+                if isinstance(node.func.value, ast.Name):
+                    receiver = node.func.value.id
+            else:
+                called = ""
+            if receiver in _PREVIEW_NUMPY_RECEIVERS and called in _PREVIEW_NUMPY_FILES:
+                return (
+                    f"cell calls np.{called}(), which reaches the filesystem "
+                    "(and runs the code it unpickles, when allow_pickle is set)"
+                )
+            if called in _PREVIEW_PANDAS_UNPICKLE:
+                return f"cell calls {called}(), which runs the code it unpickles"
+            if called in _PREVIEW_PANDAS_READS:
+                return f"cell calls {called}(), which reads outside the dataframes"
+            if called in _PREVIEW_PANDAS_WRITES and (
+                node.args
+                or any(kw.arg in _PREVIEW_WRITE_DESTINATIONS for kw in node.keywords)
+            ):
+                return f"cell calls {called}(), which writes outside the dataframes"
         if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
             return "cell reaches for dunder attributes"
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and node.slice.value in _PREVIEW_ESCAPE_DUNDERS
+        ):
+            return "cell reaches for dunder attributes by subscript"
     return ""
 
 

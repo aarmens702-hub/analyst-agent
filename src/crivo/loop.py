@@ -346,8 +346,12 @@ class Session:
             frames = [e["name"] for e in self._registry if e.get("type") == "DataFrame"]
             pv = yield from self._preview(frames, body)
             decision = yield GateRequest(body, iters, preview=pv)
+            # every gate site in this file coerces the same way. A driver that
+            # sends None (plain iteration over the generator) or a duck-typed
+            # object has not answered, and until 2026-09-06 that meant run, so
+            # the file was fail-open for anything but the shipped drivers
             if not isinstance(decision, GateDecision):
-                decision = GateDecision("run")
+                decision = GateDecision("skip")  # not an answer, so nothing runs
             gate_ev = self.transcript.append(
                 "gate", action=decision.action, note=decision.note
             )
@@ -373,6 +377,12 @@ class Session:
                     }
                 )
                 continue
+            if decision.action == "skip":
+                # this branch was missing, and it was the only gate site
+                # without one: a skip fell through and executed the cell,
+                # which made every skipping driver fail open on the QUERY path
+                yield Notice("skip", "cell skipped — the turn ends with no answer")
+                return
 
             cell, status = yield from self._execute_cell(body)
             cells.append(cell)
@@ -548,6 +558,14 @@ class Session:
             plan_obj, proceed = yield from self._build_and_approve_plan(fixable)
             state["plan"] = plan_obj.to_dict()
             if not proceed:
+                # headless this is now the normal outcome, because approving a
+                # plan is a person's decision and a policy string is not one.
+                # Silence here reads as "crivo found nothing"
+                yield Notice(
+                    "plan",
+                    "the plan was not approved, so no fix was attempted — "
+                    "a person has to approve a plan, whatever the policy says",
+                )
                 yield from self._save_report(state)
                 return
         for i, finding in enumerate(fixable, 1):
@@ -1002,7 +1020,7 @@ class Session:
                 ),
             )
             if not isinstance(decision, GateDecision):
-                decision = GateDecision("run")
+                decision = GateDecision("skip")  # not an answer, so nothing runs
             self.transcript.append("gate", action=decision.action, note=decision.note)
             if decision.action == "skip":
                 return False
@@ -1147,7 +1165,7 @@ class Session:
                 body, attempts, title=title, preview=pv, grade=finding["grade"]
             )
             if not isinstance(decision, GateDecision):
-                decision = GateDecision("run")
+                decision = GateDecision("skip")  # not an answer, so nothing runs
             evs.append(
                 self.transcript.append(
                     "gate", action=decision.action, note=decision.note
@@ -1353,7 +1371,7 @@ class Session:
             _plan_table(built), 1, title=f"approve {built.summary()}", grade="PLAN"
         )
         if not isinstance(decision, GateDecision):
-            decision = GateDecision("run")
+            decision = GateDecision("skip")  # not an answer, so nothing runs
         self.transcript.append("gate", action=decision.action, note="plan")
         if decision.action == "run":
             from crivo.detect import SLUGS
@@ -1405,7 +1423,7 @@ class Session:
                 code, 1, title=title, preview=pv, grade=finding["grade"]
             )
             if not isinstance(decision, GateDecision):
-                decision = GateDecision("run")
+                decision = GateDecision("skip")  # not an answer, so nothing runs
             evs.append(
                 self.transcript.append(
                     "gate", action=decision.action, note=decision.note
@@ -1500,7 +1518,7 @@ class Session:
                     code, 1, title=title, preview=pv, grade=finding["grade"]
                 )
                 if not isinstance(decision, GateDecision):
-                    decision = GateDecision("run")
+                    decision = GateDecision("skip")  # not an answer: nothing runs
                 evs.append(
                     self.transcript.append(
                         "gate", action=decision.action, note=decision.note
@@ -1699,7 +1717,7 @@ class Session:
                 grade="HUMAN",
             )
             if not isinstance(decision, GateDecision):
-                decision = GateDecision("run")
+                decision = GateDecision("skip")  # not an answer, so nothing runs
             self.transcript.append(
                 "gate",
                 action=decision.action,

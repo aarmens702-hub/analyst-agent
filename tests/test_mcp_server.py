@@ -8,6 +8,7 @@ tests/test_repl.py.
 """
 
 import json
+import pathlib
 
 import pandas as pd
 
@@ -19,6 +20,7 @@ def test_diagnose_file_is_keyless_and_returns_json(tmp_path, monkeypatch) -> Non
     agent can diagnose with no API key configured at all."""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("CRIVO_MCP_ROOT", str(tmp_path))  # the fixture file is served
     path = tmp_path / "beers.csv"
     pd.DataFrame({"ibu": ["N/A"] * 8 + [str(v) for v in range(20)]}).to_csv(
         path, index=False
@@ -100,11 +102,12 @@ def test_clean_file_relays_needs_human_and_closes_the_session(monkeypatch) -> No
     assert fake.closed, "the kernel must be closed, success or not"
 
 
-def test_ask_auto_approves_gates_and_returns_the_card(monkeypatch) -> None:
+def test_ask_runs_query_cells_and_returns_the_card(monkeypatch) -> None:
     """AC1: the session tools. open_data registers a persistent session and
     hands back its profile; ask drives run_turn with the calling agent as the
-    operator (gates auto-approved, the --auto-run trust position) and returns
-    the card as a dict with its executed checks."""
+    operator for the analyst's own query cells (grade "", the --auto-run trust
+    position) and returns the card as a dict with its executed checks. Gates
+    carrying a person's grade are a different matter, tested below."""
     from crivo.card import AnswerCard
     from crivo.events import CardReady, GateRequest
 
@@ -282,7 +285,9 @@ def test_clean_file_threads_the_decide_callback_through(monkeypatch) -> None:
 
     summary = mcp_server._clean_file("x.csv", decide=sentinel)
 
-    assert summary["file"] == "x.csv"
+    # the RESOLVED path is what goes downstream, not the client's string: the
+    # check and the read must not resolve it twice (see the TOCTOU test below)
+    assert summary["file"] == str(pathlib.Path("x.csv").resolve())
     assert received["decide"] is sentinel
 
 
@@ -346,3 +351,253 @@ def test_session_chatter_never_reaches_stdout(monkeypatch) -> None:
     assert captured.getvalue() == "", (
         f"session chatter leaked to the protocol channel: {captured.getvalue()!r}"
     )
+
+
+def test_clean_file_refuses_a_name_that_is_not_a_variable_name(monkeypatch) -> None:
+    """The client's `name` is interpolated into loop.LOAD_TEMPLATE unescaped,
+    so a client that can name a frame can run any code it likes in the
+    server's kernel. Refuse it here, before a kernel exists."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    fake = FakeSession()
+    monkeypatch.setattr(mcp_server, "_make_session", lambda: fake)
+
+    injected = "df\nimport os; os.system('id > /tmp/crivo_pwned')\ndf2"
+    refused = mcp_server._clean_file("data/x.csv", name=injected)
+
+    assert "not a variable name" in refused["error"]
+    assert fake.datasets == [], "the injected name must never reach a kernel"
+    assert (
+        "Python keyword" in mcp_server._clean_file("data/x.csv", name="class")["error"]
+    )
+
+    ok = mcp_server._clean_file("data/x.csv", name="beers")
+    assert "error" not in ok and ok["variable"] == "beers"
+
+
+def test_ask_declines_person_grade_gates_and_reports_them(monkeypatch) -> None:
+    """A GATE or HUMAN grade is a person's decision, and skill admission is
+    hard-coded HUMAN. The calling MCP client is not that person, so those
+    gates must be skipped and named back to the caller, never answered on the
+    person's behalf; the analyst's own query cell still runs."""
+    from crivo.card import AnswerCard
+    from crivo.events import CardReady, GateRequest
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    card = AnswerCard(card_id="c1", session="s1", question="q", answer="a")
+    fake = FakeSession(
+        script=[
+            GateRequest("rows = len(df)", 1),  # QUERY: grade is empty
+            GateRequest("admit", 1, title="admit skill money_to_float", grade="HUMAN"),
+            GateRequest("fix", 1, title="merge variants", grade="GATE"),
+            CardReady(card),
+        ]
+    )
+    monkeypatch.setattr(mcp_server, "_make_session", lambda: fake)
+    opened = mcp_server._open_data("data/tiny.csv")
+
+    result = mcp_server._ask(opened["session_id"], "how many rows?")
+
+    assert [d.action for d in fake.sent if d is not None] == ["run", "skip", "skip"]
+    assert result["answer"] == "a"
+    assert result["unresolved_gates"] == [
+        "HUMAN: admit skill money_to_float",
+        "GATE: merge variants",
+    ], "the caller must learn a person-grade decision was needed and skipped"
+    mcp_server.close_all()
+
+
+def test_file_tools_refuse_paths_outside_the_configured_root(
+    tmp_path, monkeypatch
+) -> None:
+    """diagnose_file is documented read-only and always safe to call first;
+    unconfined it reads any file the server process can read. A symlink inside
+    the root pointing out of it is the same escape, so containment is tested
+    after resolving both sides."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    root = tmp_path / "served"
+    (root / "sub").mkdir(parents=True)
+    inside = root / "sub" / "ok.csv"
+    pd.DataFrame({"a": [1, 2]}).to_csv(inside, index=False)
+    secret = tmp_path / "secret.csv"
+    pd.DataFrame({"a": [1]}).to_csv(secret, index=False)
+    escape = root / "escape.csv"
+    escape.symlink_to(secret)
+    monkeypatch.setenv("CRIVO_MCP_ROOT", str(root))
+    fake = FakeSession()
+    monkeypatch.setattr(mcp_server, "_make_session", lambda: fake)
+
+    assert "findings" in json.loads(mcp_server._diagnose_file(str(inside)))
+
+    for path in (str(secret), str(escape), str(root / ".." / "secret.csv")):
+        assert "outside" in json.loads(mcp_server._diagnose_file(path))["error"], path
+        assert "outside" in mcp_server._open_data(path)["error"], path
+        assert "outside" in mcp_server._clean_file(path)["error"], path
+    assert fake.datasets == [], "no refused path may reach a kernel"
+
+
+def test_the_sandbox_choice_is_explicit_and_warns_when_it_is_off(
+    monkeypatch, capsys
+) -> None:
+    """loop.Session defaults to docker=False, so a factory that passes no
+    docker argument runs model-authored code in a host subprocess with this
+    user's files and network while the tools promise a sandbox. The choice
+    must be made explicitly, and the unsandboxed default must say so aloud."""
+    import crivo.loop
+
+    seen: list[dict] = []
+
+    class Recorder:
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+
+    monkeypatch.setattr(crivo.loop, "Session", Recorder)
+    monkeypatch.delenv("CRIVO_MCP_SANDBOX", raising=False)
+
+    mcp_server._make_session()
+    assert seen[0]["docker"] is False
+    warning = capsys.readouterr().err
+    assert "CRIVO_MCP_SANDBOX" in warning and "UNSANDBOXED" in warning.upper()
+
+    monkeypatch.setenv("CRIVO_MCP_SANDBOX", "docker")
+    mcp_server._make_session()
+    assert seen[1]["docker"] is True
+    assert "UNSANDBOXED" not in capsys.readouterr().err.upper()
+
+
+def test_no_tool_docstring_promises_a_sandbox_the_server_may_not_have() -> None:
+    """The docstrings are the contract a calling model acts on. While the
+    host subprocess is still the default, none of them may claim the kernel is
+    sandboxed, and the two that run model-authored code must name the env var
+    that decides it."""
+    import asyncio
+
+    app = mcp_server.build_server()
+    tools = {t.name: t for t in asyncio.run(app.list_tools())}
+
+    for name in ("clean_file", "open_data"):
+        assert "sandboxed kernel" not in tools[name].description
+        assert "CRIVO_MCP_SANDBOX" in tools[name].description
+
+
+def test_the_file_tools_use_the_path_they_checked(tmp_path, monkeypatch) -> None:
+    """The check resolved the path and then handed the client's ORIGINAL
+    string downstream, so a symlink that pointed inside the root when it was
+    checked could point outside it by the time pandas opened it. That race was
+    won 257 times in 8 seconds; passing the resolved path closes it."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    monkeypatch.setenv("CRIVO_MCP_ROOT", str(tmp_path))
+    real = tmp_path / "real.csv"
+    pd.DataFrame({"a": [1]}).to_csv(real, index=False)
+    link = tmp_path / "link.csv"
+    link.symlink_to(real)
+    fake = FakeSession()
+    monkeypatch.setattr(mcp_server, "_make_session", lambda: fake)
+
+    mcp_server._open_data(str(link))
+
+    assert fake.datasets[-1]["path"] == str(real.resolve()), (
+        "what was checked and what is opened have to be the same path"
+    )
+
+
+def test_a_root_that_holds_everything_is_refused_not_served(monkeypatch) -> None:
+    """MCP stdio clients commonly launch a server with cwd="/", and the root
+    fell back to cwd — so the deployment that most needs confining got none of
+    it. A root of / or of the home directory is no root at all."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    for root in ("/", str(pathlib.Path.home())):
+        monkeypatch.setenv("CRIVO_MCP_ROOT", root)
+        refused = json.loads(mcp_server._diagnose_file("/etc/passwd"))["error"]
+        assert "CRIVO_MCP_ROOT" in refused and "no usable root" in refused, root
+
+
+def test_a_refusal_never_echoes_the_configured_root(tmp_path, monkeypatch) -> None:
+    """Naming the env var helps the operator; naming its value tells an
+    unauthenticated client the server's directory layout."""
+    root = tmp_path / "clients" / "acme" / "private"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("CRIVO_MCP_ROOT", str(root))
+
+    refused = json.loads(mcp_server._diagnose_file("/etc/passwd"))["error"]
+
+    assert "CRIVO_MCP_ROOT" in refused
+    assert str(root) not in refused and "acme" not in refused
+
+
+def test_a_device_file_inside_the_root_is_refused(tmp_path, monkeypatch) -> None:
+    """A FIFO or a character device inside the root is not a data file:
+    reading one never returns, and this server has no other thread to notice
+    that the client has hung it."""
+    import os
+
+    monkeypatch.setenv("CRIVO_MCP_ROOT", str(tmp_path))
+    fifo = tmp_path / "pipe.csv"
+    os.mkfifo(fifo)
+
+    refused = json.loads(mcp_server._diagnose_file(str(fifo)))["error"]
+
+    assert "not a regular file" in refused
+
+
+def test_an_ordinary_variable_name_is_not_refused(monkeypatch) -> None:
+    """The injection check was written as a regex stricter than Python, so
+    _scratch, café and any name over 63 characters were refused although they
+    are valid identifiers that worked before the check existed."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    fake = FakeSession()
+    monkeypatch.setattr(mcp_server, "_make_session", lambda: fake)
+
+    for name in ("_scratch", "_raw", "café", "df2"):
+        assert mcp_server._name_error(name) is None, name
+        assert "error" not in mcp_server._clean_file("data/x.csv", name=name), name
+    # and the injection it exists for is still refused
+    assert "not a variable name" in mcp_server._name_error("df\nimport os")
+    assert "longer than" in mcp_server._name_error("d" * 65)
+
+
+def test_an_untitled_person_grade_gate_is_still_reported(monkeypatch) -> None:
+    """The case that most needs surfacing: an untitled gate over an empty cell
+    raised IndexError off code.splitlines()[0], so _ask returned a generic
+    error, sent no decision, and reported no unresolved gate at all."""
+    from crivo.events import GateRequest
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    fake = FakeSession(script=[GateRequest("", 1, grade="HUMAN")])
+    monkeypatch.setattr(mcp_server, "_make_session", lambda: fake)
+    opened = mcp_server._open_data("data/tiny.csv")
+
+    result = mcp_server._ask(opened["session_id"], "how many rows?")
+
+    assert [d.action for d in fake.sent if d is not None] == ["skip"]
+    assert result["unresolved_gates"] == ["HUMAN: "]
+    mcp_server.close_all()
+
+
+def test_an_unknown_sandbox_value_is_an_error_not_the_weaker_default(
+    monkeypatch,
+) -> None:
+    """CRIVO_MCP_SANDBOX=dokcer used to run unsandboxed with a stderr line the
+    client may never show anyone. A sandbox the server does not recognize is
+    not a sandbox, and silently downgrading is the wrong direction to fail."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    monkeypatch.setenv("CRIVO_MCP_SANDBOX", "dokcer")
+
+    assert "CRIVO_MCP_SANDBOX" in mcp_server._clean_file("data/x.csv")["error"]
+    assert "CRIVO_MCP_SANDBOX" in mcp_server._open_data("data/x.csv")["error"]
+
+
+def test_no_tool_docstring_still_sells_policy_all_as_human_consent() -> None:
+    """repl.policy_decision now ignores `policy` entirely, so a description
+    telling the calling model to obtain and relay human consent through it is
+    the same class of false promise as the sandbox claim that was removed. ask
+    must also say plainly what calling it executes."""
+    import asyncio
+
+    app = mcp_server.build_server()
+    tools = {t.name: t for t in asyncio.run(app.list_tools())}
+
+    clean = tools["clean_file"].description
+    assert "approves judgement-grade changes unattended" not in clean
+    assert "human consent relayed by you" not in clean
+    assert "no value of policy changes that" in clean
+    assert "model-authored code" in tools["ask"].description

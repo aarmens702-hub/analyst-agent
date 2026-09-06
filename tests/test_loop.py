@@ -526,3 +526,35 @@ def test_a_long_session_compacts_instead_of_dying(session, monkeypatch):
     assert any("question 29" in str(m["content"]) for m in session.history), (
         "the recent tail stays verbatim"
     )
+
+
+def test_a_skipped_query_cell_is_not_executed(session, monkeypatch):
+    """The QUERY gate branched on "reject" only and fell through to the
+    kernel for everything else, so the REPL's [s]kip ran the cell it was
+    asked not to. It was the one gate site of seven with no skip branch."""
+    monkeypatch.setattr(
+        llm, "generate", scripted_generate(["<execute>df.mean()</execute>"])
+    )
+    FakeClient.script = [[ok_result()]]
+
+    events = drive(session.run_turn("what is the mean?"), [GateDecision("skip")])
+
+    assert FakeClient.executed == [], "a skipped cell must never reach the kernel"
+    assert [e.kind for e in events if isinstance(e, Notice)] == ["skip"]
+    assert not [e for e in events if isinstance(e, CardReady)], (
+        "a skipped cell answers nothing, so there is no card to trust"
+    )
+
+
+def test_a_driver_that_never_answers_the_gate_runs_nothing(session, monkeypatch):
+    """Plain iteration over the generator sends None. Every gate site coerced
+    that to run, so the loop was fail-open for any driver but the shipped
+    ones — including the HUMAN skill-admission gate."""
+    monkeypatch.setattr(
+        llm, "generate", scripted_generate(["<execute>df.mean()</execute>"])
+    )
+    FakeClient.script = [[ok_result()]]
+
+    list(session.run_turn("what is the mean?"))
+
+    assert FakeClient.executed == [], "an unanswered gate is not an approval"
