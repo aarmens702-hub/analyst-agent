@@ -153,6 +153,16 @@ def _add_report(report: dict, add, link) -> None:
     Only a *verified* fix advances the chain. A skipped or failed one still
     appears — hiding it would be the lie — but the next step hangs off the last
     thing that actually held.
+
+    Each fix node also carries whether anybody saw it before it ran and the
+    autonomy posture of the run that produced it, so the graph answers "which
+    steps did nobody approve". Both are read as recorded: a report written
+    before those fields existed yields `unattended` None and `autonomy` "",
+    which say "not recorded" rather than claiming a gate that may never have
+    been shown. They live on the fix node and not on the variable or source
+    node because those are shared: `add` keeps the first node it sees for an
+    id, so two reports at different levels would silently credit both to
+    whichever was read first.
     """
     var = report.get("variable", "?")
     variable_id = add(_node(f"var:{var}", VARIABLE, var))
@@ -182,6 +192,8 @@ def _add_report(report: dict, add, link) -> None:
                 origin=rec.get("origin", "model"),
                 checks_passed=verified,
                 events=rec.get("transcript_evs", []),
+                unattended=rec.get("unattended"),
+                autonomy=report.get("autonomy", ""),
             )
         )
         link(fix_id, previous)
@@ -225,6 +237,14 @@ def to_markdown(dag: dict, claim_id: str | None = None) -> str:
             state = {True: "✓", False: "✗", None: "·"}[node.get("checks_passed")]
             origin = node.get("origin", "")
             by = f" (by {origin})" if origin.startswith("skill:") else ""
+            # The step nobody saw before it ran, named on the step itself.
+            # Three answers, three renderings: nobody was asked, somebody was
+            # asked, and the report predates the field so it says neither.
+            # Rendering False and None alike let the chain a person reads
+            # claim an approval the artifact never recorded.
+            unwatched = {True: " · unattended", False: " · gated"}.get(
+                node.get("unattended"), ""
+            )
             asof = ""
             if node.get("fetched_at"):
                 # R12: remote sources are trusted as of the fetch, not forever
@@ -232,6 +252,8 @@ def to_markdown(dag: dict, claim_id: str | None = None) -> str:
                     f" — as of {node['fetched_at']} · "
                     f"content sha256 {node.get('sha256', '')[:12]}"
                 )
-            lines.append(f"    {state} {node['kind']}: {node['label']}{by}{asof}")
+            lines.append(
+                f"    {state} {node['kind']}: {node['label']}{by}{unwatched}{asof}"
+            )
         lines.append("")
     return "\n".join(lines)

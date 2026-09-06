@@ -37,12 +37,20 @@ def _m1_on(monkeypatch):
 def session(tmp_path, monkeypatch):
     monkeypatch.setattr("crivo.loop.KernelClient", FakeClient)
     FakeClient.script, FakeClient.executed = [], []
+    # Pinned careful, the way test_clean_loop pins CRIVO_M1=off. These tests
+    # measure the GATED autoclean rung and the silence an explicitly supplied
+    # policy buys; the autonomy default (packet 3) seeds a standing policy over
+    # every fixer disease, which would silence the gate this module exists to
+    # assert on and would make test_policy_batched_autoclean_yields_no_gate
+    # pass without its own policy doing any work. The autonomous arm is covered
+    # in test_loop_autonomy.py.
     s = Session(
         workspace=tmp_path / "ws",
         data_dir=tmp_path,
         skills_dir=tmp_path / "skills",
         preview=False,
         snapshots=False,
+        autonomy="careful",
     )
     s._registry_prev = {"df": ("DataFrame", "[4, 2]")}
     s._registry = list(REG)

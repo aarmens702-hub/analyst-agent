@@ -146,6 +146,65 @@ def test_the_report_carries_a_per_column_rollup_of_what_moved():
     assert "abv" not in rollup, "a failed fix moved nothing"
 
 
+def test_the_report_names_the_autonomy_level_it_ran_under():
+    """Packet 4 R4: a run that decided things for itself has to say so. The
+    level is what tells an auditor which posture produced these records."""
+    report = _report()
+    assert report.autonomy == "autonomous", "the shipped default"
+    assert "**autonomy: autonomous**" in report.to_markdown()
+
+    careful = _report()
+    careful.autonomy = "careful"
+    assert "**autonomy: careful**" in careful.to_markdown()
+
+
+def test_the_report_says_which_changes_nobody_approved():
+    """The load-bearing audit question. A count in the header answers "how
+    many", and the mark on the fix line answers "which". A total without the
+    per-fix mark would tell an auditor a number they cannot check."""
+    silent = _fix_record(4, "sentinel-missing", ["ibu"], "fixed", 1, [11, 12])
+    silent["unattended"] = True
+    gated = _fix_record(6, "whitespace-damage", ["abv"], "fixed", 1, [14])
+    gated["unattended"] = False
+    report = CleanReport(
+        report_id="s01-r001",
+        session="s01",
+        variable="beers",
+        source={},
+        fixes=[silent, gated],
+    )
+
+    md = report.to_markdown()
+
+    assert "1 change applied with no gate shown" in md
+    silent_line = next(line for line in md.splitlines() if "sentinel-missing" in line)
+    gated_line = next(line for line in md.splitlines() if "whitespace-damage" in line)
+    assert silent_line.endswith("· unattended"), silent_line
+    assert "unattended" not in gated_line, gated_line
+
+
+def test_a_report_with_no_unattended_fix_claims_none():
+    """Absence must not read as a suppressed count: a fully gated run says the
+    level and stops there."""
+    md = _report().to_markdown()
+    assert "no gate shown" not in md
+    assert "unattended" not in md
+
+
+def test_the_saved_json_carries_the_level_and_the_flags(tmp_path):
+    """The JSON is the machine-readable audit surface; the markdown is a
+    rendering of it. Both have to carry the record."""
+    report = _report()
+    report.autonomy = "careful"
+    report.fixes[0]["unattended"] = False
+    data = json.loads(
+        report.save(tmp_path / "clean_reports").read_text(encoding="utf-8")
+    )
+
+    assert data["autonomy"] == "careful"
+    assert data["fixes"][0]["unattended"] is False
+
+
 def test_empty_report_renders_with_zero_counts():
     report = CleanReport(report_id="s01-r002", session="s01", variable="df", source={})
     assert report.counts() == {

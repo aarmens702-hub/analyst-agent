@@ -156,6 +156,46 @@ def _call_stats(path: Path) -> dict:
     return stats
 
 
+def _arm_gates(args: argparse.Namespace) -> str:
+    """The gate policy this arm actually drives with.
+
+    An autonomy arm is always driven with HUMAN gates skipped. `approve` runs
+    every non-admission HUMAN gate, which is a person's authorisation to give,
+    and an autonomy arm's reach is meant to come from the Session's seeded
+    AUTO policy alone. `main` refuses the combination at the parser and says
+    so; this is the same rule at the point of use, because `_arm_suffix` and
+    `_run_case` are called with hand-built namespaces that never pass through
+    that parser. Reads knobs defensively for the same reason.
+    """
+    gates = getattr(args, "human_gates", "skip")
+    if gates == "approve" and getattr(args, "autonomy", None):
+        return "skip"
+    return gates
+
+
+def _arm_suffix(args: argparse.Namespace) -> str:
+    """The filename tag naming this arm, for both the result and the telemetry
+    file. Every knob that changes what an arm measures has to appear here: the
+    result name is also the resume key (`main` reuses a case whose file exists,
+    R5), so an arm missing from the name reads the other arm's row and reports
+    its numbers as its own. The default arm keeps the empty suffix and the
+    ceiling arm keeps `.ceiling`, so the results already on disk stay
+    addressable. Reads knobs defensively, since callers build the namespace by
+    hand. Names the gate policy that will actually be driven, not the one that
+    was asked for, so the filename never claims a ceiling arm the run refused
+    to be."""
+    parts = []
+    if _arm_gates(args) == "approve":
+        parts.append("ceiling")
+    policies = getattr(args, "policies", "none")
+    if policies and policies != "none":
+        parts.append(f"policies-{policies}")
+    autonomy = getattr(args, "autonomy", None)
+    if autonomy:
+        parts.append(autonomy)
+    return "".join(f".{part}" for part in parts)
+
+
 def _run_case(entry: dict, args: argparse.Namespace) -> dict:
     from crivo.loop import Session
 
@@ -168,12 +208,20 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
     fmt = _handoff(dirty, work / "data" / name)
     dirty_path = next((work / "data").glob(f"{name}.*"))
 
+    # An unset --autonomy is the baseline arm: pin "careful" rather than
+    # inherit the Session's autonomous default, so the empty-suffix results
+    # keep meaning what the ones already on disk say (every AUTO finding
+    # gated). The arms are opted into, never fallen into.
+    autonomy = getattr(args, "autonomy", None) or "careful"
+    human_gates = _arm_gates(args)
     row: dict = {
         "name": name,
         "diseases": entry["diseases"],
         "date": datetime.now(tz=UTC).isoformat(timespec="seconds"),
         "handoff": fmt,
-        "human_gates": args.human_gates,
+        "human_gates": human_gates,
+        "policies": getattr(args, "policies", "none"),
+        "autonomy": autonomy,
         "model": llm.model_info(),
         "status": "ok",
     }
@@ -181,7 +229,7 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
     gates: list = []
     # T1.5: per-case telemetry file, per arm; the generate() calls run in
     # this host process and read CRIVO_TELEMETRY per call (crivo/telemetry.py)
-    suffix = ".ceiling" if args.human_gates == "approve" else ""
+    suffix = _arm_suffix(args)
     tele_path = RESULTS_DIR / "telemetry" / f"{name}{suffix}.jsonl"
     tele_path.parent.mkdir(parents=True, exist_ok=True)
     tele_path.unlink(missing_ok=True)  # stale spans must not count in this run
@@ -196,6 +244,7 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
             preview=False,
             snapshots=False,
             policies=getattr(args, "policy_records", None),
+            autonomy=autonomy,
         )
         try:
             session.load(str(dirty_path), "df")
@@ -205,7 +254,7 @@ def _run_case(entry: dict, args: argparse.Namespace) -> dict:
                 args.wall_cap,
                 t0,
                 gates=gates,
-                human_gates=args.human_gates,
+                human_gates=human_gates,
             )
             cleaned_path = Path(session.session_dir) / "cleaned" / "df.parquet"
             if cleaned_path.exists():
@@ -266,6 +315,16 @@ def main(argv: list[str] | None = None) -> int:
         "registered fixer (the M1 batched arm; T1.4)",
     )
     parser.add_argument(
+        "--autonomy",
+        choices=("autonomous", "careful"),
+        default=None,
+        help="the autonomy arm to measure: autonomous applies AUTO findings "
+        "with a registered fixer without showing a gate, careful gates them. "
+        "Unset keeps the baseline arm (careful, empty file suffix). "
+        "report-only is not an arm here: the bench scores cleaned output and "
+        "a report-only run cleans nothing",
+    )
+    parser.add_argument(
         "--repeat",
         type=int,
         default=1,
@@ -273,6 +332,16 @@ def main(argv: list[str] | None = None) -> int:
         "N model runs per case, so this is a paid choice",
     )
     args = parser.parse_args(argv)
+    if args.autonomy and args.human_gates == "approve":
+        # An autonomy arm is measured with HUMAN gates skipped. `approve` runs
+        # every non-admission HUMAN gate, which is a person's authorisation to
+        # give, and the autonomous arm's reach is meant to come from the
+        # Session's seeded AUTO policy alone. Coerce to the safe arm, and say
+        # so: the row and the filename both record what actually ran. Saying
+        # it here is for the operator who typed both flags; _arm_gates is what
+        # enforces it, at every point of use.
+        print("--autonomy is measured with --human-gates skip; approve ignored")
+        args.human_gates = "skip"
     args.policy_records = []
     if args.policies == "auto":
         args.policy_records = [
@@ -296,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
         wanted = {n.strip() for n in args.only.split(",") if n.strip()}
         picked = [e for e in picked if e["name"] in wanted]
 
-    suffix = ".ceiling" if args.human_gates == "approve" else ""
+    suffix = _arm_suffix(args)
     repeat = max(1, args.repeat)
     rows = []
     for entry in picked:

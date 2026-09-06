@@ -142,3 +142,42 @@ def evaluate(
         condition=None if denial is None else denial["condition"],
     )
     return decision
+
+
+def default_autonomous_policies(
+    valid_disease_ids, fixers, expires: str = "2099-01-01"
+) -> list[PolicyRecord]:
+    """The standing ENFORCE policy the autonomous default arms over AUTO
+    findings that have a registered deterministic fixer.
+
+    The shipped-default twin of the bench `bench-auto` record and of the
+    in-session plan-approval record: same shape, same admission validation.
+    Pure and keyless, so it holds no session state and does no I/O: the
+    taxonomy's valid ids and the fixer registry arrive as parameters, and this
+    module still imports neither detect nor autoclean. Returns a fresh
+    one-element list, so a caller may keep mutating its own policy list.
+
+    It CANNOT silence a GATE or HUMAN finding. `evaluate` reads the grade
+    before it reads any policy, so a disease listed here still denies that
+    disease's non-AUTO findings on "grade". Autonomy is a silence decision
+    about which AUTO-with-fixer findings apply without showing a gate, not a
+    widening of what may be decided, and adding GATE-graded ids here would not
+    change that. Keep it AUTO-only regardless.
+
+    Listing an id is permission, not a promise of repair. `fixers` is passed
+    whole because the grade check already narrows the effective reach to the
+    AUTO subset; ids that never grade AUTO are inert here. The reach is
+    narrower still in practice, because several fixers refuse inputs they
+    cannot repair soundly, and a refused input simply leaves the finding for
+    the model.
+    """
+    return [
+        PolicyRecord(
+            id="autonomy-auto",
+            disease_ids=tuple(sorted(fixers)),
+            approver="autonomy-default",
+            expires=expires,
+            mode="ENFORCE",
+            valid_disease_ids=valid_disease_ids,
+        )
+    ]

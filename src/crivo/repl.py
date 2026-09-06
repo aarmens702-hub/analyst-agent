@@ -331,8 +331,10 @@ def run_clean_once(
     applying the blanket policy). A skip whose decision carries a note
     (declined, elicitation unavailable) surfaces the note in needs_human.
     Returns a machine-readable summary: what ran, what was deferred to a
-    human, and where the durable artifacts landed. Tolerant of SessionLike
-    doubles, like every other driver in this module.
+    human, and where the durable artifacts landed. "notices" is present only
+    when the run raised one a caller must not miss (today: the once-per-
+    workspace autonomy notice, which no other headless surface renders).
+    Tolerant of SessionLike doubles, like every other driver in this module.
     """
     session.load(path, name)
     datasets = getattr(session, "datasets", None) or []
@@ -341,11 +343,18 @@ def run_clean_once(
         return {"file": path, "error": "load failed; nothing to clean"}
 
     needs_human: list[str] = []
+    told: list[str] = []
     turn = session.clean(var)
     try:
         event = next(turn)
         while True:
             answer = None
+            if isinstance(event, Notice) and event.kind == "autonomy":
+                # the one notice a headless caller must not drop on the floor:
+                # it fires once per workspace, the session records that it
+                # fired, and there is no second chance to say that software
+                # edited this person's data without asking
+                told.append(event.text)
             if isinstance(event, GateRequest):
                 if decide is not None:
                     answer = decide(event)
@@ -370,6 +379,8 @@ def run_clean_once(
         pass
 
     summary = {"file": path, "variable": var, "needs_human": needs_human}
+    if told:
+        summary["notices"] = told
     session_dir = getattr(session, "session_dir", None)
     reports = sorted(session_dir.glob("clean_reports/*.json")) if session_dir else []
     if reports:
@@ -381,9 +392,15 @@ def run_clean_once(
                 "slug": rec["finding"]["slug"],
                 "grade": rec["finding"]["grade"],
                 "status": rec["status"],
+                # "which of these did nobody approve" is the audit question
+                # this mode exists to raise, and an agent driving the headless
+                # surface should not have to open the report JSON to ask it.
+                # None means a record written before the flag existed.
+                "unattended": rec.get("unattended"),
             }
             for rec in report["fixes"]
         ]
+        summary["autonomy"] = report.get("autonomy", "")
         summary["outputs"] = report.get("outputs", {})
         summary["skills_admitted"] = report.get("skills_admitted", [])
     return summary

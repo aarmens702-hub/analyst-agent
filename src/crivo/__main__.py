@@ -9,6 +9,10 @@ from dotenv import load_dotenv
 
 def main() -> int:
     load_dotenv()
+    # import-light and keyless: governance pulls in crivo.policy and the
+    # standard library only, so --diagnose still costs no model and no key
+    from crivo.governance import AUTONOMY_LEVELS
+
     parser = argparse.ArgumentParser(prog="crivo")
     parser.add_argument(
         "--auto-run", action="store_true", help="skip the accept/run gate (dev only)"
@@ -63,6 +67,17 @@ def main() -> int:
         help="still accepted, and no longer widens anything: only AUTO-grade "
         "fixes run unattended, and a judgement call waits for a person either "
         "way (until 2026-09-06 'all' approved them on your behalf)",
+    )
+    parser.add_argument(
+        "--autonomy",
+        choices=list(AUTONOMY_LEVELS),
+        default="autonomous",
+        help="how much crivo decides on its own. 'autonomous' (the default) "
+        "applies AUTO-grade findings that have a registered deterministic "
+        "fixer without asking, re-checking each one and reverting it if the "
+        "check fails; 'careful' asks before every fix; 'report-only' "
+        "diagnoses and changes nothing. A judgement call waits for a person "
+        "at every level, and no level admits a skill.",
     )
     if sys.argv[1:2] == ["diagnose"]:
         sys.argv = [sys.argv[0], "--diagnose", *sys.argv[2:]]
@@ -132,6 +147,7 @@ def main() -> int:
                 data_dir=args.data_dir,
                 docker=args.docker,
                 preview=False,  # headless: nobody reads a preview
+                autonomy=args.autonomy,
             )
             try:
                 summary = run_clean_once(
@@ -143,6 +159,8 @@ def main() -> int:
         if args.json:
             print(_json.dumps(summary))
         else:
+            for text in summary.get("notices", []):
+                print(text)
             fixes = summary.get("fixes", [])
             done = sum(1 for f in fixes if f["status"] == "fixed")
             print(f"{args.clean}: {done}/{len(fixes)} findings fixed")
@@ -162,6 +180,7 @@ def main() -> int:
         # every gate auto-approves
         preview=not args.auto_run,
         resume=args.resume,
+        autonomy=args.autonomy,
     )
     run_repl(session, auto_run=args.auto_run)
     return 0

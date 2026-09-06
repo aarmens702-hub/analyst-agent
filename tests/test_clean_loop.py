@@ -325,6 +325,49 @@ def test_proven_skill_on_an_auto_finding_costs_no_model_call(stocked, monkeypatc
     assert stocked.library.entries["fix-sentinel-missing"]["successes"] == 1
 
 
+def test_a_proven_skills_silent_fix_is_recorded_as_unattended(stocked, monkeypatch):
+    """A proven skill is the other way a change reaches the data with no gate
+    shown. The audit question is "which changes did nobody approve", not
+    "which changes did autoclean make", so the flag has to cover this rung
+    too, or a missing flag reads as approved."""
+    monkeypatch.setattr(llm, "generate", counting_generate([]))
+    entry = stocked.library.register("fix-sentinel-missing", disease=4)
+    entry["state"] = "proven"
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # skill's fix applied, unwatched
+        [ok()],  # verification runs either way
+        baseline(),
+        saved(),
+    ]
+    drive(stocked.clean("df"))
+
+    rec = report_of(stocked)["fixes"][0]
+    assert rec["origin"] == "skill:fix-sentinel-missing"
+    assert rec["unattended"] is True
+
+
+def test_a_probation_skills_gated_fix_is_recorded_as_approved(stocked, monkeypatch):
+    """Same skill, same fixer, a gate in between: the flag is what tells the
+    two runs apart on the record."""
+    monkeypatch.setattr(llm, "generate", counting_generate([]))
+    stocked.library.register("fix-sentinel-missing", disease=4)
+    FakeClient.script = [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # skill's fix, once the gate is answered
+        [ok()],  # verify
+        baseline(),
+        saved(),
+    ]
+    drive(stocked.clean("df"))
+
+    rec = report_of(stocked)["fixes"][0]
+    assert rec["origin"] == "skill:fix-sentinel-missing"
+    assert rec["unattended"] is False
+
+
 def test_a_skill_on_probation_still_stops_at_the_gate(stocked, monkeypatch):
     """AC4: earning silence takes a track record; a new skill has none."""
     monkeypatch.setattr(llm, "generate", counting_generate([]))

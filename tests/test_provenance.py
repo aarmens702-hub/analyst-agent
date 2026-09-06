@@ -83,7 +83,7 @@ def test_an_ungrounded_claim_and_a_failed_one_are_untrusted_differently(
     assert "did not pass its checks" in failed["reason"]
 
 
-def write_report(session: Path, statuses) -> None:
+def write_report(session: Path, statuses, extra=None, **report_keys) -> None:
     (session / "clean_reports").mkdir(parents=True, exist_ok=True)
     (session / "clean_reports" / "r001.json").write_text(
         json.dumps(
@@ -97,10 +97,12 @@ def write_report(session: Path, statuses) -> None:
                         "status": status,
                         "origin": "model",
                         "transcript_evs": [7],
+                        **((extra or [{}] * len(statuses))[i]),
                     }
-                    for status in statuses
+                    for i, status in enumerate(statuses)
                 ],
                 "outputs": {"parquet": "workspace/s01/cleaned/beers.parquet"},
+                **report_keys,
             }
         )
     )
@@ -133,6 +135,73 @@ def test_a_failed_fix_is_visible_but_does_not_taint_the_output(tmp_path) -> None
     failed = [n for n in dag["nodes"].values() if n.get("status") == "failed"]
     assert len(failed) == 1, "the attempt is recorded even though it was reverted"
     assert failed[0]["checks_passed"] is False
+
+
+def test_a_fix_node_records_whether_anybody_approved_it(tmp_path) -> None:
+    """Packet 4 R4: the graph is the artifact an auditor walks, so a step that
+    ran with no gate shown has to say so on the node, along with the posture
+    the run was in."""
+    session = tmp_path / "s01"
+    write_report(
+        session,
+        ["fixed", "fixed"],
+        extra=[
+            {"unattended": True, "origin": "autoclean:d04"},
+            {"unattended": False},
+        ],
+        autonomy="autonomous",
+    )
+    nodes = provenance.build(session)["nodes"]
+
+    silent, gated = nodes["fix:s01-r001:1"], nodes["fix:s01-r001:2"]
+    assert silent["unattended"] is True
+    assert silent["origin"] == "autoclean:d04"
+    assert silent["autonomy"] == "autonomous"
+    assert gated["unattended"] is False
+
+
+def test_a_report_that_recorded_no_flag_says_so_rather_than_guessing(tmp_path) -> None:
+    """A report written before the flag existed did not record who approved
+    its fixes. None says that; False would claim a gate that may never have
+    been shown, which is exactly the fabrication provenance exists to stop."""
+    session = tmp_path / "s01"
+    write_report(session, ["fixed"])
+    node = provenance.build(session)["nodes"]["fix:s01-r001:1"]
+
+    assert node["unattended"] is None
+    assert node["autonomy"] == ""
+
+
+def test_the_chain_marks_the_steps_nobody_approved(tmp_path) -> None:
+    """Reading the chain has to answer "which of these did a person see?"
+    without opening the JSON."""
+    session = tmp_path / "s01"
+    write_report(
+        session,
+        ["fixed", "fixed"],
+        extra=[{"unattended": True}, {"unattended": False}],
+        autonomy="autonomous",
+    )
+    text = provenance.to_markdown(provenance.build(session))
+
+    fix_lines = [line for line in text.splitlines() if "fix: d04" in line]
+    assert len(fix_lines) == 2, text
+    assert sum("unattended" in line for line in fix_lines) == 1, text
+
+
+def test_the_chain_never_claims_an_approval_nothing_recorded(tmp_path) -> None:
+    """Three answers, three renderings. A report that recorded nothing (None)
+    rendered exactly like one that recorded a gate being shown (False), so the
+    chain a person reads asserted an approval the JSON never carried. The dict
+    always distinguished them; the rendering has to as well."""
+    session = tmp_path / "s01"
+    write_report(session, ["fixed", "fixed"], extra=[{"unattended": False}, {}])
+    text = provenance.to_markdown(provenance.build(session))
+
+    fix_lines = [line for line in text.splitlines() if "fix: d04" in line]
+    assert len(fix_lines) == 2, text
+    assert sum(line.endswith("· gated") for line in fix_lines) == 1, text
+    assert "unattended" not in text, "neither of these ran unwatched"
 
 
 def test_to_markdown_reads_as_a_chain_a_person_can_follow(tmp_path) -> None:

@@ -17,6 +17,7 @@ import sys
 import pytest
 
 from crivo.governance import (
+    AUTONOMY_LEVELS,
     DEFAULT_GOVERNANCE,
     Governance,
     load_governance,
@@ -100,6 +101,10 @@ def test_unknown_top_level_key_raises_naming_it(tmp_path):
     path = _write(tmp_path, _config() | {"memory": {"namespaces": []}})
     with pytest.raises(ValueError, match="memory"):
         load_governance(path, TAXONOMY)
+    # "autonomy" joined the schema with the autonomy-default work, so it must
+    # load instead of tripping this check; an actually unknown key still raises
+    accepted = load_governance(_write(tmp_path, _config(autonomy="careful")), TAXONOMY)
+    assert accepted.autonomy == "careful"
 
 
 def test_unknown_disease_id_raises_with_file_path_context(tmp_path):
@@ -152,6 +157,50 @@ def test_default_governance_is_a_safe_zero_config(tmp_path):
     out = tmp_path / "default.json"
     save_governance(DEFAULT_GOVERNANCE, out)
     assert load_governance(out, TAXONOMY) == DEFAULT_GOVERNANCE
+
+
+def test_autonomy_levels_are_the_three_named_postures():
+    """The setting spans the spectrum: decide everything verifiable, gate
+    everything, decide nothing (autonomy-default packet 1)."""
+    assert AUTONOMY_LEVELS == ("autonomous", "careful", "report-only")
+    assert DEFAULT_GOVERNANCE.autonomy == "autonomous"
+
+
+def test_missing_autonomy_key_defaults_to_autonomous(tmp_path):
+    # a governance file written before this key existed stays valid, the way a
+    # missing "policies" key already does
+    gov = load_governance(_write(tmp_path, _config()), TAXONOMY)
+    assert gov.autonomy == "autonomous"
+
+
+@pytest.mark.parametrize("level", AUTONOMY_LEVELS)
+def test_each_named_autonomy_level_parses(tmp_path, level):
+    gov = load_governance(_write(tmp_path, _config(autonomy=level)), TAXONOMY)
+    assert gov.autonomy == level
+
+
+@pytest.mark.parametrize("bad", ["yolo", "AUTONOMOUS", "", None, 3])
+def test_unknown_autonomy_value_fails_closed(tmp_path, bad):
+    """Fail-closed, not a silent fallback to the default: an unrecognised level
+    raises ValueError naming the path and the bad value, and the all-or-nothing
+    load returns no partial Governance."""
+    path = _write(tmp_path, _config(autonomy=bad))
+    with pytest.raises(ValueError) as exc:
+        load_governance(path, TAXONOMY)
+    message = str(exc.value)
+    assert "autonomy" in message
+    assert repr(bad) in message
+    assert str(path) in message
+
+
+@pytest.mark.parametrize("level", AUTONOMY_LEVELS)
+def test_autonomy_round_trips_through_save_and_load(tmp_path, level):
+    original = load_governance(_write(tmp_path, _config(autonomy=level)), TAXONOMY)
+    out = tmp_path / "roundtrip.json"
+    save_governance(original, out)
+    reloaded = load_governance(out, TAXONOMY)
+    assert reloaded == original
+    assert reloaded.autonomy == level
 
 
 def test_lazy_default_valid_ids_come_from_detect_slugs(tmp_path, monkeypatch):

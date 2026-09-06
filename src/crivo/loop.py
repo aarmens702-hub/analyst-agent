@@ -26,6 +26,7 @@ from crivo.events import (
     Notice,
     StreamText,
 )
+from crivo.governance import AUTONOMY_LEVELS
 from crivo.kernel.client import DisplayItem, KernelClient, StreamOut
 from crivo.library import Library, unattended
 from crivo.report import CleanReport
@@ -127,13 +128,39 @@ class Session:
         snapshots: bool = True,
         resume: str | None = None,
         policies: list | None = None,
+        autonomy: str = "autonomous",
     ) -> None:
         # R3: gates show consequence computed on a sampled scratch copy;
         # drivers that auto-approve can turn it off, since nobody reads it
         self.preview = preview
+        # The autonomy posture (autonomy-default build packets, packet 3).
+        # "autonomous" is the default and applies AUTO findings that carry a
+        # registered deterministic fixer without showing a gate; "careful"
+        # gates them; "report-only" diagnoses and stops.
+        #
+        # This is a silence decision, not a widening of what may be decided.
+        # policy.evaluate reads the grade before it reads any policy, so no
+        # posture set here can auto-decide a GATE or HUMAN finding, and skill
+        # admission stays HUMAN in every mode. Refused rather than defaulted:
+        # a mistyped "report-only" that fell through to the gated flow would
+        # still let a driver that answers gates edit the data, which is exactly
+        # what the level is chosen to prevent.
+        if autonomy not in AUTONOMY_LEVELS:
+            raise ValueError(f"autonomy {autonomy!r} is not one of {AUTONOMY_LEVELS}")
+        self.autonomy = autonomy
         # T1.4 hunk D: standing approval policies (bench-only in M1; the
         # interactive arming UX is M2's coherent-unit work)
         self.policies = list(policies or [])
+        if self.autonomy == "autonomous" and not self.policies:
+            # the standing ENFORCE policy the autonomous default arms, seeded
+            # only when the caller passed none of their own — explicit policies
+            # are the caller's decision about reach, and this must not widen it
+            from crivo import autoclean
+            from crivo.detect import SLUGS
+
+            self.policies = policy.default_autonomous_policies(
+                set(SLUGS), autoclean.FIXERS
+            )
         # R8: verified fixes survive a kernel death via namespace snapshots
         self.snapshots = snapshots
         self.workspace_root = Path(workspace)
@@ -172,6 +199,7 @@ class Session:
             model=llm.model_info(),
             python=hello.python,
             ipykernel=hello.ipykernel,
+            autonomy=self.autonomy,
         )
         print(
             f"session {self.session_id} · kernel python {hello.python} · "
@@ -551,6 +579,22 @@ class Session:
             ),
         )
 
+        if self.autonomy == "report-only":
+            # look but do not touch: the diagnosis is the whole deliverable, so
+            # nothing is applied and no baseline is even taken. state already
+            # holds the indicators, the clear ids and the broken ones.
+            #
+            # The fixable findings still have to be written down. With an empty
+            # records list the artifact read "0 fixed · 0 skipped · 0 failed ·
+            # 0 not attempted · 0 flagged · N signals clear" over a file
+            # carrying a GATE and a HUMAN finding: a clean bill of health from
+            # the one level whose whole job is to say what is wrong. The report
+            # is also what the headless summary is built from, so that silence
+            # reached every non-interactive caller as well.
+            state["records"] = [self._aborted(f) for f in state["fixable"]]
+            yield from self._save_report(state)
+            return
+
         baseline_cols = yield from self._snapshot_baseline(var)
         fixable = state["fixable"]
         plan_obj = None
@@ -742,7 +786,11 @@ class Session:
 
     def _aborted(self, finding: dict) -> dict:
         """A finding we never got to. Distinct from `failed`, which means the
-        model tried and the verification refused it."""
+        model tried and the verification refused it.
+
+        Two callers, one meaning: the kernel died before this finding's turn,
+        or report-only declined to take a turn at all. Nothing was attempted
+        either way, which is what the report renders it as."""
         return {
             "finding": finding,
             "status": "aborted",
@@ -753,6 +801,7 @@ class Session:
             "elapsed_s": 0.0,
             "origin": "none",
             "case": {},
+            "unattended": False,  # nothing ran, so nothing went unwatched
         }
 
     def _save_report(self, state: dict):
@@ -781,6 +830,7 @@ class Session:
             skills_admitted=state["admitted"],
             event_chain=[*state["evs"], rep_ev],
             created=datetime.now().astimezone().isoformat(timespec="seconds"),
+            autonomy=self.autonomy,
         )
         report.save(self.session_dir / "clean_reports")
         yield StreamText("stdout", "\n" + report.to_markdown() + "\n")
@@ -889,7 +939,19 @@ class Session:
             except (ValueError, IndexError):
                 pass
 
-        if run["drift"]:
+        if run["drift"] and self.autonomy == "report-only":
+            # Harmonizing renames columns in every slice at once, which is a
+            # change to the data like any other and the biggest one this flow
+            # makes. It ran before the per-slice short circuit could stop it,
+            # so report-only reported on frames it had already rewritten.
+            # run["harmonized"] stays False, which is what the family summary
+            # then says.
+            yield Notice(
+                "family",
+                f"report-only: {len(run['drift'])} drift finding(s) reported, "
+                "nothing harmonized",
+            )
+        elif run["drift"]:
             # a mapping this family already confirmed replays for free (R6)
             run["harmonized"] = yield from self._replay_mapping(name)
             if not run["harmonized"]:
@@ -953,18 +1015,51 @@ class Session:
         detect_all never runs a family signal — so the family flow asks for it
         directly. Verification is the same family cell either way: a replayed
         mapping earns no more trust than a fresh one.
+
+        Gated in every mode, and there is no silent branch. detect_family
+        grades schema drift GATE, and library.unattended() refuses anything
+        but AUTO, so no state a skill can reach earns this the right to run
+        unwatched. It used to run with no decision site at all: a probation
+        skill renamed the columns of every slice with no gate shown, at every
+        autonomy level, which is a person-grade decision made unattended. The
+        verify cell is not a substitute: it checks that one schema came out
+        and no populated cell was lost, not that `amt` and `amount` were the
+        same thing.
         """
         for entry in self.library.candidates(20):
             try:
                 skill = skills.load(self.skills_dir / entry["name"])
             except (OSError, ValueError):
                 continue
-            yield from self._exec_events(verify.family_baseline_cell(name), quiet=True)
             code = (
                 f"{skill.fix_source}\n"
                 f"{name} = {{k: fix(v, []) for k, v in {name}.items()}}\n"
                 f'"applied"'
             )
+            decision = yield GateRequest(
+                code,
+                1,
+                title=(
+                    f"replay {entry['name']} · {entry['state']} · GATE · "
+                    f"a confirmed mapping over every slice of {name}"
+                ),
+                grade="GATE",
+            )
+            if not isinstance(decision, GateDecision):
+                decision = GateDecision("skip")  # not an answer, so nothing runs
+            self.transcript.append("gate", action=decision.action, note=decision.note)
+            if decision.action == "skip":
+                # the fresh mapping below asks its own gate; a person who does
+                # not want this one may still want that one
+                return False
+            if decision.action == "reject":
+                self.library.record(
+                    entry["name"], success=False, dataset=name, events=[]
+                )
+                self.library.save()
+                continue
+            # the baseline is taken only once something is going to run
+            yield from self._exec_events(verify.family_baseline_cell(name), quiet=True)
             res, _, _, ev_id = yield from self._exec_events(code, quiet=True)
             if res.status == "ok":
                 vres, _, _, _v = yield from self._exec_events(
@@ -1270,6 +1365,9 @@ class Session:
             "elapsed_s": round(time.monotonic() - t0, 1),
             "origin": "model",
             "case": case,
+            # every model-authored cell passes a gate, in every mode: the
+            # GateRequest above is unconditional
+            "unattended": False,
         }
 
     # -- P3: the intent gate --------------------------------------------------
@@ -1440,6 +1538,7 @@ class Session:
                     "elapsed_s": round(time.monotonic() - t0, 1),
                     "origin": f"autoclean:d{disease:02d}",
                     "case": {},
+                    "unattended": silent,  # necessarily False: a gate was answered
                 }
             if decision.action == "reject":
                 return None  # to the model, matching skill-reject behavior
@@ -1453,6 +1552,13 @@ class Session:
             )
             evs.append(v_ev)
             if vres.status == "ok":
+                if silent and verdict["policy_id"] == "autonomy-auto":
+                    yield from self._autonomy_first_run_notice(
+                        "autonomous mode batches the AUTO findings that carry "
+                        "a registered deterministic fixer",
+                        "Run with --autonomy careful to be asked first, or "
+                        "--autonomy report-only to change nothing.",
+                    )
                 yield Notice(
                     "autoclean",
                     f"d{disease:02d} {finding['slug']} fixed with no model call"
@@ -1468,6 +1574,9 @@ class Session:
                     "elapsed_s": round(time.monotonic() - t0, 1),
                     "origin": f"autoclean:d{disease:02d}",
                     "case": {},
+                    # the audit answer: this change reached the data with no
+                    # gate shown, because a standing policy batched it
+                    "unattended": silent,
                 }
 
         _, _, _, rev_ev = yield from self._exec_events(
@@ -1479,6 +1588,46 @@ class Session:
             f"d{disease:02d} deterministic fix did not verify — handing to the model",
         )
         return None
+
+    def _autonomy_first_run_notice(self, because: str, remedy: str):
+        """Tell the person, once per workspace, the first time crivo edits
+        their data without asking.
+
+        The sentinel file is the once-per-workspace mechanism, because nothing
+        else here provides one: events.Notice is ephemeral, and the transcript
+        "gate" note records every silent apply on purpose, so neither can
+        suppress a repeat.
+
+        Both silences call this, and each brings its own `because` and
+        `remedy`, because the two are switched off differently: the autonomy
+        default is off at --autonomy careful, while a proven library skill has
+        earned the right to run unattended at every level and only report-only
+        stops it. Announcing one and not the other burned no sentinel for the
+        silent skill fix, so the notice went on to fire later and attach
+        "crivo just changed your data" to some other run's event.
+
+        A policy the caller armed themselves (a bench arm, an approved plan)
+        is their own decision and says nothing extra, so the autoclean rung
+        keys its call on the autonomy-auto policy id.
+
+        Best effort on the write: a workspace that cannot be written to gets
+        the notice again on the next run, which is a repeated line rather than
+        a failed fix.
+        """
+        sentinel = self.workspace_root / ".crivo-autonomy-notice"
+        if sentinel.exists():
+            return
+        yield Notice(
+            "autonomy",
+            f"crivo just changed your data without asking: {because}. Only "
+            "findings it can fix deterministically and re-check run this way, "
+            "every one is reverted if the re-check fails, and judgement calls "
+            f"still wait for you. {remedy}",
+        )
+        try:
+            sentinel.touch()
+        except OSError:
+            pass  # a read-only workspace must never fail the fix it follows
 
     def _skill_attempt(
         self, var: str, finding: dict, i: int, n: int, baseline_cols: list[str]
@@ -1535,6 +1684,7 @@ class Session:
                         "elapsed_s": round(time.monotonic() - t0, 1),
                         "origin": f"skill:{entry['name']}",
                         "case": {},
+                        "unattended": silent,  # False here: this branch is gated
                     }
                 if decision.action == "reject":
                     self.library.record(
@@ -1560,6 +1710,19 @@ class Session:
                         entry["name"], success=True, dataset=sha, events=evs
                     )
                     self.library.save()
+                    if silent:
+                        # the other rung that edits data with no gate shown,
+                        # and the one that runs first. Announcing only the
+                        # autoclean rung left the first silent fix of a fresh
+                        # workspace unannounced and the sentinel unwritten
+                        yield from self._autonomy_first_run_notice(
+                            f"the library skill {entry['name']} is proven and "
+                            "this finding is AUTO-grade",
+                            "Run with --autonomy report-only to change "
+                            "nothing; a proven skill runs unattended at "
+                            "careful too, and /skills show says what it has "
+                            "earned.",
+                        )
                     yield Notice(
                         "skill",
                         f"{entry['name']} fixed {finding['slug']} with no model call"
@@ -1575,6 +1738,9 @@ class Session:
                         "elapsed_s": round(time.monotonic() - t0, 1),
                         "origin": f"skill:{entry['name']}",
                         "case": {},
+                        # a proven skill on an AUTO finding is the other way a
+                        # change reaches the data with nobody watching
+                        "unattended": silent,
                     }
 
             _, _, _, rev_ev = yield from self._exec_events(

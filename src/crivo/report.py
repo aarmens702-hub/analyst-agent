@@ -25,6 +25,10 @@ class CleanReport:
     stats: dict = field(default_factory=dict)  # before/after shape + nulls
     event_chain: list = field(default_factory=list)
     created: str = ""
+    # The posture the run was in, one of governance.AUTONOMY_LEVELS. Defaulted
+    # rather than required so a caller that predates the setting still builds;
+    # loop._save_report passes the session's real level.
+    autonomy: str = "autonomous"
 
     def counts(self) -> dict:
         out = {"fixed": 0, "skipped": 0, "failed": 0, "aborted": 0}
@@ -41,10 +45,19 @@ class CleanReport:
             f"{c['flagged']} flagged** · "
             f"{len(self.clear)} signals clear"
         )
+        silent = _unattended_kept(self.fixes)
+        autonomy_line = f"**autonomy: {self.autonomy}**"
+        if silent:
+            autonomy_line += (
+                f" · {silent} change{'s' if silent != 1 else ''} "
+                "applied with no gate shown"
+            )
         lines = [
             f"## clean report {self.report_id} — `{self.variable}`",
             "",
             counts_line,
+            "",
+            autonomy_line,
             "",
         ]
         for rec in self.fixes:
@@ -55,6 +68,8 @@ class CleanReport:
                 f"[{', '.join(f['columns']) or 'table'}] · {rec['status']} "
                 f"({rec['attempts']} attempt{'s' if rec['attempts'] != 1 else ''}) "
                 f"· ev {', '.join(str(e) for e in rec['transcript_evs'])}"
+                # which changes nobody approved, not just how many
+                + (" · unattended" if rec.get("unattended") else "")
             )
         if self.broken:
             lines += ["", "**signals that did not run**"]
@@ -110,6 +125,21 @@ class CleanReport:
             self.to_markdown() + "\n", encoding="utf-8"
         )
         return json_path
+
+
+def _unattended_kept(fixes: list) -> int:
+    """How many fixes reached the data with no gate shown to anybody.
+
+    Counts only kept fixes. No rung records an unattended fix it reverted
+    today (a silent fix that fails its re-check returns no record at all), so
+    the status check is a guard rather than a live filter: a change that did
+    not survive is not a change anybody needed to be asked about. A record
+    written before the flag existed has no key and is not counted, because it
+    recorded nothing either way.
+    """
+    return sum(
+        1 for rec in fixes if rec.get("unattended") and rec.get("status") == "fixed"
+    )
 
 
 def _moved_cells(stats: dict):

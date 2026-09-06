@@ -416,3 +416,283 @@ def test_main_skips_cases_already_on_disk(tmp_path, monkeypatch):
 
     monkeypatch.setattr(agent_run, "_run_case", boom)
     assert agent_run.main(["--sample", "1"]) == 0
+
+
+# --- arm naming and the autonomy arms (autonomy-default packet 5) -----------
+
+
+def test_arm_suffix_names_every_knob_that_changes_the_arm():
+    """The result and telemetry names are also the resume key, so every knob
+    that changes what an arm measures has to appear in them. The default arm
+    keeps the empty suffix and the ceiling arm keeps `.ceiling`, so the
+    results already on disk stay addressable."""
+    import argparse
+
+    def suffix(**kwargs):
+        base = {"human_gates": "skip", "policies": "none", "autonomy": None}
+        return agent_run._arm_suffix(argparse.Namespace(**{**base, **kwargs}))
+
+    assert suffix() == ""
+    assert suffix(human_gates="approve") == ".ceiling"
+    assert suffix(policies="auto") == ".policies-auto"
+    assert suffix(autonomy="autonomous") == ".autonomous"
+    assert suffix(autonomy="careful") == ".careful"
+    assert suffix(policies="auto", autonomy="autonomous") == (
+        ".policies-auto.autonomous"
+    )
+    # a namespace that predates a knob (the older test fixtures) still names
+    # the default arm rather than raising
+    assert agent_run._arm_suffix(argparse.Namespace(human_gates="skip")) == ""
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [
+        ([], ["--policies", "auto"]),
+        ([], ["--autonomy", "autonomous"]),
+        (["--autonomy", "careful"], ["--autonomy", "autonomous"]),
+        (["--policies", "auto"], ["--policies", "auto", "--autonomy", "autonomous"]),
+    ],
+)
+def test_two_arms_cannot_read_each_others_result_files(
+    tmp_path, monkeypatch, first, second
+):
+    """R5 skips a case whose result file exists. If two arms share a filename
+    the second arm resumes the first arm's row and prints the first arm's
+    numbers as its own, which is how the batched arm silently reported the
+    baseline's score. Each arm writes and reads its own file."""
+    import json
+
+    monkeypatch.setenv(agent_run.KEY_VARS[0], "sk-test")
+    monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path)
+    entry = {"name": "arm_case", "diseases": [4]}
+    monkeypatch.setattr(agent_run.corpus, "SMOKE", [entry], raising=False)
+    ran: list = []
+
+    def fake_run(entry, args):
+        ran.append(len(ran))
+        return {
+            "name": entry["name"],
+            "status": "ok",
+            "wall_secs": 0.1,
+            "arm": len(ran),
+            "scores": {"repair": {"f1": float(len(ran))}},
+        }
+
+    monkeypatch.setattr(agent_run, "_run_case", fake_run)
+    agent_run.main(["--sample", "1", *first])
+    agent_run.main(["--sample", "1", *second])
+
+    assert ran == [0, 1], "the second arm resumed the first arm's result file"
+    written = sorted(p.name for p in tmp_path.glob("arm_case*.json"))
+    assert len(written) == 2, f"arms shared a filename: {written}"
+    arms = {json.loads((tmp_path / n).read_text())["arm"] for n in written}
+    assert arms == {1, 2}
+
+
+def test_run_case_records_the_policy_arm_in_the_row(tmp_path, monkeypatch):
+    """The saved row named its gate arm but not its policy arm, so a batched
+    result was indistinguishable from a baseline one after the fact."""
+    import argparse
+
+    _fake_session(tmp_path, monkeypatch)
+    args = argparse.Namespace(
+        docker=False,
+        max_events=10,
+        wall_cap=5.0,
+        human_gates="skip",
+        policies="auto",
+        autonomy=None,
+        policy_records=[],
+    )
+
+    row = agent_run._run_case({"name": "arm_case", "diseases": [1]}, args)
+    assert row["policies"] == "auto"
+    assert row["human_gates"] == "skip"
+
+
+def test_run_case_passes_the_autonomy_arm_into_the_session(tmp_path, monkeypatch):
+    """The autonomous arm's extra reach comes from the Session seeding its own
+    default AUTO policy, not from approving anything a person owns: the arm
+    still drives with human_gates skip."""
+    import argparse
+
+    seen = {}
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            self.session_dir = tmp_path / "sess"
+
+        def load(self, path, name):
+            pass
+
+        def clean(self, var):
+            return iter(())
+
+        def close(self):
+            pass
+
+    import pandas as pd
+
+    monkeypatch.setattr("crivo.loop.Session", FakeSession)
+    df = pd.DataFrame({"a": [1, 2]})
+    monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, None))
+    monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
+    args = argparse.Namespace(
+        docker=False,
+        max_events=10,
+        wall_cap=5.0,
+        human_gates="skip",
+        policies="none",
+        autonomy="autonomous",
+        policy_records=[],
+    )
+
+    row = agent_run._run_case({"name": "auto_case", "diseases": [1]}, args)
+    assert seen["autonomy"] == "autonomous"
+    assert seen["policies"] == [], "the arm leaves the Session to seed its own"
+    assert row["autonomy"] == "autonomous"
+    assert row["human_gates"] == "skip"
+
+
+def test_run_case_without_an_autonomy_arm_pins_careful(tmp_path, monkeypatch):
+    """An unset --autonomy is the baseline arm, and the baseline results on
+    disk were recorded gating every AUTO finding. The bench pins `careful`
+    rather than inheriting the Session's autonomous default, so the empty
+    suffix keeps meaning what those files say."""
+    import argparse
+
+    seen = {}
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            self.session_dir = tmp_path / "sess"
+
+        def load(self, path, name):
+            pass
+
+        def clean(self, var):
+            return iter(())
+
+        def close(self):
+            pass
+
+    import pandas as pd
+
+    monkeypatch.setattr("crivo.loop.Session", FakeSession)
+    df = pd.DataFrame({"a": [1, 2]})
+    monkeypatch.setattr(agent_run.corpus, "build", lambda entry: (df, df, None))
+    monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path / "res")
+    args = argparse.Namespace(
+        docker=False, max_events=10, wall_cap=5.0, human_gates="skip"
+    )
+
+    row = agent_run._run_case({"name": "base_case", "diseases": [1]}, args)
+    assert seen["autonomy"] == "careful"
+    assert row["autonomy"] == "careful"
+
+
+def test_run_case_autonomy_arm_gets_its_own_telemetry_file(tmp_path, monkeypatch):
+    """Telemetry is per arm for the same reason results are: spans from the
+    careful arm must not be counted as the autonomous arm's calls."""
+    import argparse
+    import os
+
+    seen = {}
+    _fake_session(
+        tmp_path,
+        monkeypatch,
+        on_init=lambda: seen.update(env=os.environ.get("CRIVO_TELEMETRY")),
+    )
+    monkeypatch.delenv("CRIVO_TELEMETRY", raising=False)
+    args = argparse.Namespace(
+        docker=False,
+        max_events=10,
+        wall_cap=5.0,
+        human_gates="skip",
+        policies="none",
+        autonomy="careful",
+        policy_records=[],
+    )
+
+    agent_run._run_case({"name": "tele_case", "diseases": [1]}, args)
+    assert seen["env"] == str(
+        tmp_path / "res" / "telemetry" / "tele_case.careful.jsonl"
+    )
+
+
+def test_autonomy_arm_never_drives_human_gates_approve(tmp_path, monkeypatch, capsys):
+    """R1 at the driver: `approve` runs non-admission HUMAN gates, which is a
+    person's authorisation to give. An autonomy arm is measured with them
+    skipped, so the combination is refused rather than honoured."""
+    monkeypatch.setenv(agent_run.KEY_VARS[0], "sk-test")
+    monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path)
+    entry = {"name": "gate_case", "diseases": [4]}
+    monkeypatch.setattr(agent_run.corpus, "SMOKE", [entry], raising=False)
+    seen = {}
+
+    def grab(entry, args):
+        seen["human_gates"] = args.human_gates
+        return {"name": entry["name"], "status": "error: stub", "wall_secs": 0.1}
+
+    monkeypatch.setattr(agent_run, "_run_case", grab)
+    agent_run.main(
+        ["--sample", "1", "--autonomy", "autonomous", "--human-gates", "approve"]
+    )
+
+    assert seen["human_gates"] == "skip"
+    assert not list(tmp_path.glob("*.ceiling*.json")), "not the ceiling arm"
+    assert (tmp_path / "gate_case.autonomous.json").exists()
+
+
+def test_autonomy_rejects_report_only_at_the_cli():
+    """The bench scores cleaned output and a report-only run cleans nothing,
+    so the level is not an arm here."""
+    with pytest.raises(SystemExit):
+        agent_run.main(["--sample", "1", "--autonomy", "report-only"])
+
+
+def test_a_hand_built_namespace_cannot_drive_an_autonomy_arm_with_approve(
+    tmp_path, monkeypatch
+):
+    """The guard lived in `main` only, and `_arm_suffix`'s own docstring says
+    callers build the namespace by hand. Such a namespace reached `_drive`
+    with approve, which runs every non-admission HUMAN gate: a person's
+    authorisation to give. The rule belongs at the point of use, and the
+    filename has to name the arm that actually ran."""
+    import argparse
+
+    seen = {}
+    _fake_session(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        agent_run,
+        "_drive",
+        lambda gen, *a, human_gates="skip", **kw: seen.update(gates=human_gates) or 0,
+    )
+    args = argparse.Namespace(
+        docker=False,
+        max_events=10,
+        wall_cap=5.0,
+        human_gates="approve",
+        policies="none",
+        autonomy="autonomous",
+        policy_records=[],
+    )
+
+    assert agent_run._arm_gates(args) == "skip"
+    assert agent_run._arm_suffix(args) == ".autonomous", "not a ceiling arm"
+    row = agent_run._run_case({"name": "hand_case", "diseases": [1]}, args)
+    assert seen["gates"] == "skip"
+    assert row["human_gates"] == "skip", "the row records what ran, not what was asked"
+
+
+def test_the_ceiling_arm_still_drives_approve_without_an_autonomy_arm():
+    """The coercion is scoped to the combination, not to `approve` itself: the
+    existing ceiling arm is untouched."""
+    import argparse
+
+    args = argparse.Namespace(human_gates="approve", policies="none", autonomy=None)
+    assert agent_run._arm_gates(args) == "approve"
+    assert agent_run._arm_suffix(args) == ".ceiling"

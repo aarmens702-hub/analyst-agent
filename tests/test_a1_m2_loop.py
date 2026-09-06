@@ -36,12 +36,18 @@ def session(tmp_path, monkeypatch):
     monkeypatch.setattr("crivo.loop.KernelClient", FakeClient)
     FakeClient.script, FakeClient.executed = [], []
     monkeypatch.delenv("CRIVO_M1", raising=False)  # M1 on
+    # Pinned careful: plan-first IS the careful-mode approval unit, and the
+    # claim under test is that approving the PLAN is what buys the AUTO steps
+    # their silence. Under the autonomy default (packet 3) a standing policy
+    # already silences them before any plan is built, so every assertion here
+    # would hold for a reason that has nothing to do with the plan.
     s = Session(
         workspace=tmp_path / "ws",
         data_dir=tmp_path,
         skills_dir=tmp_path / "skills",
         preview=False,
         snapshots=False,
+        autonomy="careful",
     )
     s._registry_prev = {"df": ("DataFrame", "[4, 2]")}
     s._registry = list(REG)

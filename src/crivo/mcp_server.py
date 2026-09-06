@@ -171,6 +171,10 @@ def _make_session():
         workspace=os.environ.get("CRIVO_WORKSPACE", "workspace"),
         docker=docker,
         preview=False,  # headless: nobody reads a gate preview here (R7)
+        # explicit, not inherited: the MCP clean surface keeps today's gated
+        # behavior instead of flipping to the autonomous constructor default
+        # unannounced. An MCP autonomy control is its own decision to make.
+        autonomy="careful",
     )
 
 
