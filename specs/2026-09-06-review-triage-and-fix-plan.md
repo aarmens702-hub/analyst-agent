@@ -1,10 +1,18 @@
 # Code review triage and fix plan
 
 2026-09-06. **Status: triage of a full multi-agent code review, for owner
-review.** 56 findings (24 high, 27 medium, 5 low) from seven module-group
-reviewers, each finding independently re-checked by an adversarial verifier
-that was told to refute by default. Zero findings were refuted. The three
-highest-stakes items were additionally confirmed by hand, by reading the code.
+review.** 56 confirmed findings (24 high, 26 medium, 6 low) from seven
+module-group reviewers, each finding independently re-checked by an adversarial
+verifier told to refute by default. One further claim was refuted and is not
+listed here (the bench PLAN gate: unreachable because the plan path sits behind
+`CRIVO_PLAN_FIRST`, which defaults off). Every finding below carries a
+CONFIRMED verdict. The three highest-stakes items were additionally confirmed
+by hand, by reading the code.
+
+**Read the reachability notes.** Several high findings are real defects that no
+shipped code path triggers today. They are still worth fixing, because each is
+fail-open by construction and the protocol permits the trigger, but they are
+not live exploits and the plan says so where it applies.
 
 Source: two workflow runs (the second filling gaps where agents died on a
 session limit). Raw findings: `.claude/jobs/.../all_findings.json`.
@@ -27,10 +35,14 @@ session limit). Raw findings: `.claude/jobs/.../all_findings.json`.
 argument is that unattended action is safe because every fix is verified and
 reverts. That argument does not currently hold.
 
-**Second consequence: the bench numbers are suspect (P5).** The batched arm
-resumes from the baseline arm's result files and reports the baseline's numbers
-as its own, which is the arm confusion we hit in the M1 vs M2 measurement.
-Re-measure after P5 before trusting any M1 or M2 comparison.
+**Second consequence: the bench harness can mislabel arms (P5).** The batched
+arm resumes from the baseline arm's result files and reports the baseline's
+numbers as its own. Verified scope: this has **not** corrupted a published
+number, because the baseline was manually archived to
+`bench/results/agent-baseline-pre-m1/` before the batched run and the files
+there are genuinely distinct. So the trap is live but has so far been dodged by
+hand. Fix it before the next comparison rather than relying on remembering to
+archive.
 
 ---
 
@@ -92,13 +104,34 @@ This is the safety identity. All of these are fail-open.
    skill-admission gate, whose line 1698 comment reads "admission is governance,
    and governance is never unattended" four lines above defaulting it to run.
    Plain iteration (`for ev in session.clean("df"): pass`) executes HUMAN-grade
-   fixes. Fix: default to `skip` for anything not graded AUTO, and keep `run` as
-   the default only for AUTO. Proof: a test driving the session by plain
-   iteration and asserting no HUMAN fix and no admission executed.
-10. **`loop.py:354` `skip` does not skip.** `run_turn` handles only `"reject"`;
-    there is no `skip` branch, unlike the three other gate sites, so a
-    `GateDecision("skip")` falls through to `_execute_cell`. The transcript then
-    records skip followed by exec. Fix: handle `skip` as a non-execution path.
+   fixes, and a second reproduction admitted a skill to the library with nobody
+   deciding. Worse than executing: the transcript then records a **forged
+   approval**, `action="run", note=""`, so the provenance reads as though a
+   human approved it.
+   **Reachability: latent, not live.** No shipped driver triggers this today;
+   `repl.py`, `query.py`, `mcp_server.py` and `bench/agent_run.py` all return a
+   real `GateDecision`. The trigger is a third-party or future driver that
+   answers `None`, which the protocol type (`GateDecision | None`,
+   `events.py:93-97`) explicitly permits.
+   Fix: treat a non-`GateDecision` answer as `skip` for anything not graded
+   AUTO (and for the admission and plan gates), or raise a protocol error, and
+   record `note="no decision"` so the transcript never forges an approval.
+   Proof: a test driving the session by plain iteration and asserting no HUMAN
+   fix and no admission executed.
+10. **`loop.py:354` `skip` does not skip. THIS ONE IS LIVE.** `run_turn` handles
+    only `"reject"`; there is no `skip` branch, unlike the three other gate
+    sites, so a `GateDecision("skip")` falls through to `_execute_cell` at line
+    377. The card then records that cell's gate as `"run"` (hard-coded at
+    `loop.py:1906-1929`) and the answer is built from the output of the cell the
+    operator declined.
+    **Reachability: reachable from the shipped terminal REPL with no misuse.**
+    `repl.py:131` drives `run_turn` through the `_drive` that prints
+    "[r]un / [j]eject / [s]kip" and returns `GateDecision("skip")` on "s". The
+    CLEAN path handles skip correctly (`loop.py:1156`, `:1414`), so this is an
+    omission, not a design choice. **Fix this first in P1.**
+    Fix: add an explicit skip branch beside reject; record a skipped cell, do
+    not execute, feed the model an observation that it was skipped, and carry
+    the real gate action into the cell record instead of the literal "run".
 11. **`repl.py:188` unrecognized answer means run.** Typing the words the prompt
     itself offers ("skip", "reject") executes the cell. Fix: re-prompt on an
     unrecognized answer; never default to run at a human interface.
@@ -106,8 +139,17 @@ This is the safety identity. All of these are fail-open.
     `_build_and_approve_plan` returns `proceed=True` on reject and leaves every
     earlier plan policy in `self.policies`, which are only appended and all share
     the id `plan-v1`. A plan approved earlier in the session keeps an ENFORCE
-    policy live, so a rejected plan's AUTO steps still run silently. Fix:
-    withdraw or supersede prior policies of the same id on reject.
+    policy live, so a rejected plan's AUTO steps still run silently, credited to
+    an approval given for a different run, and the rejection note is discarded
+    because line 1357 writes `note="plan"` unconditionally. Every minted id is
+    `plan-v1` because `build_plan` always returns version 1 (`plan.py:175`), so
+    repeat approvals collide.
+    **Reachability: needs `CRIVO_PLAN_FIRST=on` (off by default) plus a prior
+    approved plan in the same session.** `tests/test_a1_m2_loop.py:118` pins only
+    the skip case; no test covers reject.
+    Fix: on reject and skip, drop plan-minted policies from `self.policies`
+    before returning; scope a plan policy to the run rather than the session,
+    give it a unique id, and keep the rejection note in the transcript.
 13. **`agent_run.py:94` the bench driver auto-runs GATE.** `_drive` auto-runs
     every gate that is not exactly HUMAN, including GATE-grade judgement calls,
     contradicting the headless orchestrator contract. Fix: auto-run AUTO only.
@@ -215,10 +257,14 @@ make the PII scan duplicate-name safe (positional iteration).
 ## P5. Measurement integrity
 
 36. **`agent_run.py:299` arms collide on disk.** The `--policies` arm is absent
-    from result and telemetry filenames, so the batched arm resumes from the
-    baseline arm's files and reports the baseline's numbers as its own, and the
-    saved row records no policy field. This is the arm confusion from the M1 vs
-    M2 measurement. Fix: put the arm in the filename and record it in the row.
+    from result and telemetry filenames (the suffix is derived only from
+    `--human-gates`), so the batched arm resumes from the baseline arm's files
+    and reports the baseline's numbers as its own; the saved row records no
+    policy field. Reproduced: a stubbed `_run_case` never fired, yet the run
+    printed the pre-existing row's repair F1 and token count as the batched
+    arm's result. **No published number is currently wrong**, because the
+    baseline was archived by hand first, but nothing in the harness enforces
+    that. Fix: put the policy arm in the filename and stamp it in the row.
 37. **`score_fixes.py:39` wrong digits score as a perfect repair.** `_norm` rounds
     to 12 significant digits; the shipped scorer has the same hole at a looser
     tolerance.
