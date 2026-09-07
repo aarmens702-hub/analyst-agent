@@ -24,7 +24,7 @@ sits at the end, not the start.
 | Detection micro-F1 | **0.754**, unchanged for three days |
 | Repair F1 | 0.913 (was 0.980 before fixers learned to refuse) |
 | Survived verification | 0.673 (was a misleading 1.000) |
-| Bench corpus | 29 synthetic + 4 external. Phase 6 asks for thousands |
+| Bench corpus | 1450 synthetic + 4 external, but only **29 distinct shapes** (`full_corpus` re-rolls each smoke mix across 50 seeds). Volume without variety |
 | Test suite | 860 passing |
 | Taxonomy | 26 disease ids, 8 with registered deterministic fixers |
 | Public API | 17 exports |
@@ -99,10 +99,19 @@ success without a check that could have failed.
 
 **The instrument. The most important wave in this plan.**
 
-- Property-based synthetic corpus: thousands of generated messy datasets with
-  injected, therefore known, corruption, via hypothesis so invariants hold
-  across the space and not just examples.
-- External corpora kept and extended beyond the current four Raha sets.
+**The gap is variety, not volume.** `full_corpus(seeds=50)` already yields 1450
+datasets, but they are the same 29 mixes re-rolled with fresh seeds, so the run
+measures variance within 29 shapes rather than coverage of the space. A class of
+dirt absent from those 29 mixes is missed 1450 times and the corpus never says
+so. That is why 0.731 has not moved: the instrument re-asks the same 29
+questions with different random data.
+
+- Property-based generation via hypothesis, so the corpus explores the SPACE of
+  corruption shapes and asserts invariants across it, rather than sampling one
+  fixed set of mixes more times. New shapes, not more seeds.
+- External corpora kept and extended beyond the current four Raha sets, because
+  they are the only dirt in the corpus that we did not design and therefore the
+  only real check on our own imagination.
 - Per-detector precision, recall and F1 published, not just the aggregate.
 - Survived-verification reported with its denominator.
 
