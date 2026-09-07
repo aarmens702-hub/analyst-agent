@@ -59,10 +59,18 @@ def _aggregate(synthetic: list[dict]) -> dict:
     fixable_defined = [
         r for r in fixable if r["scores"]["end_to_end"]["repair"]["f1"] is not None
     ]
+    # same rule for survival: a dataset where crivo attempted no fix has an
+    # undefined survival rate, not a good one, so it stays out of the mean.
+    # Excluding it is only honest if the count that WAS averaged travels with
+    # the rate to every surface that prints it.
+    survival_defined = [
+        r for r in synthetic if r["scores"]["verification"]["survived_rate"] is not None
+    ]
     return {
         "datasets": len(synthetic),
         "fully_fixable_datasets": len(fixable),
         "repair_defined_datasets": len(fixable_defined),
+        "survival_defined_datasets": len(survival_defined),
         # a silent detector is a recall-0 detector: None counts as 0.0 here,
         # so the mean can never look better because a signal said nothing
         "detection_micro_f1_mean": _mean(
@@ -77,7 +85,7 @@ def _aggregate(synthetic: list[dict]) -> dict:
             [r["scores"]["end_to_end"]["repair"]["f1"] for r in fixable_defined]
         ),
         "survived_rate_mean": _mean(
-            [r["scores"]["verification"]["survived_rate"] for r in synthetic]
+            [r["scores"]["verification"]["survived_rate"] for r in survival_defined]
         ),
     }
 
@@ -108,11 +116,17 @@ def _markdown(report: dict) -> str:
             f"/{agg['datasets']} datasets"
         ),
         (
-            f"- repair F1, repair-defined fixable datasets"
-            f" ({agg['repair_defined_datasets']}/{agg['fully_fixable_datasets']}):"
+            f"- repair F1, mean over the"
+            f" {agg['repair_defined_datasets']}/{agg['datasets']} datasets with"
+            f" repair defined ({agg['repair_defined_datasets']} of the"
+            f" {agg['fully_fixable_datasets']} fully fixable):"
             f" {_fmt(agg['repair_f1_fixable_mean'])}"
         ),
-        f"- survived-verification rate, mean: {_fmt(agg['survived_rate_mean'])}",
+        (
+            f"- survived-verification rate, mean over the"
+            f" {agg['survival_defined_datasets']}/{agg['datasets']} datasets that"
+            f" attempted a fix: {_fmt(agg['survived_rate_mean'])}"
+        ),
         "",
         (
             "— means undefined: no fixer attempted, the detector produced"
@@ -178,8 +192,19 @@ def _write_readme(readme: Path, report: dict) -> None:
             "| metric | value |",
             "|---|---|",
             f"| detection micro-F1 (mean, silence = 0) | {_fmt(agg['detection_micro_f1_mean'])} |",
-            f"| repair F1, fully-fixable datasets | {_fmt(agg['repair_f1_fixable_mean'])} |",
-            f"| survived-verification rate | {_fmt(agg['survived_rate_mean'])} |",
+            (
+                f"| repair F1, mean over datasets with repair defined"
+                f" ({agg['repair_defined_datasets']}/{agg['datasets']};"
+                f" {agg['repair_defined_datasets']} of the"
+                f" {agg['fully_fixable_datasets']} fully fixable)"
+                f" | {_fmt(agg['repair_f1_fixable_mean'])} |"
+            ),
+            (
+                f"| survived-verification rate, mean over datasets that"
+                f" attempted a fix"
+                f" ({agg['survival_defined_datasets']}/{agg['datasets']})"
+                f" | {_fmt(agg['survived_rate_mean'])} |"
+            ),
             "",
             "Full tables: `bench/RESULTS.md`.",
             _MARK_END,
@@ -287,8 +312,12 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"{mode}: {agg['datasets']} synthetic + {len(report['external'])} external"
         f" | detect µF1 {_fmt(agg['detection_micro_f1_mean'])}"
-        f" | repair F1 (fixable) {_fmt(agg['repair_f1_fixable_mean'])}"
-        f" | survived {_fmt(agg['survived_rate_mean'])}"
+        f" | repair F1 mean {_fmt(agg['repair_f1_fixable_mean'])}"
+        f" over {agg['repair_defined_datasets']} of {agg['datasets']}"
+        f" ({agg['repair_defined_datasets']} of {agg['fully_fixable_datasets']}"
+        f" fixable)"
+        f" | survived mean {_fmt(agg['survived_rate_mean'])}"
+        f" over {agg['survival_defined_datasets']} of {agg['datasets']}"
     )
     return 0
 

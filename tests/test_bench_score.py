@@ -79,7 +79,7 @@ def test_score_end_to_end_oracle_and_no_op_invariants():
     assert noop["counts"] == {"dirty": 1, "changed": 0, "repaired": 0}
 
 
-def test_score_detection_tp_fp_fn_and_disease_zero_exclusion():
+def test_score_detection_counts_and_disease_zero_exclusion():
     # disease 1: finding matches truth on "amount" -> TP. disease 2: truth
     # has a corruption but no finding claims it -> FN. disease 3: a finding
     # claims it but truth has no such corruption -> FP (wrong disease).
@@ -106,29 +106,41 @@ def test_score_detection_tp_fp_fn_and_disease_zero_exclusion():
 
     result = score_detection(detect_result, truth)
 
-    # disease 1: tp=1, fp=1-1=0, fn=0 -> P=1/1=1.0, R=1/1=1.0, F1=1.0
+    # Matching here is one-to-one, so both numerators agree and every metric
+    # value is the same as before the numerators were split; what changed is
+    # the schema, which now names each numerator and its own denominator and
+    # carries no count that would fit either ratio. Misses are a subtraction:
+    # findings missed = n_truth - matched_truth, spurious = n_findings -
+    # matched_findings.
+    # disease 1: 1 of 1 finding matched, 1 of 1 corruption matched
+    #            -> P=1/1=1.0, R=1/1=1.0, F1=1.0
     assert result["per_disease"]["1"] == {
-        "tp": 1,
-        "fp": 0,
-        "fn": 0,
+        "matched_findings": 1,
+        "n_findings": 1,
+        "matched_truth": 1,
+        "n_truth": 1,
         "precision": 1.0,
         "recall": 1.0,
         "f1": 1.0,
     }
-    # disease 2: tp=0, fp=0, fn=1 -> P: 0/0 -> None, R=0/1=0.0, F1 None
+    # disease 2: no findings at all, 0 of 1 corruption matched
+    #            -> P: 0/0 -> None, R=0/1=0.0, F1 None
     assert result["per_disease"]["2"] == {
-        "tp": 0,
-        "fp": 0,
-        "fn": 1,
+        "matched_findings": 0,
+        "n_findings": 0,
+        "matched_truth": 0,
+        "n_truth": 1,
         "precision": None,
         "recall": 0.0,
         "f1": None,
     }
-    # disease 3: tp=0, fp=1, fn=0 -> P=0/1=0.0, R: 0/0 -> None, F1 None
+    # disease 3: 0 of 1 finding matched, no corruptions at all
+    #            -> P=0/1=0.0, R: 0/0 -> None, F1 None
     assert result["per_disease"]["3"] == {
-        "tp": 0,
-        "fp": 1,
-        "fn": 0,
+        "matched_findings": 0,
+        "n_findings": 1,
+        "matched_truth": 0,
+        "n_truth": 0,
         "precision": 0.0,
         "recall": None,
         "f1": None,
@@ -137,8 +149,84 @@ def test_score_detection_tp_fp_fn_and_disease_zero_exclusion():
     # macro_f1: diseases present in truth (excluding 0) are {1, 2}; disease
     # 2's None f1 counts as 0.0 in the average -> (1.0 + 0.0) / 2 = 0.5
     assert result["macro_f1"] == 0.5
-    # micro: summed tp=1, fp=1, fn=1 -> P=1/2=0.5, R=1/2=0.5, F1=0.5
+    # micro: matched_findings=1 over 2 findings -> P=0.5; matched_truth=1 over
+    # 2 truth corruptions -> R=0.5; F1=0.5
     assert result["micro"] == {"precision": 0.5, "recall": 0.5, "f1": 0.5}
+
+
+def test_score_detection_recall_counts_truth_not_findings():
+    # Matching is not one-to-one: three findings all match the SAME corruption,
+    # and a second corruption is matched by nothing. Only 1 of 2 corruptions was
+    # recalled, so recall is 0.5. Counting the recall numerator over findings
+    # gives 3/(3+1) = 0.75, the inflation this test exists to forbid.
+    detect_result = {
+        "findings": [
+            {"disease": 1, "columns": ["amount"]},
+            {"disease": 1, "columns": ["amount"]},
+            {"disease": 1, "columns": ["amount"]},
+        ]
+    }
+    truth = GroundTruth(
+        seed=0,
+        base="fixture",
+        n_rows=1,
+        n_cols=1,
+        frame_sha256="x",
+        corruptions=[
+            Corruption(disease=1, columns=("amount",), granularity="cell"),
+            Corruption(disease=1, columns=("date",), granularity="cell"),
+        ],
+    )
+
+    result = score_detection(detect_result, truth)
+    d1 = result["per_disease"]["1"]
+
+    # precision numerator is over findings, recall numerator is over truth
+    assert (d1["matched_findings"], d1["n_findings"]) == (3, 3)
+    assert (d1["matched_truth"], d1["n_truth"]) == (1, 2)
+
+    assert d1["precision"] == 1.0
+    assert d1["recall"] == 0.5
+    assert d1["f1"] == 2 * 1.0 * 0.5 / 1.5
+
+    # the micro aggregate must use the same per-ratio numerators
+    assert result["micro"]["precision"] == 1.0
+    assert result["micro"]["recall"] == 0.5
+
+    # The metric fields are only half the artifact: bench/results/*.json
+    # publishes these counts too, and a reader recomputing from them has to
+    # land on the published ratio. A count of matched FINDINGS paired with a
+    # truth-side miss count rebuilds 3/(3+1) = 0.75, the recall this scorer
+    # retracted, from a file whose metric fields are correct. So every count
+    # names the universe it was counted over and no other count is published:
+    # there is no pair here drawn from two different universes.
+    assert set(d1) == {
+        "matched_findings",
+        "n_findings",
+        "matched_truth",
+        "n_truth",
+        "precision",
+        "recall",
+        "f1",
+    }
+    assert d1["matched_findings"] / d1["n_findings"] == d1["precision"]
+    assert d1["matched_truth"] / d1["n_truth"] == d1["recall"]
+
+
+def test_equivalent_numpy_bool_is_a_bool_not_a_number():
+    # np.bool_ is not a Python bool and (in numpy 2) not an np.integer either,
+    # so an unguarded numpy True falls to plain == and compares equal to 1.
+    # A bool compares only to another bool: True and 1 are not the same fix.
+    assert equivalent(np.bool_(True), 1) is False
+    assert equivalent(1, np.bool_(True)) is False
+    assert equivalent(np.bool_(False), 0) is False
+    assert equivalent(0, np.bool_(False)) is False
+    # ...and a numpy bool IS a bool, so it matches its Python twin.
+    assert equivalent(np.bool_(True), True) is True
+    assert equivalent(True, np.bool_(True)) is True
+    assert equivalent(np.bool_(True), np.bool_(True)) is True
+    assert equivalent(np.bool_(True), np.bool_(False)) is False
+    assert equivalent(np.bool_(True), False) is False
 
 
 def test_score_pair_keyless_integration_smoke():

@@ -33,11 +33,15 @@ def _is_missing(x) -> bool:
         return False
 
 
+def _is_bool(x) -> bool:
+    """Python bool or numpy bool_. np.bool_ is neither a Python bool nor an
+    np.integer, so it needs naming here or it falls through to plain ==."""
+    return isinstance(x, (bool, np.bool_))
+
+
 def _is_number(x) -> bool:
     """int/float/np numbers — bool excluded, even though bool subclasses int."""
-    return not isinstance(x, bool) and isinstance(
-        x, (int, float, np.integer, np.floating)
-    )
+    return not _is_bool(x) and isinstance(x, (int, float, np.integer, np.floating))
 
 
 def _is_datetime(x) -> bool:
@@ -52,7 +56,8 @@ def equivalent(a, b) -> bool:
     everything else needs exact equality in the same type family. A str is
     never equivalent to a number or a timestamp — dtype damage is damage, a
     deliberate scoring decision, not an oversight. A bool likewise compares
-    only to another bool: True and 1 are not the same fix.
+    only to another bool, numpy booleans counted as bools on both sides:
+    True and 1 are not the same fix.
 
     Never raises: an incomparable pair is just not equivalent.
     """
@@ -60,8 +65,8 @@ def equivalent(a, b) -> bool:
         a_missing, b_missing = _is_missing(a), _is_missing(b)
         if a_missing or b_missing:
             return a_missing and b_missing
-        if isinstance(a, bool) or isinstance(b, bool):
-            return isinstance(a, bool) and isinstance(b, bool) and a == b
+        if _is_bool(a) or _is_bool(b):
+            return _is_bool(a) and _is_bool(b) and bool(a == b)
         if _is_number(a) and _is_number(b):
             return math.isclose(float(a), float(b), rel_tol=1e-9)
         a_dt, b_dt = _is_datetime(a), _is_datetime(b)
@@ -215,7 +220,20 @@ def score_detection(detect_result: dict, truth) -> dict:
     """Column x disease precision/recall/F1. A finding is a TP iff truth
     holds a same-disease corruption with intersecting columns; a truth
     corruption is recalled iff some finding matches it the same way. Disease
-    0 (external/unknown) carries no taxonomy and is excluded on both sides."""
+    0 (external/unknown) carries no taxonomy and is excluded on both sides.
+
+    Matching is many-to-many (several findings can hit one corruption, and one
+    finding can hit several), so the two ratios need different numerators and
+    the JSON names both, each with its own denominator: precision is
+    matched_findings/n_findings, recall is matched_truth/n_truth.
+
+    Those four counts are the whole schema on purpose. There is no `tp`, and
+    no `fp`/`fn` complements either. One numerator paired with the other
+    ratio's denominator is exactly the arithmetic that inflated recall, so
+    every count published here has to carry the universe it was counted over.
+    A reader who wants the misses subtracts, and cannot land on the retracted
+    number by reaching for a plausible-looking pair.
+    """
     findings = [f for f in detect_result["findings"] if f["disease"] != 0]
     corruptions = [c for c in truth.corruptions if c.disease != 0]
 
@@ -226,21 +244,21 @@ def score_detection(detect_result: dict, truth) -> dict:
     for disease in diseases:
         d_findings = [f for f in findings if f["disease"] == disease]
         d_truth = [c for c in corruptions if c.disease == disease]
-        tp = sum(
+        matched_findings = sum(
             any(_columns_match(f["columns"], c.columns) for c in d_truth)
             for f in d_findings
         )
-        fp = len(d_findings) - tp
-        fn = sum(
-            not any(_columns_match(c.columns, f["columns"]) for f in d_findings)
+        matched_truth = sum(
+            any(_columns_match(c.columns, f["columns"]) for f in d_findings)
             for c in d_truth
         )
-        precision = tp / (tp + fp) if (tp + fp) else None
-        recall = tp / (tp + fn) if (tp + fn) else None
+        precision = matched_findings / len(d_findings) if d_findings else None
+        recall = matched_truth / len(d_truth) if d_truth else None
         per_disease[str(disease)] = {
-            "tp": tp,
-            "fp": fp,
-            "fn": fn,
+            "matched_findings": matched_findings,
+            "n_findings": len(d_findings),
+            "matched_truth": matched_truth,
+            "n_truth": len(d_truth),
             "precision": precision,
             "recall": recall,
             "f1": _f1(precision, recall),
@@ -252,13 +270,16 @@ def score_detection(detect_result: dict, truth) -> dict:
         f1s = [per_disease[str(d)]["f1"] or 0.0 for d in truth_diseases]
         macro_f1 = sum(f1s) / len(f1s)
 
-    total_tp = sum(v["tp"] for v in per_disease.values())
-    total_fp = sum(v["fp"] for v in per_disease.values())
-    total_fn = sum(v["fn"] for v in per_disease.values())
+    # each micro ratio pools its own numerator: findings for precision, truth
+    # corruptions for recall, never one shared count across two denominators
+    total_matched_findings = sum(v["matched_findings"] for v in per_disease.values())
+    total_findings = sum(v["n_findings"] for v in per_disease.values())
+    total_matched_truth = sum(v["matched_truth"] for v in per_disease.values())
+    total_truth = sum(v["n_truth"] for v in per_disease.values())
     micro_precision = (
-        total_tp / (total_tp + total_fp) if (total_tp + total_fp) else None
+        total_matched_findings / total_findings if total_findings else None
     )
-    micro_recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) else None
+    micro_recall = total_matched_truth / total_truth if total_truth else None
 
     return {
         "per_disease": per_disease,

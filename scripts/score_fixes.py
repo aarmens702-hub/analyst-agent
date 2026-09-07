@@ -13,6 +13,8 @@ scoring habit, per the brief.
 
 import argparse
 import re
+import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import pandas as pd
@@ -24,19 +26,71 @@ RAHA_ROOT = Path(__file__).resolve().parents[1] / "data" / "raha"
 _MISSING = "\x00NA\x00"
 
 
-# A plain number, so "12.0" and "12" score as the same value. Leading zeros are
-# excluded on purpose: losing them is disease 22, so "02115" must not equal 2115.
-_PLAIN_NUMBER = re.compile(r"^[-+]?(0|[1-9]\d*)(\.\d+)?$")
+# A plain number, so "12.0", "12" and "1.2e+1" score as the same value. Leading
+# zeros are excluded on purpose: losing them is disease 22, so "02115" must not
+# equal 2115.
+_PLAIN_NUMBER = re.compile(r"^[-+]?(0|[1-9]\d*)(\.\d+)?([eE][-+]?\d+)?$")
+
+
+def _canonical_number(s: str) -> str | None:
+    """Exact comparison key for a numeric string, or None if it has no exact
+    value: a literal Decimal rejects, or a non-finite one it accepts.
+
+    Built from Decimal's digit tuple, which is exact at any length, rather than
+    from a rounded rendering. Both obvious alternatives round: "%.12g" folds two
+    17-digit ids differing in the last digit into one value, and Decimal's own
+    normalize() does the same at the context precision (28 digits by default).
+    Rounding here would score a repair that produced the wrong digits as perfect,
+    so this drops no digit at all.
+
+    Trailing zeros move into the exponent, so "1200", "1200.0" and "1.2E+3" share
+    a key, and every zero (including "-0") keys as "0". The key is a comparison
+    token, not a display form.
+    """
+    try:
+        sign, digits, exponent = Decimal(s).as_tuple()
+    except InvalidOperation:  # e.g. an exponent too large for Decimal to hold
+        return None
+    if not isinstance(exponent, int):
+        # Decimal accepts "NaN", "sNaN" and "Infinity", whose digit tuples are
+        # empty or (0,) with a letter exponent. Keying them from the digits
+        # alone would collapse all of them onto plain 0.
+        return None
+    if not any(digits):
+        return "0"
+    kept = len(digits)
+    while digits[kept - 1] == 0:
+        kept -= 1
+    mantissa = "".join(str(d) for d in digits[:kept])
+    return f"{'-' if sign else ''}{mantissa}e{exponent + len(digits) - kept}"
 
 
 def _norm(value: object) -> str:
     """Stripped-string view of one cell; missing and empty collapse to a sentinel,
-    and numbers to a canonical form so formatting never masks value equality."""
+    and numbers to an exact canonical form so formatting never masks value
+    equality (and, being exact, never masks a difference either).
+
+    Exactness applies to a written literal, whose digits are what somebody
+    wrote. A float cell is not that: it is a float64, and its last digits are
+    representation noise from arithmetic, so it is first rendered at the
+    precision a float64 faithfully carries. Without that, a mean-imputed 3.3
+    arriving as 3.3000000000000003 scores as a wrong repair of a truth reading
+    "3.3", which under-counts real repairs over noise nobody wrote. Only
+    .parquet input reaches this branch; a CSV is read all-strings.
+
+    Applied to every cell of all three frames, so both sides of every comparison
+    in `score` are keyed the same way.
+    """
     if pd.isna(value):
         return _MISSING
-    s = str(value).strip()
+    if isinstance(value, float):  # float64, and np.float64 which subclasses it
+        s = f"{value:.{sys.float_info.dig}g}"
+    else:
+        s = str(value).strip()
     if _PLAIN_NUMBER.match(s):
-        return f"{float(s):.12g}"
+        canonical = _canonical_number(s)
+        if canonical is not None:
+            return canonical
     return s or _MISSING
 
 

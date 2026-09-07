@@ -120,6 +120,94 @@ def test_leading_zeros_still_count_as_a_difference() -> None:
     assert score(dirty, truth.copy(), truth)["correct_changes"] == 1
 
 
+@pytest.mark.parametrize(
+    ("truth_id", "wrong_id"),
+    [
+        ("12345678901234567", "12345678901234568"),
+        # 33 digits, past decimal's default 28-digit context: canonicalizing with
+        # Decimal.normalize() would fold this pair back together.
+        ("123456789012345678901234567890123", "123456789012345678901234567890124"),
+    ],
+)
+def test_wrong_digits_in_a_long_id_are_not_a_correct_repair(
+    truth_id: str, wrong_id: str
+) -> None:
+    """Canonicalizing a number must not round it. Two long ids differing only in
+    the final digit are different values, so writing the wrong one is a wrong
+    repair, not a perfect one."""
+    dirty = pd.DataFrame({"id": ["N/A"]})
+    truth = pd.DataFrame({"id": [truth_id]})
+    cleaned = pd.DataFrame({"id": [wrong_id]})
+    s = score(dirty, cleaned, truth)
+    assert s["should_change"] == 1
+    assert s["changed"] == 1
+    assert s["correct_changes"] == 0
+    assert s["precision"] == 0.0
+    assert s["recall"] == 0.0
+
+
+def test_formatting_never_masks_numeric_equality() -> None:
+    """1200, 1200.0 and 1.2E+3 are one value written three ways, so no cell here
+    differs from its truth and none should change."""
+    dirty = pd.DataFrame({"n": ["1200", "1200.0", "1.2E+3"]})
+    truth = pd.DataFrame({"n": ["1.2E+3", "1200", "1200.0"]})
+    s = score(dirty, dirty.copy(), truth)
+    assert s["should_change"] == 0
+    assert s["changed"] == 0
+
+
+def test_float_noise_from_arithmetic_is_still_a_correct_repair() -> None:
+    """The other half of exactness: a float64 cell is not a written literal.
+
+    Mean-imputing a missing cell gives 3.3000000000000003, and parsing money
+    gives 1234.5600000000002. Both are correct repairs of a truth that reads
+    "3.3" and "1234.56". Their 17th digit is float64 representation noise, not
+    a digit anyone wrote, so keying it as if it were exact scores a real repair
+    as wrong. .parquet input is the live path for this (read_table keeps its
+    dtypes), which is why an all-string CSV fixture cannot see it.
+    """
+    dirty = pd.DataFrame({"m": [None, "1,234.56"]})
+    truth = pd.DataFrame({"m": ["3.3", "1234.56"]})
+    cleaned = pd.DataFrame({"m": [3.3000000000000003, 1234.5600000000002]})
+    s = score(dirty, cleaned, truth)
+    assert s["should_change"] == 2
+    assert s["changed"] == 2
+    assert s["correct_changes"] == 2
+    assert s["precision"] == 1.0
+    assert s["recall"] == 1.0
+
+    # ...and the tolerance stops where float64 does. A 17-digit id cannot be
+    # carried by a float at all, so a float that lost its last digits is still
+    # a wrong repair, not a rounding detail.
+    ids_truth = pd.DataFrame({"id": ["12345678901234567"]})
+    ids_cleaned = pd.DataFrame({"id": [1.2345678901234568e16]})
+    assert (
+        score(pd.DataFrame({"id": ["N/A"]}), ids_cleaned, ids_truth)["precision"] == 0
+    )
+
+
+def test_non_finite_numbers_never_key_as_zero() -> None:
+    """Decimal accepts "NaN" and "Infinity"; their digit tuples are empty, so a
+    canonical key built from the digits alone collapses them onto plain 0. A
+    cell reading "Infinity" is not a cell reading "0"."""
+    import score_fixes
+
+    for spelling in ("NaN", "sNaN", "Infinity", "-Infinity"):
+        assert score_fixes._canonical_number(spelling) is None, spelling
+        assert score_fixes._norm(spelling) != score_fixes._norm("0"), spelling
+
+
+def test_malformed_numeric_looking_cells_do_not_raise() -> None:
+    """Canonicalization is a comparison aid, not a parser. A cell Decimal rejects
+    (here an exponent too large for it) falls back to its stripped literal instead
+    of raising, and unequal literals stay unequal."""
+    huge = "1e" + "9" * 40
+    dirty = pd.DataFrame({"n": [huge, "1.2.3"]})
+    truth = pd.DataFrame({"n": [huge, "7"]})
+    s = score(dirty, dirty.copy(), truth)
+    assert s["should_change"] == 1  # the huge exponents match, "1.2.3" != "7"
+
+
 @needs_raha
 def test_raha_identity_checks() -> None:
     dirty = read_table(RAHA / "beers" / "dirty.csv")

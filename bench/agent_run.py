@@ -116,6 +116,10 @@ _TOKEN_ATTRS = (
     ("cache_hit_tokens", "crivo.cache.hit_tokens"),
     ("cache_miss_tokens", "crivo.cache.miss_tokens"),
 )
+# the terms new_work_tokens ADDS. A call that reported neither reported no
+# cost basis: cache counters alone cannot say what new work a call did, and
+# subtracting a hit count from nothing would publish a negative token count.
+_NEW_WORK_ATTRS = ("gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens")
 
 
 def _call_stats(path: Path) -> dict:
@@ -123,12 +127,26 @@ def _call_stats(path: Path) -> dict:
     model wait, token usage, and new_work_tokens (input minus cache hits
     plus output, the cost basis that excludes cache reads). A missing file,
     junk line, or absent field degrades to zeros/absent keys, never raises:
-    telemetry must not be able to fail a case."""
+    telemetry must not be able to fail a case.
+
+    new_work_tokens separates three states rather than two, because 0 and
+    None each mean something and the wrong one flatters a cost column:
+      - no readable telemetry -> None. We do not know whether a call was made.
+      - readable, no call span -> 0. The deterministic path solved the case;
+        no call was made, so nothing was spent. Calling this unknown drops
+        real, free cases out of the mean and leaves it several times high.
+      - a call span that reported no usage -> None for the whole case. The
+        span is emitted from telemetry.span's `finally` while llm.generate
+        maps usage only after the stream finishes, so a cancelled or failed
+        call leaves one behind. Summing the rest would publish a total that
+        is knowably short as if it were complete.
+    """
     try:
         lines = path.read_text().splitlines()
     except OSError:
-        lines = []
+        return {"count": 0, "model_wait_s": 0.0, "new_work_tokens": None}
     count = 0
+    unpriced = 0
     wait = 0.0
     sums: dict = {}
     for line in lines:
@@ -143,16 +161,21 @@ def _call_stats(path: Path) -> dict:
         if isinstance(dur, (int, float)):
             wait += dur
         attrs = span.get("attrs") or {}
+        if not any(isinstance(attrs.get(a), (int, float)) for a in _NEW_WORK_ATTRS):
+            unpriced += 1
         for key, attr in _TOKEN_ATTRS:
             value = attrs.get(attr)
             if isinstance(value, (int, float)):
                 sums[key] = sums.get(key, 0) + value
     stats = {"count": count, "model_wait_s": round(wait, 2), **sums}
-    stats["new_work_tokens"] = (
-        sums.get("input_tokens", 0)
-        - sums.get("cache_hit_tokens", 0)
-        + sums.get("output_tokens", 0)
-    )
+    if unpriced:
+        stats["new_work_tokens"] = None  # a call of unknown cost is in there
+    else:
+        stats["new_work_tokens"] = (
+            sums.get("input_tokens", 0)
+            - sums.get("cache_hit_tokens", 0)
+            + sums.get("output_tokens", 0)
+        )
     return stats
 
 
@@ -286,6 +309,13 @@ def _mean(values: list) -> float | None:
     return round(sum(present) / len(present), 4) if present else None
 
 
+def _tokens_text(value: float | None) -> str:
+    """Render a token count for the terminal. None is `unknown`, never 0: no
+    span reported usage, so what the case cost is not known, and a 0 in the
+    cost column would read as free."""
+    return "unknown" if value is None else str(value)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Agent-mode Proving Ground lane")
     parser.add_argument("--sample", type=int, default=3, help="cases to run")
@@ -389,20 +419,26 @@ def main(argv: list[str] | None = None) -> int:
                 f" | repair F1 {repair.get('f1')}"
                 f" | {row['wall_secs']}s | {row.get('events', 0)} events"
                 f" | {calls.get('count', 0)} calls"
-                f" | {calls.get('new_work_tokens', 0)} new-work tok"
+                f" | {_tokens_text(calls.get('new_work_tokens'))} new-work tok"
             )
             rows.append(row)
 
     ok = [r for r in rows if r.get("status") == "ok" and r.get("scores")]
     ok_calls = [r.get("calls") or {} for r in ok]
+    # the token mean covers only the scored cases that reported usage, so it
+    # is published with the denominator it was taken over, and that
+    # denominator names its own scope: an aborted case spends real tokens and
+    # is in neither half of it
+    tokens = [c.get("new_work_tokens") for c in ok_calls]
+    known_tokens = [t for t in tokens if t is not None]
     print(
         f"\nagent lane: {len(ok)}/{len(rows)} scored"
         f" | repair F1 mean {_mean([r['scores']['repair'].get('f1') for r in ok])}"
         f" | repair recall mean "
         f"{_mean([r['scores']['repair'].get('recall') for r in ok])}"
         f" | calls mean {_mean([c.get('count') for c in ok_calls])}"
-        f" | new-work tokens mean "
-        f"{_mean([c.get('new_work_tokens') for c in ok_calls])}"
+        f" | new-work tokens mean {_tokens_text(_mean(tokens))}"
+        f" ({len(known_tokens)}/{len(tokens)} scored cases with token data)"
     )
 
     if repeat > 1:

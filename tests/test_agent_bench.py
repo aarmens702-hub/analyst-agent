@@ -298,7 +298,9 @@ def test_run_case_points_telemetry_at_a_fresh_per_case_file_and_restores_env(
     assert seen["env"] == str(expected)
     assert os.environ["CRIVO_TELEMETRY"] == "sentinel-before"
     assert not expected.exists(), "stale telemetry must be removed before the run"
-    assert row["calls"] == {"count": 0, "model_wait_s": 0.0, "new_work_tokens": 0}
+    # new_work_tokens was pinned at 0 here, which is the bug: a case whose
+    # telemetry reported nothing does not know what it cost
+    assert row["calls"] == {"count": 0, "model_wait_s": 0.0, "new_work_tokens": None}
 
 
 def test_run_case_ceiling_arm_gets_its_own_telemetry_file_and_unsets_cleanly(
@@ -356,6 +358,9 @@ def test_call_stats_sums_client_call_spans_and_tolerates_gaps(tmp_path):
     tele.write_text("\n".join(json.dumps(s) for s in spans) + "\nnot json\n")
 
     stats = agent_run._call_stats(tele)
+    # every sum still tolerates the junk line and the absent fields. The total
+    # does not: the third call reported no usage, so 150 - 60 + 10 would be a
+    # knowably short sum published as this case's whole cost.
     assert stats == {
         "count": 3,
         "model_wait_s": 1.75,
@@ -363,13 +368,182 @@ def test_call_stats_sums_client_call_spans_and_tolerates_gaps(tmp_path):
         "output_tokens": 10,
         "cache_hit_tokens": 60,
         "cache_miss_tokens": 40,
-        "new_work_tokens": 150 - 60 + 10,
+        "new_work_tokens": None,
     }
     assert agent_run._call_stats(tmp_path / "absent.jsonl") == {
         "count": 0,
         "model_wait_s": 0.0,
-        "new_work_tokens": 0,
+        # no file, so no token data: unknown, not zero
+        "new_work_tokens": None,
     }
+
+
+def test_call_stats_reports_unknown_tokens_rather_than_zero(tmp_path):
+    """A paid run whose spans carried no token attribute must not be
+    indistinguishable from a free one. When nothing reported usage the cost
+    basis is unknown, so new_work_tokens is None, not 0. This is the shape a
+    real run writes whenever the provider reports no usage."""
+    import json
+
+    tele = tmp_path / "silent.jsonl"
+    spans = [
+        {
+            "name": "gen_ai.client.call",
+            "dur_s": 2.0,
+            "attrs": {"gen_ai.system": "claude", "gen_ai.request.model": "m"},
+        },
+        {"name": "gen_ai.client.call", "dur_s": 1.0},
+    ]
+    tele.write_text("\n".join(json.dumps(s) for s in spans) + "\n")
+
+    stats = agent_run._call_stats(tele)
+    assert stats["count"] == 2, "the calls were made, and billed"
+    assert stats["model_wait_s"] == 3.0
+    assert stats["new_work_tokens"] is None, "unknown cost, not free"
+    # no file at all is the same kind of ignorance
+    assert agent_run._call_stats(tmp_path / "absent.jsonl")["new_work_tokens"] is None
+
+
+def test_call_stats_keeps_a_genuinely_zero_count_as_zero(tmp_path):
+    """The other side of the same distinction: a span that did report usage
+    and reported nothing chargeable is a real 0, not unknown."""
+    import json
+
+    tele = tmp_path / "zero.jsonl"
+    tele.write_text(
+        json.dumps(
+            {
+                "name": "gen_ai.client.call",
+                "attrs": {
+                    "gen_ai.usage.input_tokens": 0,
+                    "gen_ai.usage.output_tokens": 0,
+                },
+            }
+        )
+        + "\n"
+    )
+
+    assert agent_run._call_stats(tele)["new_work_tokens"] == 0
+
+
+def test_call_stats_zero_calls_is_free_not_unknown(tmp_path):
+    """`unknown` is for ignorance, and a readable telemetry file that records
+    no model call at all is not ignorance: the deterministic policy path
+    solved the case and nothing was billed. Three of the real on-disk
+    telemetry files have exactly this shape, so calling them unknown drops
+    them out of the token mean and leaves it several times too high."""
+    import json
+
+    tele = tmp_path / "deterministic.jsonl"
+    spans = [
+        {"name": "crivo.policy.decision", "dur_s": 0.01, "attrs": {"grade": "AUTO"}},
+        {"name": "crivo.trajectory", "dur_s": 4.0, "attrs": {}},
+    ]
+    tele.write_text("\n".join(json.dumps(s) for s in spans) + "\n")
+
+    stats = agent_run._call_stats(tele)
+    assert stats["count"] == 0
+    assert stats["new_work_tokens"] == 0, "no call was made, so nothing was spent"
+    # the distinction that makes it meaningful: no readable telemetry at all
+    # stays unknown, because then we do not know whether a call was made
+    assert agent_run._call_stats(tmp_path / "absent.jsonl")["new_work_tokens"] is None
+
+
+def test_call_stats_needs_the_terms_the_arithmetic_actually_adds(tmp_path):
+    """new_work_tokens is input - cache hits + output. The cache counters
+    alone say nothing about new work: a miss-only span would certify 0 for a
+    paid call, and a hit-only span would publish a negative token count as
+    fact. Only the additive terms can decide the cost basis is known."""
+    import json
+
+    def _stats(name: str, attrs: dict) -> dict:
+        tele = tmp_path / f"{name}.jsonl"
+        tele.write_text(
+            json.dumps({"name": "gen_ai.client.call", "attrs": attrs}) + "\n"
+        )
+        return agent_run._call_stats(tele)
+
+    assert _stats("miss", {"crivo.cache.miss_tokens": 117})["new_work_tokens"] is None
+    assert _stats("hit", {"crivo.cache.hit_tokens": 5120})["new_work_tokens"] is None
+    # an additive term present is a real reading, cache hits subtracted from it
+    both = _stats(
+        "both", {"gen_ai.usage.input_tokens": 900, "crivo.cache.hit_tokens": 512}
+    )
+    assert both["new_work_tokens"] == 388
+
+
+def test_call_stats_will_not_publish_a_partial_sum_as_the_whole_case(tmp_path):
+    """telemetry.span emits from a `finally` and llm.generate maps usage only
+    after the stream completes, so a cancelled or failed call leaves a call
+    span carrying no usage. Summing the calls that did report and printing it
+    as the case total states a number that is knowably short. This is the
+    shape of the real bench/results/agent/telemetry/tx-excel-ids.jsonl, whose
+    sixth and longest call reported nothing."""
+    import json
+
+    tele = tmp_path / "partial.jsonl"
+    spans = [
+        {
+            "name": "gen_ai.client.call",
+            "dur_s": 7.4,
+            "attrs": {
+                "gen_ai.usage.input_tokens": 1141,
+                "gen_ai.usage.output_tokens": 439,
+                "crivo.cache.hit_tokens": 1024,
+            },
+        },
+        {
+            "name": "gen_ai.client.call",
+            "dur_s": 203.8,
+            "attrs": {"gen_ai.request.model": "deepseek-v4-pro"},
+        },
+    ]
+    tele.write_text("\n".join(json.dumps(s) for s in spans) + "\n")
+
+    stats = agent_run._call_stats(tele)
+    assert stats["count"] == 2, "both calls happened, and both were billed"
+    assert stats["input_tokens"] == 1141, "the readings we do have are still kept"
+    assert stats["new_work_tokens"] is None, "556 would be knowably short"
+
+
+def test_main_prints_unknown_tokens_as_unknown_never_as_zero(
+    tmp_path, monkeypatch, capsys
+):
+    """The cost column is the only place a reader sees what a run spent.
+    A case with no token data prints `unknown`; printing 0 would report a
+    paid run as a free one. The aggregate mean skips the unknowns, and says
+    how many cases it actually covered."""
+    monkeypatch.setenv(agent_run.KEY_VARS[0], "sk-test")
+    monkeypatch.setattr(agent_run, "RESULTS_DIR", tmp_path)
+    entry = {"name": "silent_case", "diseases": [1]}
+    monkeypatch.setattr(agent_run.corpus, "SMOKE", [entry], raising=False)
+    row = {
+        "name": "silent_case",
+        "status": "ok",
+        "wall_secs": 3.2,
+        "events": 7,
+        "scores": {"repair": {"f1": 0.5, "recall": 0.5}},
+        "calls": {"count": 4, "model_wait_s": 2.1, "new_work_tokens": None},
+    }
+    monkeypatch.setattr(agent_run, "_run_case", lambda entry, args: row)
+
+    assert agent_run.main(["--sample", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "4 calls" in out, "the calls themselves are still known"
+    assert "unknown new-work tok" in out
+    assert "0 new-work tok" not in out
+    assert "new-work tokens mean unknown" in out
+    assert "0/1 scored cases with token data" in out
+
+
+def test_token_mean_covers_only_the_cases_that_reported_tokens(tmp_path, monkeypatch):
+    """An unknown case must not be averaged in as a zero, which would drag
+    the mean down and hide that the run does not know what it spent. The mean
+    is over the cases with token data and publishes that denominator."""
+    assert agent_run._mean([200, None]) == 200.0
+    assert agent_run._tokens_text(None) == "unknown"
+    assert agent_run._tokens_text(0) == "0"
+    assert agent_run._tokens_text(150) == "150"
 
 
 def test_main_prints_calls_per_case_and_in_the_aggregate(tmp_path, monkeypatch, capsys):
