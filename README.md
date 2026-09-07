@@ -218,13 +218,13 @@ Or anywhere else: `crivo diagnose file.csv --fail-on AUTO --json`.
 ## Benchmarks
 
 <!-- bench:start -->
-**Deterministic mode baseline** (2026-09-03, 1450 synthetic + 4 external datasets, cell-level scoring, 0 labels):
+**Deterministic mode baseline** (2026-09-07, 1450 synthetic + 4 external datasets, cell-level scoring, 0 labels):
 
 | metric | value |
 |---|---|
-| detection micro-F1 (mean, silence = 0) | 0.732 |
-| repair F1, fully-fixable datasets | 0.983 |
-| survived-verification rate | 1.000 |
+| detection micro-F1 (mean, silence = 0) | 0.731 |
+| repair F1, mean over datasets with repair defined (226/1450; 226 of the 450 fully fixable) | 0.923 |
+| survived-verification rate, mean over datasets that attempted a fix (650/1450) | 0.673 |
 
 Full tables: `bench/RESULTS.md`.
 <!-- bench:end -->
