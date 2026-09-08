@@ -21,7 +21,7 @@ from crivo.events import (
     SessionLike,
     StreamText,
 )
-from crivo.repl import GATE_PROMPT, PROMPT, run_repl
+from crivo.repl import GATE_PROMPT, PROMPT, _gate_decision, run_repl
 
 
 class FakeSession:
@@ -208,7 +208,7 @@ def test_full_turn_renders_box_stream_artifact_and_card() -> None:
     assert '│ out = df["v"].median()' in printer.output
     assert "│ print(out)" in printer.output
     assert "┌" in printer.output and "└" in printer.output
-    assert "[r]un / [j]eject / [s]kip: " in input_fn.prompts
+    assert GATE_PROMPT in input_fn.prompts
     assert fake.decisions == [GateDecision("run")]
 
     # stream chunks render live, without added newlines, in order
@@ -271,7 +271,14 @@ def test_gate_answer_that_is_not_a_choice_never_runs() -> None:
 
 
 def test_gate_prompt_offers_run_reject_skip() -> None:
-    assert GATE_PROMPT == "[r]un / [j]eject / [s]kip: "
+    """This pinned "[j]eject" until 2026-09-07. reject does share its first
+    letter with run, so the binding stays "j", but the rendering has to spell
+    the word the binding belongs to: an operator reading "[j]eject" types
+    "jeject", which the gate did not understand and charged a try for."""
+    assert GATE_PROMPT == "[r]un / re[j]ect / [s]kip: "
+    assert _gate_decision(scripted_input("jeject", ""), RecordingPrint()) == (
+        GateDecision("reject", "")
+    ), "and what the old rendering spelled is still understood"
 
 
 def test_skip_at_gate_sends_skip_decision() -> None:
@@ -750,11 +757,34 @@ def test_headless_policy_all_defers_person_grades_to_a_human() -> None:
     ]
 
 
+def test_a_bare_enter_at_the_gate_does_not_burn_a_try() -> None:
+    """Enter is not an answer the driver misunderstood, it is no answer at
+    all: the operator tapping it to see the prompt and the code box again has
+    told the gate nothing. It used to spend one of the five tries, so five
+    stray Enters ended the run. It re-prompts instead, and the five stay for
+    answers that really were not understood."""
+    from crivo.repl import GATE_TRIES
+
+    fake = _gated_session()
+    input_fn = scripted_input("q", *[""] * (GATE_TRIES + 2), "s", "/quit")
+
+    run_repl(fake, input_fn=input_fn, print_fn=RecordingPrint())
+
+    assert fake.decisions == [GateDecision("skip")]
+    assert input_fn.prompts.count(GATE_PROMPT) == GATE_TRIES + 3
+
+
 def test_a_gate_nobody_can_answer_leaves_instead_of_spinning() -> None:
     """The re-prompt was unbounded and printed every time, so a stdin that
     never blocks and never ends (`yes | crivo`) span at full CPU: 4.6GB of
     complaints in two minutes, measured, and no way out. Giving up leaves the
-    session, which is still not a run."""
+    session, which is still not a run.
+
+    This asserted `decisions == []` until 2026-09-07, which is a stronger
+    claim than its own reason needs: what must never happen is a run. Sending
+    nothing meant the generator was abandoned where it stood, so the run's
+    report and lineage were never written; see the test below. A skip is not
+    consent, and it is the same answer a person walking away gives."""
     from crivo.repl import GATE_TRIES
 
     fake = _gated_session()
@@ -769,12 +799,61 @@ def test_a_gate_nobody_can_answer_leaves_instead_of_spinning() -> None:
 
     run_repl(fake, input_fn=never_a_choice, print_fn=printer)
 
-    assert fake.decisions == [], "an answer nobody understood is never consent"
+    assert [d.action for d in fake.decisions] == ["skip"], (
+        "an answer nobody understood is never consent"
+    )
     assert asked.count(GATE_PROMPT) == GATE_TRIES
     assert fake.closed, "the operator gets their session closed, not a spin"
     assert any("Ctrl-D" in text for text, _ in printer.calls), (
         "the complaint has to say how to get out of the gate"
     )
+
+
+def test_a_gate_nobody_answers_finishes_the_run_it_cannot_ask_about() -> None:
+    """Giving up raised EOFError out of the session, and the clean generator
+    was dropped where it stood: no report, no lineage, no cleaned parquet,
+    while every fix already applied stayed applied. The work was done and the
+    record of it was thrown away, which is the one combination a tool whose
+    identity is verification cannot ship.
+
+    Ending through the skip path costs nothing, because a skip is what the
+    loop already knows how to record, and the generator runs to its own end.
+    The
+    driver still leaves afterwards, because the stdin that could not answer
+    the first gate cannot answer the prompt either."""
+    from crivo.repl import GATE_TRIES
+
+    class CleanSession(FakeSession):
+        """Its clean() ends the way the real one does: the durable artifacts
+        are written after the last gate, not before the first."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.wrote_report = False
+
+        def clean(self, var: str) -> Generator[Event, GateDecision | None, None]:
+            self.cleans.append(var)
+            self.sent.append((yield GateRequest("fix_a", 1, title="fix 1/2")))
+            self.sent.append((yield GateRequest("fix_b", 1, title="fix 2/2")))
+            self.wrote_report = True
+
+    fake = CleanSession()
+    asked: list[str] = []
+
+    def never_a_choice(prompt: str = "") -> str:
+        asked.append(prompt)
+        if len(asked) > 100:
+            raise AssertionError("the gate re-prompted without bound")
+        return "/clean df" if prompt == PROMPT else "y"
+
+    run_repl(fake, input_fn=never_a_choice, print_fn=RecordingPrint())
+
+    assert fake.wrote_report, "the report and lineage must be written, not dropped"
+    assert [d.action for d in fake.decisions] == ["skip", "skip"]
+    assert asked.count(GATE_PROMPT) == GATE_TRIES, (
+        "the gate it gave up on is the last one it asks about"
+    )
+    assert fake.closed
 
 
 def test_headless_clean_treats_a_callback_that_did_not_decide_as_a_skip() -> None:

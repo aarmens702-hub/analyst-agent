@@ -186,6 +186,55 @@ def test_float_noise_from_arithmetic_is_still_a_correct_repair() -> None:
     )
 
 
+def test_a_float_that_round_trips_a_long_truth_literal_is_a_correct_repair() -> None:
+    """The tolerance that makes the test above pass was applied to one side
+    only: the float cell was rounded to 15 significant digits and the truth
+    literal was kept exact. So a cleaned float that is the EXACT shortest
+    round-trip of a 16-digit truth literal, the best a float64 can possibly
+    do, was rounded away from a truth that was not, and a perfect repair
+    scored as a wrong one. Under-counting real repairs is the same dishonesty
+    as over-counting them, pointed the other way."""
+    literal = "0.1234567890123456"  # 16 significant digits
+    value = float(literal)
+    assert repr(value) == literal, "the float is the exact shortest round-trip"
+
+    dirty = pd.DataFrame({"x": ["N/A"]})
+    cleaned = pd.DataFrame({"x": [value]})
+    truth = pd.DataFrame({"x": [literal]})
+
+    s = score(dirty, cleaned, truth)
+    assert s["should_change"] == 1
+    assert s["changed"] == 1
+    assert s["correct_changes"] == 1
+    assert s["precision"] == 1.0
+
+
+def test_the_float_tolerance_never_reaches_a_comparison_without_a_float() -> None:
+    """The guard against over-correcting the test above. The tolerance exists
+    because a float64 carries representation noise nobody wrote; two written
+    literals carry no such noise, so a string-to-string comparison stays exact
+    at any length and a repair that wrote the wrong digits is still wrong."""
+    dirty = pd.DataFrame({"id": ["N/A"]})
+    long_truth = "1234567890123456789"  # 19 digits, past float64 entirely
+    near_miss = "1234567890123456788"
+
+    s = score(
+        dirty,
+        pd.DataFrame({"id": [near_miss]}),
+        pd.DataFrame({"id": [long_truth]}),
+    )
+    assert s["correct_changes"] == 0
+
+    # and a float that is genuinely the wrong value stays wrong, tolerance or
+    # not: this one misses in the 11th significant digit, far above the noise
+    s = score(
+        dirty,
+        pd.DataFrame({"id": [0.1234567890999999]}),
+        pd.DataFrame({"id": ["0.1234567890123456"]}),
+    )
+    assert s["correct_changes"] == 0
+
+
 def test_non_finite_numbers_never_key_as_zero() -> None:
     """Decimal accepts "NaN" and "Infinity"; their digit tuples are empty, so a
     canonical key built from the digits alone collapses them onto plain 0. A
@@ -225,3 +274,39 @@ def test_raha_identity_checks() -> None:
     assert oracle["precision"] == 1.0
     assert oracle["recall"] == 1.0
     assert oracle["changed"] == oracle["should_change"] == oracle["correct_changes"]
+
+
+def test_a_destroyed_sixteen_digit_id_is_not_a_correct_repair():
+    """The float tolerance refused only when BOTH sides ran past 15
+    significant digits, so a short float beside a 16-digit literal opened it
+    and rounded the literal's last digit away - even though float64 carries
+    "4111111111111111" exactly (its shortest round-trip has 16 digits, and
+    4111111111111110.0's has 15). A cleaner that wrote 4111111111111110.0
+    over the truth therefore scored as a correct repair.
+
+    This is the same lever as the recovery item 12 measured, so a float lane
+    rising cannot be read as recovered repairs until this refuses."""
+    assert repr(float("4111111111111111")) == "4111111111111111.0", "premise"
+
+    dirty = pd.DataFrame({"card": [""]})
+    truth = pd.DataFrame({"card": ["4111111111111111"]})
+    cleaned = pd.DataFrame({"card": [4111111111111110.0]})
+
+    result = score(dirty, cleaned, truth)
+
+    assert result["precision"] == 0.0, result
+
+
+def test_a_cleaner_that_destroys_a_healthy_sixteen_digit_id_is_counted():
+    """The other half, and the worse one: with dirty already equal to truth
+    the same tolerance made the destroyed value read as no change at all, so
+    the damage never reached precision. A cleaner-introduced corruption
+    disappeared from the score instead of costing it."""
+    dirty = pd.DataFrame({"card": ["4111111111111111"]})
+    truth = pd.DataFrame({"card": ["4111111111111111"]})
+    cleaned = pd.DataFrame({"card": [4111111111111110.0]})
+
+    result = score(dirty, cleaned, truth)
+
+    assert result["changed"] == 1, result
+    assert result["correct_changes"] == 0, result

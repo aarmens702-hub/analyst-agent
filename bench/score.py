@@ -203,17 +203,32 @@ def score_end_to_end(
     }
 
 
-def _columns_match(a_columns, b_columns) -> bool:
-    """Column-set intersection, with a wildcard for whole-row/whole-frame
-    scope: disease 9 (duplicate rows) and disease 18 (header damage) findings
-    carry `columns: []` because they are not about any one column. Literal
-    set intersection would make an empty set match nothing — not even another
-    empty set — so an empty side matches anything of the same disease rather
-    than nothing of it."""
-    a, b = set(a_columns), set(b_columns)
-    if not a or not b:
-        return True
-    return bool(a & b)
+def _columns_match(finding_columns, corruption) -> bool:
+    """Does a finding's column scope reach this truth corruption's?
+
+    Both sides naming columns is a set intersection. The hard case is a
+    finding that names none: crivo's d09 finding carries `columns: []`
+    because duplicate rows are not about any one column, while the injector
+    records every column of the frame, so a literal intersection would score
+    the detector at zero on a match that is real.
+
+    The wildcard that fixed it matched anything of the same disease, in both
+    directions, which is not a wildcard for whole-frame scope but a wildcard
+    for everything. One finding naming no column then recalled every truth
+    corruption of its disease, so a cell-scoped disease planted across several
+    columns published recall 1.0 off a finding that located nothing.
+
+    So a column-less side is read as the whole-frame claim it is, and is
+    credited only against a whole-row corruption ("row" granularity: d09
+    duplicates, d21 rollups, d24 aggregates). Against a cell- or
+    column-scoped corruption it matches nothing, because a finding that
+    names no column has not found that column.
+    """
+    named = set(finding_columns)
+    truth_columns = set(corruption.columns)
+    if named and truth_columns:
+        return bool(named & truth_columns)
+    return corruption.granularity == "row"
 
 
 def score_detection(detect_result: dict, truth) -> dict:
@@ -230,9 +245,20 @@ def score_detection(detect_result: dict, truth) -> dict:
     Those four counts are the whole schema on purpose. There is no `tp`, and
     no `fp`/`fn` complements either. One numerator paired with the other
     ratio's denominator is exactly the arithmetic that inflated recall, so
-    every count published here has to carry the universe it was counted over.
-    A reader who wants the misses subtracts, and cannot land on the retracted
-    number by reaching for a plausible-looking pair.
+    every count published here has to carry the universe it was counted over,
+    and a reader who wants the misses subtracts.
+
+    That is a labelling, not a guarantee, and the wave 1 docstring and commit
+    message claimed the guarantee: they said the retracted recall was not
+    constructible from these counts. It is constructible exactly, by the
+    subtraction they invited: it is matched_findings over
+    matched_findings + (n_truth - matched_truth), which on the three-findings
+    / two-corruptions case is 3/(3+1) = 0.75, the number this scorer
+    retracted. The counts stay published anyway, because withholding the
+    inputs of the wrong ratio would withhold the inputs of the right one and
+    leave a reader unable to check either. What the schema buys is that the
+    wrong pairing is legible as a wrong pairing, and no field of this JSON is
+    itself that number.
     """
     findings = [f for f in detect_result["findings"] if f["disease"] != 0]
     corruptions = [c for c in truth.corruptions if c.disease != 0]
@@ -245,12 +271,10 @@ def score_detection(detect_result: dict, truth) -> dict:
         d_findings = [f for f in findings if f["disease"] == disease]
         d_truth = [c for c in corruptions if c.disease == disease]
         matched_findings = sum(
-            any(_columns_match(f["columns"], c.columns) for c in d_truth)
-            for f in d_findings
+            any(_columns_match(f["columns"], c) for c in d_truth) for f in d_findings
         )
         matched_truth = sum(
-            any(_columns_match(c.columns, f["columns"]) for f in d_findings)
-            for c in d_truth
+            any(_columns_match(f["columns"], c) for f in d_findings) for c in d_truth
         )
         precision = matched_findings / len(d_findings) if d_findings else None
         recall = matched_truth / len(d_truth) if d_truth else None

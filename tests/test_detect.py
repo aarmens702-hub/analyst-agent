@@ -1641,3 +1641,277 @@ def test_detect_one_refuses_a_header_repair_that_leaves_the_echo_row() -> None:
     assert residual is not None, "the header-repeat row is still there"
     assert residual["columns"] == []
     assert "repeat the header" in residual["evidence"]
+
+
+# --- wave 1.5: what the verification packet's unit and re-check rules broke ---
+
+
+def test_d01_a_symbol_and_its_own_iso_code_are_one_unit() -> None:
+    """Triage 4. `_units_worn` unioned the leading symbol with the ISO code
+    drawn from the SAME value, so every '$1,200.00 USD' wore two units, a
+    uniform single-currency column regressed AUTO to HUMAN, and the evidence
+    told the reader the column mixed currencies when it did not. One value
+    naming its currency twice names one currency."""
+    values = ["$1,200.00 USD", "$980.00 USD", "$15.50 USD", "$3,400.00 USD"] * 6
+    found = detect_one(pd.DataFrame({"amt": values}), 1, ["amt"])
+
+    assert found is not None
+    assert found["grade"] == "AUTO", found["grade"]
+    assert found["stats"]["units"] == ["$"], found["stats"]
+    assert "more than one unit" not in found["evidence"], found["evidence"]
+
+
+def test_d01_a_space_before_the_degree_letter_is_the_same_unit() -> None:
+    """Triage 4. '20°C' read as '°c' and '21° C' as '°', because the letter
+    run stops at the space, so one thermometer's column went to a human."""
+    values = ["20°C", "21° C", "19°C", "22° C"] * 6
+    found = detect_one(pd.DataFrame({"temp": values}), 1, ["temp"])
+
+    assert found is not None
+    assert found["grade"] == "AUTO", found["grade"]
+    assert found["stats"]["units"] == ["°c"], found["stats"]
+
+
+def test_d01_fluid_ounces_beside_ounces_is_one_unit() -> None:
+    """Triage 4. Raha's beers column writes the same volume as '12 oz' and
+    '16 fl oz'; the first letter run read the second as 'fl', so the column
+    that UNIT_SPELLINGS exists for was refused anyway."""
+    values = ["12 oz", "16 fl oz", "12 oz", "16 fl oz", "24 fl oz"] * 6
+    found = detect_one(pd.DataFrame({"volume": values}), 1, ["volume"])
+
+    assert found is not None
+    assert found["grade"] == "AUTO", found["grade"]
+    assert found["stats"]["units"] == ["ounce"], found["stats"]
+
+
+def test_d01_two_different_currencies_in_one_value_still_go_to_a_human() -> None:
+    """The line the fold must not cross: folding a symbol into its OWN ISO
+    code is not folding every symbol into every code. A euro sign wearing a
+    dollar code is two currencies, whichever one the value meant."""
+    values = ["€1,200.00 USD", "€980.00 USD", "€15.50 USD"] * 8
+    found = detect_one(pd.DataFrame({"amt": values}), 1, ["amt"])
+
+    assert found is not None
+    assert found["grade"] == "HUMAN", found["grade"]
+    assert len(found["stats"]["units"]) == 2, found["stats"]
+
+
+def test_d01_a_dollar_sign_beside_an_unfolded_code_still_goes_to_a_human() -> None:
+    """'$' is read as the ISO code it shares a group with, and that group
+    holds USD alone. A column of '$100' beside '50 CAD' is two currencies
+    under one symbol the data cannot disambiguate."""
+    values = ["$100.00", "50.00 CAD", "$275.00", "80.00 CAD"] * 6
+    found = detect_one(pd.DataFrame({"amt": values}), 1, ["amt"])
+
+    assert found is not None
+    assert found["grade"] == "HUMAN", found["grade"]
+    assert found["stats"]["units"] == ["$", "cad"], found["stats"]
+
+
+def test_d01_a_bare_degree_beside_celsius_still_goes_to_a_human() -> None:
+    """The ambiguity the degree fold deliberately keeps: '20°' names no scale,
+    so beside '21°C' it is either the same unit written short or Fahrenheit,
+    or an angle. Two readings, one of them a silent error, so a person looks.
+    """
+    values = ["20°", "21°C", "19°", "22°C"] * 6
+    found = detect_one(pd.DataFrame({"temp": values}), 1, ["temp"])
+
+    assert found is not None
+    assert found["grade"] == "HUMAN", found["grade"]
+    assert found["stats"]["units"] == ["°", "°c"], found["stats"]
+
+
+def test_d01_a_rate_is_not_the_same_unit_as_its_numerator() -> None:
+    """Triage 5, the mirror of 4: the first letter run read '80 km/h' as 'km',
+    so a column mixing a distance with a speed looked uniform and graded AUTO.
+    Stripping both suffixes puts kilometres and kilometres per hour in one
+    float column."""
+    values = ["60 km", "80 km/h", "45 km", "110 km/h"] * 6
+    found = detect_one(pd.DataFrame({"trip": values}), 1, ["trip"])
+
+    assert found is not None
+    assert found["grade"] == "HUMAN", found["grade"]
+    assert found["stats"]["units"] == ["km", "km/h"], found["stats"]
+
+    lab = ["5 mg", "8 mg/dL", "12 mg", "3 mg/dL"] * 6
+    blood = detect_one(pd.DataFrame({"dose": lab}), 1, ["dose"])
+    assert blood is not None
+    assert blood["grade"] == "HUMAN", blood["grade"]
+    assert blood["stats"]["units"] == ["mg", "mg/dl"], blood["stats"]
+
+
+def test_d01_a_uniform_rate_column_is_still_an_auto_fix() -> None:
+    """And the over-refusal the same change must not buy: every value wearing
+    the same rate is one unit, whatever the slash."""
+    values = ["80 km/h", "110 km/h", "45 km/h", "95 km/h"] * 6
+    found = detect_one(pd.DataFrame({"speed": values}), 1, ["speed"])
+
+    assert found is not None
+    assert found["grade"] == "AUTO", found["grade"]
+    assert found["stats"]["units"] == ["km/h"], found["stats"]
+
+
+def test_detect_one_verifies_a_target_a_header_repair_already_renamed() -> None:
+    """Triage 16, cross-packet. A finding freezes its target's name when it is
+    raised. An already-verified d18 header repair renames that column, and
+    every finding still queued against the old name then read as a target that
+    left the frame: d22, d23 and d26 on that column became unverifiable for
+    the rest of the run, whatever the fixer did."""
+    from crivo.autoclean import _fix_booleans, _fix_headers
+
+    frame = pd.DataFrame(
+        {
+            "  active ": ["Y", "N", "yes", "no", "TRUE", "FALSE", "1", "0"] * 5,
+            "n": range(40),
+        }
+    )
+    ((bools),) = [
+        f["columns"] for f in detect_all(frame)["findings"] if f["disease"] == 23
+    ]
+    ((header),) = [
+        f["columns"] for f in detect_all(frame)["findings"] if f["disease"] == 18
+    ]
+    assert bools == ["  active "]
+
+    repaired = _fix_headers(frame, header)
+    assert list(repaired.columns) == ["active", "n"]
+
+    residual = detect_one(repaired, 23, bools)
+    assert residual is not None, "the boolean chaos is still there, under the new name"
+    assert "no longer in the frame" not in residual["evidence"], residual["evidence"]
+    assert residual["columns"] == ["active"]
+
+    fixed = _fix_booleans(repaired, ["active"])
+    assert detect_one(fixed, 23, bools) is None, "the repair under the new name counts"
+
+
+def test_detect_one_still_refuses_a_damaged_target_that_was_dropped() -> None:
+    """The line triage 16's resolution must not cross: a damaged name resolves
+    onto the column a repair renamed it to, and onto nothing else. With no
+    such column in the frame the target is a lost column, and lost is not
+    verified."""
+    frame = pd.DataFrame(
+        {
+            "  city ": ["  Vancouver", "Burnaby ", "Victoria", "Surrey "] * 5,
+            "n": range(20),
+        }
+    )
+    residual = detect_one(frame.drop(columns=["  city "]), 6, ["  city "])
+
+    assert residual is not None
+    assert residual["grade"] == "HUMAN"
+    assert "no longer in the frame" in residual["evidence"], residual["evidence"]
+
+
+def test_detect_one_refuses_a_header_repair_that_leaves_a_new_damaged_name() -> None:
+    """Triage 17. Containment asked whether the residual finding's columns are
+    among the targets, and a d18 repair that renames one damaged header while
+    coining another names a column no target ever held: the residual matched
+    nothing, and half a header repair was recorded verified."""
+    frame = pd.DataFrame(
+        {
+            "  Region ": ["east", "west"] * 8,
+            "Unnamed: 1": ["1", "2"] * 8,
+            "ok": list("abcdefghijklmnop"),
+        }
+    )
+    ((cols),) = [
+        f["columns"] for f in detect_all(frame)["findings"] if f["disease"] == 18
+    ]
+    assert cols == ["  Region ", "Unnamed: 1"]
+
+    half = frame.copy()
+    half.columns = ["Region", " Total ", "ok"]  # one repaired, one freshly damaged
+
+    residual = detect_one(half, 18, cols)
+    assert residual is not None, "the frame still carries a damaged header name"
+    assert residual["columns"] == [" Total "], residual["columns"]
+
+
+def test_detect_one_refuses_a_target_that_resolves_onto_a_dedupe_twin() -> None:
+    """The item 16 resolution reopened silent false verification on the most
+    ordinary CSV artifact there is: a frame carrying both 'active' and
+    '  active '. _fix_headers renames the padded twin to 'active_2' because
+    'active' is taken, and the frozen target then resolved onto 'active' - a
+    healthy, unrelated column - so detect_one returned None while the d23
+    boolean chaos sat untouched under 'active_2'. Before the packet this
+    refused loudly with "no longer in the frame"."""
+    from crivo.autoclean import _fix_headers
+
+    frame = pd.DataFrame(
+        {
+            "active": ["yes", "no"] * 20,
+            "  active ": ["Y", "N", "yes", "no", "TRUE", "FALSE", "1", "0"] * 5,
+        }
+    )
+    repaired = _fix_headers(frame, ["  active "])
+    assert list(repaired.columns) == ["active", "active_2"], list(repaired.columns)
+
+    residual = detect_one(repaired, 23, ["  active "])
+
+    assert residual is not None, "the boolean chaos is still in the frame"
+
+
+def test_detect_one_resolves_an_unnamed_target_only_onto_its_own_number() -> None:
+    """The positional branch compared the GENERATED name's number to the frame
+    position instead of to the N in 'Unnamed: N' that _fix_headers built it
+    from, so on columns ['x', 'column_1', 'y'] the frozen targets 'Unnamed: 0',
+    'Unnamed: 2' and 'Unnamed: 99' all resolved onto 'column_1'. A target that
+    was DROPPED was therefore re-checked on a surviving column and verified.
+    'column_1' is the name _fix_headers writes for 'Unnamed: 1' and for no
+    other."""
+    from crivo.detect import _resolve_renames
+
+    frame = pd.DataFrame({"x": [1], "column_1": [2], "y": [3]})
+
+    assert _resolve_renames(frame, ["Unnamed: 1"]) == {"Unnamed: 1": "column_1"}
+    for wrong in ("Unnamed: 0", "Unnamed: 2", "Unnamed: 99"):
+        assert _resolve_renames(frame, [wrong]) == {}, wrong
+
+
+def test_detect_one_never_resolves_a_blank_frozen_target() -> None:
+    """A blank name carries no identity at all - no spelling to repair and no
+    position to state - and it went through the positional branch anyway,
+    landing on whatever 'column_<i>' the frame happened to own."""
+    from crivo.detect import _resolve_renames
+
+    frame = pd.DataFrame({"x": [1], "column_1": [2], "y": [3]})
+
+    assert _resolve_renames(frame, ["   "]) == {}
+    assert _resolve_renames(frame, [""]) == {}
+
+
+def test_detect_one_resolves_the_ordinary_multi_unnamed_export() -> None:
+    """The headline case of triage 16, which the packet left refused: an
+    export with two 'Unnamed: N' columns produced two 'column_<i>' candidates
+    at matching positions, so the single-candidate rule refused and the
+    resolution recovered only the padded-name shape - the one shape whose
+    resolution was unsafe. Matching each target to its own number resolves
+    both."""
+    from crivo.detect import _resolve_renames
+
+    frame = pd.DataFrame({"a": [1], "column_1": [2], "column_2": [3]})
+
+    assert _resolve_renames(frame, ["Unnamed: 1", "Unnamed: 2"]) == {
+        "Unnamed: 1": "column_1",
+        "Unnamed: 2": "column_2",
+    }
+
+
+def test_d01_a_rate_column_written_two_ways_is_one_unit() -> None:
+    """The over-refusal the item 5 repair created on the axis it opened.
+    UNIT_TOKEN added the slash denominator to the unit token but no
+    denominator spelling was ever folded, so a uniform speed column written
+    '80 km/h' beside '75 km/hr' graded HUMAN and the evidence asserted the
+    column mixes units - which is triage 4's exact defect, reproduced one
+    packet later."""
+    values = ["80 km/h", "75 km/hr", "90 km/h", "65 km / h"] * 5
+
+    ((found),) = [
+        f
+        for f in detect_all(pd.DataFrame({"speed": values}))["findings"]
+        if f["disease"] == 1
+    ]
+
+    assert found["stats"]["units"] == ["km/h"], found["stats"]
+    assert found["grade"] == "AUTO", found["evidence"]

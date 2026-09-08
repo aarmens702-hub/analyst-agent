@@ -8,12 +8,21 @@ fix that only relabels the index still changed state, and a skipped
 re-check must never hide a state change (integration call, 2026-09-04).
 
 bench/truth.py pins bench frames as sha256 of to_csv() bytes. That technique
-is not replicated here because CSV drops dtype (the string "1" and the int 1
-serialize identically) and pays serialization cost at width. This module
+is not replicated here because CSV drops dtype: the string "1" and the int 1
+serialize identically, and telling them apart is the whole job. This module
 instead digests pd.util.hash_pandas_object row hashes, the primitive
 verify.py and detect.py already trust, plus a schema line for names, order,
 and dtypes. Its default hash_key is a fixed constant, so digests are at least
 as stable as the CSV form: identical across processes and runs.
+
+Cost is not part of that argument any more, and an earlier version of this
+paragraph said it was. The saving is real only where the frame is not object:
+a wide numeric frame digests two orders of magnitude faster than its CSV, but
+the per-cell type pass below walks object cells in Python and spends the
+saving back, so an all-object frame lands about where the CSV digest does
+(8 object columns x 100k rows: 0.072s against 0.072s, this machine). Dtype
+fidelity is what carries the choice; speed is a bonus that arrives only on
+some shapes.
 
 Row hashes alone do not beat CSV inside an object array: hash_pandas_object
 falls back to astype(str) there, so "1" hashed like 1 and "True" like True.
@@ -38,9 +47,19 @@ _MISSING = b"?missing\x00"
 
 
 def frame_fingerprint(df: pd.DataFrame) -> str:
-    """Hex sha256 of the frame's content; different digests mean different
-    content, and equal digests mean equal content except in the two named
-    cases below.
+    """Hex sha256 of the frame's content. Equal digests mean equal content
+    except in the two cases named at the bottom; a DIFFERENT digest means the
+    frame's state moved, which is a wider net than inequality of content.
+
+    The two are not the same net and this docstring used to claim they were.
+    The loop's question is "did this fix change anything a later check could
+    see", so the digest is deliberately finer than pandas' own .equals(),
+    which is documented to ignore an axis whose values compare equal at
+    another type. Two frames .equals() calls equal can fingerprint apart: an
+    index of 0, 1 against one of 0.0, 1.0, and 0.0 against -0.0. Both are
+    state changes here, on purpose. What must never happen is the reverse, a
+    changed frame keeping its digest, because that is the case the re-check
+    skip drops on the floor.
 
     Row hashes are fed to the digest in frame order (row reorder moves it)
     and forced little-endian so the digest never varies by platform. Every

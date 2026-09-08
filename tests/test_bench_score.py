@@ -198,8 +198,9 @@ def test_score_detection_recall_counts_truth_not_findings():
     # land on the published ratio. A count of matched FINDINGS paired with a
     # truth-side miss count rebuilds 3/(3+1) = 0.75, the recall this scorer
     # retracted, from a file whose metric fields are correct. So every count
-    # names the universe it was counted over and no other count is published:
-    # there is no pair here drawn from two different universes.
+    # names the universe it was counted over, and no field IS that number.
+    # The comment here used to go one further and say no such pair could be
+    # drawn at all; the test below that one shows it can be, exactly.
     assert set(d1) == {
         "matched_findings",
         "n_findings",
@@ -211,6 +212,99 @@ def test_score_detection_recall_counts_truth_not_findings():
     }
     assert d1["matched_findings"] / d1["n_findings"] == d1["precision"]
     assert d1["matched_truth"] / d1["n_truth"] == d1["recall"]
+
+
+def test_the_retracted_recall_is_constructible_from_the_published_counts():
+    """The wave 1 docstring and commit message claimed a reader "cannot land
+    on the retracted number by reaching for a plausible-looking pair". That
+    claim is false, and it is the kind of false claim that stops the next
+    reader checking: matched_findings over matched_findings plus the truth
+    side's misses rebuilds the retracted 0.75 exactly, from the four counts
+    this scorer publishes. The counts stay published, because hiding the
+    inputs of a wrong ratio would hide the inputs of the right one too. What
+    has to go is the guarantee."""
+    detect_result = {
+        "findings": [
+            {"disease": 1, "columns": ["amount"]},
+            {"disease": 1, "columns": ["amount"]},
+            {"disease": 1, "columns": ["amount"]},
+        ]
+    }
+    truth = GroundTruth(
+        seed=0,
+        base="fixture",
+        n_rows=1,
+        n_cols=1,
+        frame_sha256="x",
+        corruptions=[
+            Corruption(disease=1, columns=("amount",), granularity="cell"),
+            Corruption(disease=1, columns=("date",), granularity="cell"),
+        ],
+    )
+
+    d1 = score_detection(detect_result, truth)["per_disease"]["1"]
+    misses = d1["n_truth"] - d1["matched_truth"]
+    retracted = d1["matched_findings"] / (d1["matched_findings"] + misses)
+
+    assert retracted == 0.75
+    assert d1["recall"] == 0.5, "the published recall is still the honest one"
+
+    doc = score_detection.__doc__ or ""
+    assert "cannot land on" not in doc, "the retracted number is constructible"
+    assert "matched_findings + (n_truth - matched_truth)" in doc, (
+        "the docstring has to name the wrong pairing it cannot prevent"
+    )
+
+
+def test_a_finding_that_names_no_column_cannot_recall_a_column_scoped_disease():
+    """The empty-columns wildcard was written for the whole-row diseases and
+    then applied to every disease in both directions, so ONE finding naming no
+    column recalled every cell-scoped corruption of its disease and published
+    recall 1.0 off a finding that located nothing."""
+    detect_result = {"findings": [{"disease": 1, "columns": []}]}
+    truth = GroundTruth(
+        seed=0,
+        base="fixture",
+        n_rows=1,
+        n_cols=3,
+        frame_sha256="x",
+        corruptions=[
+            Corruption(disease=1, columns=("amount",), granularity="cell"),
+            Corruption(disease=1, columns=("date",), granularity="cell"),
+            Corruption(disease=1, columns=("qty",), granularity="cell"),
+        ],
+    )
+
+    d1 = score_detection(detect_result, truth)["per_disease"]["1"]
+
+    assert (d1["matched_truth"], d1["n_truth"]) == (0, 3)
+    assert d1["recall"] == 0.0
+    assert (d1["matched_findings"], d1["n_findings"]) == (0, 1)
+    assert d1["precision"] == 0.0
+
+
+def test_a_whole_row_disease_still_matches_the_finding_that_names_no_column():
+    """The guard against over-correcting the test above. crivo's own d09
+    finding carries `columns: []` because duplicate rows are not about any one
+    column, while the injector records every column of the frame. That pair is
+    a real match and closing the wildcard entirely would score crivo's most
+    reliable detector at zero."""
+    detect_result = {"findings": [{"disease": 9, "columns": []}]}
+    truth = GroundTruth(
+        seed=0,
+        base="fixture",
+        n_rows=2,
+        n_cols=2,
+        frame_sha256="x",
+        corruptions=[
+            Corruption(disease=9, columns=("a", "b"), granularity="row", rows=(2,)),
+        ],
+    )
+
+    d9 = score_detection(detect_result, truth)["per_disease"]["9"]
+
+    assert d9["recall"] == 1.0
+    assert d9["precision"] == 1.0
 
 
 def test_equivalent_numpy_bool_is_a_bool_not_a_number():

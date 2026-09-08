@@ -62,6 +62,12 @@ FAMILY_ONLY = frozenset({20})  # needs several files; see detect_family (R3)
 # against FIXERS: detect_one also verifies the GATE and HUMAN repairs a person
 # or the agent makes, and 17 and 25 have no deterministic fixer.
 COLUMN_CHANGING = frozenset({17, 18, 19, 25})
+# The diseases whose detector reads the whole frame and ignores the cols it is
+# handed: 9 and 10 count repeated rows, 24 finds stray structural rows, 18
+# judges every column name. Their findings are about the frame, so at re-check
+# time any residual finding of theirs is the disease still there, including
+# one naming a column no target held (R4).
+WHOLE_FRAME = frozenset({9, 10, 18, 24})
 SINGLE_FRAME = tuple(d for d in sorted(SLUGS) if d not in FAMILY_ONLY)
 
 REGISTRY: dict = {}  # disease -> fn(df, cols) -> list[finding]
@@ -473,26 +479,105 @@ def _number_families(values) -> dict:
 # The unit a suffix names is its first letter run, lowercased, so '12.0 oz',
 # '12.0 OZ.' and '12.0 oz. Alumi-Tek' are all 'oz'.
 UNIT_LETTERS = re.compile(r"([a-z%°µ²³]+)")
+# A rate is not its numerator. The first letter run read '80 km/h' as 'km' and
+# '8 mg/dL' as 'mg', so a column mixing a distance with a speed, or a mass
+# with a concentration, looked uniform and graded AUTO (R1). A slash and the
+# run after it are part of the unit; anything further past the first run is
+# trailing text, so '12.0 oz. Alumi-Tek' is still ounces. UNIT_LETTERS is left
+# as it is: its only other reader is autoclean's scale-suffix gate, whose own
+# first-run behaviour is a separate finding against that file.
+UNIT_TOKEN = re.compile(r"([a-z%°µ²³]+(?:/[a-z%°µ²³0-9]+)?)")
+# '20°C' and '21° C' are one unit written two ways: the space ends the letter
+# run, so the second read as a bare degree sign and the column went to a human
+# (R1). Only a space directly after the degree sign is closed, not every space
+# in the suffix: '20° F' must still read as '°f' and stay distinct from '°c',
+# and a blanket strip would merge '15 kg' with '15 kg net weight'.
+DEGREE_SPACE = re.compile(r"°\s+")
+# '75 km / h' is '75 km/h' spaced out, and the space ended the letter run so
+# the token read as a bare 'km' and split a uniform column. Only the spacing
+# immediately around a slash is closed, which cannot merge two units: a slash
+# is already inside the token.
+RATE_SLASH = re.compile(r"\s*/\s*")
+# One denominator under several spellings. UNIT_TOKEN made the denominator
+# part of the unit, which is right, and then '80 km/h' beside '75 km/hr' read
+# as two units and sent a uniform column to a human - the same over-refusal
+# triage 4 was raised for, reproduced on the axis triage 5's fix opened.
+#
+# Time words only, and only the unambiguous ones. 'm' is deliberately absent:
+# as a denominator it is minutes or metres ('m/m' is a slope), and nothing in
+# the column says which, so it keeps its own spelling and the column goes to a
+# person. Same reasoning as the numerator side - a false referral is a
+# message, a false merge is not recoverable.
+DENOMINATOR_SPELLINGS = {
+    "hr": "h",
+    "hrs": "h",
+    "hour": "h",
+    "hours": "h",
+    "sec": "s",
+    "secs": "s",
+    "second": "s",
+    "seconds": "s",
+    "mins": "min",
+    "minute": "min",
+    "minutes": "min",
+    "day": "d",
+    "days": "d",
+    "yrs": "yr",
+    "year": "yr",
+    "years": "yr",
+    "month": "mo",
+    "months": "mo",
+}
+
+
+def _one_denominator(token: str) -> str:
+    """A rate token with its denominator folded onto one spelling. A token
+    with no slash is returned as it is, and so is a denominator not listed."""
+    head, slash, tail = token.partition("/")
+    if not slash:
+        return token
+    return f"{head}/{DENOMINATOR_SPELLINGS.get(tail, tail)}"
+
+
 # A currency symbol is a unit too, and it is worn in front rather than behind.
 # Without it a column of dollars, euros and pounds reads as one uniform shape
 # to every family in NUMBER_FAMILIES, grades AUTO, and comes out of the fixer
 # as one unlabelled numeric column with three currencies added together.
 CURRENCY_SYMBOL = re.compile(r"([$€£¥])")
-# One unit under several spellings. Only spellings this project's data
-# actually mixes are listed (Raha beers' ounces column). Anything unlisted
-# keeps its own spelling and so reads as a DIFFERENT unit, which sends the
-# column to a human. That is the safe direction to be wrong in: a false
-# referral is a message, and a false merge of pounds into kilograms is not
-# recoverable from the cleaned frame.
-UNIT_SPELLINGS = (frozenset({"oz", "ounce", "ounces"}),)
+# One unit under several spellings, each group as (canonical, spellings).
+# Only spellings this project's data actually mixes are listed. Anything
+# unlisted keeps its own spelling and so reads as a DIFFERENT unit, which
+# sends the column to a human. That is the safe direction to be wrong in: a
+# false referral is a message, and a false merge of pounds into kilograms is
+# not recoverable from the cleaned frame.
+#
+# Each currency group pairs a symbol with its OWN ISO code, so '$1,200.00 USD'
+# wears one unit rather than two (R1). It folds that far and no further: '$'
+# beside 'CAD' is still two units, because a dollar sign names several
+# currencies and nothing in the column says which one this is.
+#
+# 'fl' is the first run of 'fl oz' and is not a unit on its own, so folding it
+# into the ounce group reads Raha's beers column ('12 oz' beside '16 fl oz')
+# as the single volume it is. The knowing cost: a column that really does mix
+# weight ounces with fluid ounces folds too, since both are spelled 'oz' and
+# the column carries nothing that tells them apart.
+UNIT_SPELLINGS = (
+    ("ounce", frozenset({"oz", "ounce", "ounces", "fl", "floz"})),
+    ("$", frozenset({"$", "usd"})),
+    ("€", frozenset({"€", "eur", "euro"})),
+    ("£", frozenset({"£", "gbp"})),
+    ("¥", frozenset({"¥", "jpy"})),
+)
 
 
 def _one_spelling(tokens: set) -> set:
-    """Collapse the tokens that are one unit written more than one way."""
-    for group in UNIT_SPELLINGS:
+    """Collapse the tokens that are one unit written more than one way. A
+    group with one spelling present is left alone, so the evidence reports the
+    spelling the data actually used."""
+    for canonical, group in UNIT_SPELLINGS:
         shared = tokens & group
         if len(shared) > 1:
-            tokens = (tokens - shared) | {min(shared)}
+            tokens = (tokens - shared) | {canonical}
     # An English plural is the same unit: lb/lbs, hour/hours, tonne/tonnes.
     # Three characters is the floor because dropping the 's' from a two-letter
     # token merges milliseconds into metres, and a false merge is exactly what
@@ -506,15 +591,40 @@ def _one_spelling(tokens: set) -> set:
 def _units_worn(values) -> set:
     """The distinct units the values wear, spelling normalised.
 
-    A unit is the currency symbol a value leads with, the letter run its
-    suffix starts with, or both. Only values shaped like a number wearing one
-    are read; a bare number wears nothing and says nothing about the column.
+    A unit is the currency symbol a value leads with, the token its suffix
+    starts with (a letter run, and a slash with the run after it, so a rate
+    keeps its denominator), or both. Only values shaped like a number wearing
+    one are read; a bare number wears nothing and says nothing about the
+    column.
+
+    A value that leads with a symbol and names the same currency in its suffix
+    wears ONE unit: UNIT_SPELLINGS folds each symbol into its own ISO code
+    before the count. Two currencies in one value ('€1,200.00 USD') are still
+    two, and so is a symbol beside a code it has no group with ('$' and 'CAD').
+
+    A rate keeps its denominator and the denominator is folded onto one
+    spelling, so 'km/h' and 'km/hr' are one unit while 'km' and 'km/h' stay
+    two. The spacing around the slash is closed for the same reason.
+
+    What stays two units on purpose, because the data cannot settle it: a bare
+    '°' beside '°C'. The bare sign is Celsius written short in one reading and
+    Fahrenheit or an angle in another, and only one of those is a silent
+    error, so the column goes to a person. A denominator spelled 'm' is the
+    same case - minutes or metres - and keeps its own spelling.
     """
     worn = values[values.str.match(NUMERIC_WITH_UNIT)]
     if not len(worn):
         return set()
-    suffix = worn.str.replace(LEADING_NUMBER, "", regex=True).str.lower()
-    tokens = set(suffix.str.extract(UNIT_LETTERS, expand=False).dropna().unique())
+    suffix = (
+        worn.str.replace(LEADING_NUMBER, "", regex=True)
+        .str.lower()
+        .str.replace(DEGREE_SPACE, "°", regex=True)
+        .str.replace(RATE_SLASH, "/", regex=True)
+    )
+    tokens = {
+        _one_denominator(t)
+        for t in suffix.str.extract(UNIT_TOKEN, expand=False).dropna().unique()
+    }
     tokens |= set(worn.str.extract(CURRENCY_SYMBOL, expand=False).dropna().unique())
     return _one_spelling(tokens)
 
@@ -2201,6 +2311,97 @@ def detect_all(df, name: str = "df") -> dict:
     }
 
 
+# The stand-in autoclean._fix_headers writes over an 'Unnamed: N' or blank
+# header: a name that carries the position it sits at, which is what lets a
+# frozen target that vanished be matched positionally (_resolve_renames).
+GENERATED_NAME = re.compile(r"^column_(\d+)$")
+# The placeholder pandas writes for a header cell it could not read, built
+# from the column's POSITION. That number is the whole of the name's identity,
+# and it is what _fix_headers turns into "column_<N>".
+UNNAMED_NAME = re.compile(r"^Unnamed:\s*(\d+)$")
+
+
+def _repaired_name(name: str) -> str:
+    """The name a header repair leaves behind: zero-width residue removed,
+    whitespace runs collapsed, ends trimmed (autoclean._fix_headers)."""
+    for zero in ZERO_WIDTH:
+        name = name.replace(zero, "")
+    return " ".join(name.split())
+
+
+def _resolve_renames(df, wanted: list) -> dict:
+    """Frozen target name -> the column a header repair renamed it to.
+
+    A finding freezes its target's name when it is raised. An already-verified
+    d18 repair then renames that column, and every finding still queued
+    against the old name reads as a target that left the frame, so d22, d23
+    and d26 on that column become unverifiable for the rest of the run (R4).
+    The refusal is right for a column that was dropped and wrong here: the
+    column is in the frame, under the name the repair gave it.
+
+    Only a name damaged the way a header repair repairs it resolves, and only
+    onto a single unclaimed candidate:
+
+    - 'Unnamed: N': _fix_headers writes 'column_<N>' over it, and pandas built
+      'Unnamed: N' from position N in the first place, so the target resolves
+      onto the column literally named 'column_N' and onto no other. Matching
+      whichever 'column_<i>' happened to sit at index i instead resolved
+      'Unnamed: 0', 'Unnamed: 2' and 'Unnamed: 99' all onto the same column,
+      so a target that had been DROPPED was re-checked on a survivor and
+      verified. It also fired with no header repair anywhere, on any frame
+      owning a column named 'column_<i>' at index i.
+    - padding or zero-width residue: the one column whose name is the repaired
+      spelling of the target and that no surviving target already claims.
+
+    Everything else stays unresolved and the missing-column refusal stands. A
+    blank or whitespace-only frozen name resolves to nothing at all: it states
+    no position and carries no spelling, so there is no identity to recover. A
+    target renamed to a name of someone's choosing, or dropped, is still a
+    lost column.
+
+    The dedupe collision is refused rather than resolved. A frame carrying
+    both 'active' and '  active ' is an ordinary CSV artifact, and
+    _fix_headers renames the padded twin to 'active_2' because 'active' is
+    taken; resolving the frozen '  active ' onto 'active' handed the re-check
+    a healthy unrelated column and returned None while the disease sat under
+    'active_2'. So a repaired spelling that the frame carries ALONGSIDE a
+    'spelling_<k>' sibling is the signature of that rename, and it refuses.
+
+    The residual this narrows rather than closes, said plainly: if a column
+    already carried the repaired spelling and the damaged one was dropped
+    rather than renamed, with no numbered sibling in the frame, the drop
+    resolves onto that column and the signal re-runs there. Nothing in the
+    frame separates the two cases, so the guard is the single-candidate rule
+    plus the sibling test, not proof.
+    """
+    names = [str(c) for c in df.columns]
+    frozen = set(wanted)
+    claimed = {n for n in names if n in frozen}
+    resolved: dict = {}
+    for target in wanted:
+        if target in names:
+            continue
+        if unnamed := UNNAMED_NAME.match(target):
+            wanted_name = f"column_{int(unnamed.group(1))}"
+            hits = [n for n in names if n == wanted_name]
+        elif (repaired := _repaired_name(target)) and repaired != target:
+            sibling = re.compile(rf"^{re.escape(repaired)}_\d+$")
+            hits = (
+                []
+                if any(sibling.match(n) for n in names)
+                else [n for n in names if n == repaired]
+            )
+        else:
+            # an undamaged name, or one with no spelling left to repair: no
+            # header repair could have moved it anywhere recoverable
+            hits = []
+        hits = [n for n in hits if n not in claimed]
+        if len(hits) == 1:
+            resolved[target] = hits[0]
+            claimed.add(hits[0])
+    return resolved
+
+
 def detect_one(df, disease: int, columns) -> dict | None:
     """Re-run one signal scoped to one target. This is verification layer 1:
     the fix worked when the signal that found the disease stops firing (R4).
@@ -2222,12 +2423,26 @@ def detect_one(df, disease: int, columns) -> dict | None:
       IS a rename, a split or a drop; everywhere else a vanished column is a
       lost column, and lost is not verified.
 
+    That last refusal was too wide by one case, and _resolve_renames narrows
+    it: a target damaged the way a header repair repairs it, sitting in the
+    frame under its repaired name, is resolved onto that column and checked
+    there. Without it an already-verified d18 rename blocked every later
+    finding on the same column for the rest of the run. Any other vanished
+    target is still refused.
+
     The rule is containment, not overlap: a residual finding counts when
     every column it names was one of the targets. Overlap alone refuses a
     complete repair whenever a SEPARATE finding of the same disease happens
     to share a column, which d11 findings do by construction (each names its
     own key plus the attributes it contradicts, and two keys contradict the
     same attributes).
+
+    Containment is not the rule where names move. A WHOLE_FRAME disease is
+    checked on any residual finding it raises, since it reads the frame and
+    not the target list, and the rest of COLUMN_CHANGING is checked on any
+    residual that intersects the targets. What this does NOT cover, since
+    intersection needs a name in common: a d17 split whose residual names only
+    the new columns it created.
     """
     if disease not in REGISTRY:
         raise ValueError(
@@ -2238,6 +2453,8 @@ def detect_one(df, disease: int, columns) -> dict | None:
         return None
     df = _flat(df)
     wanted = [str(c) for c in (columns or [])]
+    renamed = _resolve_renames(df, wanted)
+    wanted = [renamed.get(c, c) for c in wanted]
     present = {str(c) for c in df.columns}
     gone = [c for c in wanted if c not in present]
     if gone and disease not in COLUMN_CHANGING:
@@ -2251,7 +2468,7 @@ def detect_one(df, disease: int, columns) -> dict | None:
             "HUMAN",  # a vanished column needs a person, not another fixer
             1.0,
         )
-    scoped = _indices(df, columns) or None
+    scoped = _indices(df, wanted) or None
     # No except here, deliberately. This is verification layer 1 — verify.py
     # asserts `detect_one(...) is None` to mean the fix worked, so swallowing a
     # crash would turn every fix for this disease into a silent pass. A raise
@@ -2286,7 +2503,25 @@ def detect_one(df, disease: int, columns) -> dict | None:
         #
         # With no target columns at all (the table-level diseases: duplicate
         # rows, stray rows) every residual finding counts.
+        #
+        # Two more ways, both for repairs that move names about:
+        #
+        # A whole-frame disease reads the frame and ignores its cols argument
+        # (WHOLE_FRAME), so its finding is about the frame and any residual of
+        # it is the disease still there. Containment let a d18 repair that
+        # renamed one damaged header while coining another clear the check:
+        # the residual named a column no target ever held, so it matched
+        # nothing and half a header repair was recorded verified (R4).
+        #
+        # For the other COLUMN_CHANGING diseases the target names are expected
+        # to move, so a residual that merely INTERSECTS the targets counts.
+        # Overlap stays refused everywhere else, where it would fail a
+        # complete repair over a sibling finding sharing a column.
+        if disease in WHOLE_FRAME:
+            return finding
         if not targets or (columns and columns[0] == anchor) or set(columns) < targets:
+            return finding
+        if disease in COLUMN_CHANGING and targets & set(columns):
             return finding
     return None
 

@@ -35,7 +35,8 @@ from test_clean_loop import (
     saved,
 )
 
-from crivo import library, llm, skills
+from crivo import library, llm, policy, skills
+from crivo.detect import SLUGS
 from crivo.events import GateDecision, GateRequest, Notice, StreamText
 from crivo.loop import Session
 
@@ -431,6 +432,71 @@ def test_a_mapping_nobody_approved_never_touches_a_slice(tmp_path, monkeypatch, 
     )
 
 
+def test_declining_a_replay_is_not_the_skill_failing(tmp_path, monkeypatch):
+    """Wave 1.5 triage 18. The gate added to the replay path fed a human
+    reject straight into the skill ledger as a verification failure, so two
+    people declining the same confirmed mapping retired it and wrote "failed
+    verification twice in a row" against a skill that never ran."""
+    gen_stub = counting_generate([])
+    monkeypatch.setattr(llm, "generate", gen_stub)
+    session = make_session(tmp_path)
+    stock_skill(session, tmp_path, 20, "fix-schema-drift-tax")
+    FakeClient.script = [
+        family_meta(),
+        drift_finding(),
+        [ok()],  # _harmonize's own baseline: the path a declined replay falls to
+        [ok()],  # bind slice 1
+        [ok()],  # bind slice 2
+    ] * 2
+    for _ in range(2):
+        drive(
+            session.clean_family(*FAMILY),
+            decisions=[GateDecision("reject", "not this family")],
+        )
+
+    assert not any("fix(v, [])" in c for c in FakeClient.executed), FakeClient.executed
+    assert gate_actions(session).count("reject") == 2
+    entry = session.library.entries["fix-schema-drift-tax"]
+    assert entry["failures"] == 0, "a person declining is not the skill failing"
+    assert entry["recent"] == []
+    assert entry["state"] == "proven"
+    assert "retired_reason" not in entry
+    assert (tmp_path / "skills" / "fix-schema-drift-tax").is_dir()
+
+
+def test_a_report_only_family_run_says_it_cleaned_nothing(tmp_path, monkeypatch):
+    """Wave 1.5 triage 21. Every slice ran its clean to completion, which in
+    report-only means it was diagnosed and nothing was applied, and the family
+    summary filed them under the key documented as "what was actually cleaned"
+    while the console said "2/2 slices cleaned"."""
+    monkeypatch.setattr(llm, "generate", gen([]))
+    session = make_session(tmp_path, autonomy="report-only")
+
+    def bind(slice_key):
+        """The bind cell as a real kernel answers it: the slice variable is in
+        the registry it stamps, so clean() knows the frame."""
+        var = session._slice_var("tax", slice_key)
+        return [ok(registry=[{"name": var, "type": "DataFrame", "shape": [4, 2]}])]
+
+    FakeClient.script = [
+        family_meta(),
+        drift_finding(),
+        bind("tax-2007"),
+        diag([finding()]),  # ... which is diagnosed and left alone
+        bind("tax-2020"),
+        diag([finding()]),
+    ]
+    events = drive(session.clean_family(*FAMILY))
+
+    summary = json.loads((session.session_dir / "family_tax.json").read_text())
+    assert summary["slices"] == [], "report-only cleans nothing, by construction"
+    assert summary["reported"] == ["tax-2007", "tax-2020"]
+    assert summary["rows"] == 0
+    shown = "".join(e.text for e in events if isinstance(e, StreamText))
+    assert "slices cleaned" not in shown, shown
+    assert "2/2 slices reported, nothing cleaned" in shown
+
+
 # --- (e) the first-run notice -------------------------------------------------
 
 
@@ -754,6 +820,88 @@ def test_a_reverted_silent_fix_leaves_no_unapproved_change_on_the_record(
     )
 
 
+# --- the PLAN gate against the seeded policy (wave 1.5 triage 1 and 3) --------
+#
+# Cross-packet: the autonomy packet seeds a standing ENFORCE policy at
+# construction, and the M2 plan gate decides whether the AUTO steps may run.
+# Neither packet saw the other, and the two together inverted a rejection into
+# an approval.
+
+
+def _plan_first_silent_script():
+    return [
+        diag([finding()]),
+        baseline(),
+        [ok()],  # the apply cell a rejected plan must never reach
+        [ok()],  # its verification
+        baseline(),
+        saved(),
+    ]
+
+
+def test_rejecting_the_plan_applies_nothing(tmp_path, monkeypatch):
+    """The rejection must not be read as an approval. The plan gate returned
+    proceed=True for anything but skip, and under the autonomous default the
+    seeded autonomy-auto policy then batched every AUTO step, so a person who
+    said no to the plan got the whole AUTO half of it applied in silence."""
+    monkeypatch.setenv("CRIVO_PLAN_FIRST", "on")
+    monkeypatch.setattr(llm, "generate", gen([]))
+    session = make_session(tmp_path)  # autonomous: the seed is armed
+    FakeClient.script = _plan_first_silent_script()
+    events = drive(
+        session.clean("df"), decisions=[GateDecision("reject", "not this run")]
+    )
+
+    assert len(FakeClient.executed) == 2, FakeClient.executed  # diag + baseline
+    assert not any("FIXERS" in c for c in FakeClient.executed)
+    rep = report_of(session)
+    assert [f["status"] for f in rep["fixes"]] == ["aborted"]
+    assert not any(f["unattended"] for f in rep["fixes"])
+    assert [p.id for p in session.policies] == ["autonomy-auto"], (
+        "a rejected plan arms nothing"
+    )
+    notices = [e.text for e in events if isinstance(e, Notice)]
+    assert any("not approved" in n for n in notices), notices
+
+
+def test_an_unapproved_plan_writes_the_findings_down(tmp_path, monkeypatch):
+    """Triage 3. The report over a dirty frame read "0 fixed · 0 skipped ·
+    0 failed · 0 not attempted · 0 flagged", the exact clean bill of health the
+    report-only branch ten lines above exists to prevent."""
+    monkeypatch.setenv("CRIVO_PLAN_FIRST", "on")
+    monkeypatch.setattr(llm, "generate", gen([]))
+    session = make_session(tmp_path, autonomy="careful")
+    findings = [finding(), finding(disease=6, slug="whitespace-damage", grade="GATE")]
+    FakeClient.script = [diag(findings), baseline()]
+    drive(session.clean("df"), decisions=[GateDecision("skip")])
+
+    rep = report_of(session)
+    assert [f["status"] for f in rep["fixes"]] == ["aborted", "aborted"]
+    assert [f["fix_source"] for f in rep["fixes"]] == [None, None]
+    md = (session.session_dir / "clean_reports" / "r001.md").read_text()
+    assert "0 fixed · 0 skipped · 0 failed · 2 not attempted" in md
+
+
+def test_an_approved_plan_is_the_approval_the_record_names(tmp_path, monkeypatch):
+    """When both records match a finding, the one a person actually approved
+    has to be the one the transcript and the notice name. The plan record was
+    appended after the seed, evaluate takes the first live match, so an
+    approved plan was credited to autonomy-auto and the person was told crivo
+    had changed their data without asking, about the plan they just read."""
+    monkeypatch.setenv("CRIVO_PLAN_FIRST", "on")
+    monkeypatch.setattr(llm, "generate", gen([]))
+    session = make_session(tmp_path)
+    FakeClient.script = _plan_first_silent_script()
+    events = drive(session.clean("df"), decisions=[GateDecision("run")])
+
+    rep = report_of(session)
+    assert [f["status"] for f in rep["fixes"]] == ["fixed"]
+    assert "policy:plan-v1" in gate_notes(session)
+    assert "policy:autonomy-auto" not in gate_notes(session)
+    assert not [e for e in events if isinstance(e, Notice) and e.kind == "autonomy"]
+    assert not (session.workspace_root / SENTINEL).exists()
+
+
 # --- the constructor contract -------------------------------------------------
 
 
@@ -856,3 +1004,86 @@ def test_an_unknown_level_is_refused_at_the_cli(cli, monkeypatch):
     monkeypatch.setattr("sys.argv", ["crivo", "--autonomy", "yolo"])
     with pytest.raises(SystemExit):
         main()
+
+
+# --- what the help text is allowed to promise (wave 1.5 triage 20 and 22) -----
+
+
+def _autonomy_help(monkeypatch, capsys) -> str:
+    """The --autonomy help as one line, so an argparse rewrap cannot hide a
+    phrase from the assertions below."""
+    from crivo.__main__ import main
+
+    monkeypatch.setattr("sys.argv", ["crivo", "--help"])
+    with pytest.raises(SystemExit):
+        main()
+    text = " ".join(capsys.readouterr().out.split())
+    return text[text.index("--autonomy") :]
+
+
+def test_careful_does_not_promise_a_gate_it_does_not_show(monkeypatch, capsys):
+    """Triage 20. The help said careful "asks before every fix" while a proven
+    library skill went on fixing AUTO findings with no gate at every level but
+    report-only, pinned by test_a_proven_skill_that_fixes_unattended... above,
+    which runs under careful. Two statements, one of them false."""
+    text = _autonomy_help(monkeypatch, capsys)
+    assert "asks before every fix" not in text
+    assert "proven library skill" in text, "the exception has to be named"
+
+
+def test_report_only_does_not_claim_more_than_the_clean_flows(monkeypatch, capsys):
+    """Triage 22. "diagnoses and changes nothing" reads as a session posture,
+    but only /clean and the family harmonize consult self.autonomy: a QUERY
+    turn still executes a model-authored cell that can rewrite a frame, gated
+    but not refused. The words have to say which flows the level governs."""
+    text = _autonomy_help(monkeypatch, capsys)
+    assert "diagnoses and changes nothing" not in text
+    assert "/clean" in text
+    assert "QUERY" in text, "the turn the level does not govern has to be named"
+
+
+def test_a_caller_armed_policy_still_outranks_an_in_session_plan(tmp_path, monkeypatch):
+    """The plan record was moved to the FRONT of self.policies unconditionally,
+    so an in-session plan approval outranked a CALLER-ARMED record too, not
+    just the seeded one. The comment justifying the move asserts this cannot
+    happen ("the seed is only planted when the caller passed none of their
+    own"), which is a statement about the seed and not about the ordering.
+
+    A LOG_ONLY shadow-week record is the shape docs/governance.example.json
+    ships, and its whole purpose is that nothing applies unattended. One
+    in-session answer must not override an operator posture: the plan record
+    goes ahead of the SEED and behind anything the caller armed."""
+    monkeypatch.setenv("CRIVO_PLAN_FIRST", "on")
+    monkeypatch.setattr(llm, "generate", gen([]))
+    armed = policy.PolicyRecord(
+        id="shadow-week",
+        disease_ids=(4,),
+        approver="ops",
+        expires="2099-01-01",
+        mode="LOG_ONLY",
+        valid_disease_ids=set(SLUGS),
+    )
+    session = Session(
+        workspace=tmp_path / "ws",
+        data_dir=tmp_path,
+        skills_dir=tmp_path / "skills",
+        preview=False,
+        snapshots=False,
+        autonomy="autonomous",
+        policies=[armed],
+    )
+    session._registry_prev = {"df": ("DataFrame", "[4, 2]")}
+    session._registry = list(REG)
+    session.datasets.append(
+        {"path": "data/x.csv", "sha256": "abc123", "variable": "df", "loaded_event": 2}
+    )
+    FakeClient.script = _plan_first_silent_script()
+
+    drive(session.clean("df"), decisions=[GateDecision("run"), GateDecision("run")])
+
+    ranked = [p.id for p in session.policies]
+    assert ranked[0] == "shadow-week", (
+        f"the plan outranked a caller-armed record: {ranked}"
+    )
+    rep = report_of(session)
+    assert not any(f["unattended"] for f in rep["fixes"]), rep["fixes"]

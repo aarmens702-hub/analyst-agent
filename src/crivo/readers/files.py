@@ -27,7 +27,29 @@ SUPPORTED = (
 )
 
 
-_BOMB_RATIO = 200
+# One ratio per format, because the formats are not comparable and a single
+# number picked on gzip refuses ordinary files in the other two.
+#
+# Measured on boilerplate-heavy CSV exports (20 of 23 columns constant or
+# low-cardinality categorical, the shape an ERP dump has) at 11MB, 45MB and
+# 225MB: gzip 40:1, bz2 101:1, xz 79-86:1, all three flat across the sizes. A
+# separate 12MB fixture with heavier repetition measured gzip 46:1, bz2 122:1,
+# xz 368:1. The honest range therefore depends more on how repetitive the
+# export is than on the format, and two measurement sets disagree by 4x on xz.
+# That is the argument for headroom and equally the argument against being
+# clever with it. Measured on 20MB of zeros, the bomb this guard exists for:
+# gzip 1,027:1, bz2 446,202:1, xz 6,586:1.
+#
+# 500:1 for bz2 and xz clears every honest measurement above (1.4x over the
+# highest, 5x over the typical) and stays well under every bomb measurement.
+# It was briefly 2,000 for both, on evidence gathered from xz alone. That
+# opened a band from a few hundred to 2,000 in which no honest export has been
+# measured, and a 1,300:1 bz2 built inside it was accepted. Since nothing
+# caps the expansion in absolute terms (see _bomb_check), a ratio is also the
+# multiplier on the work a stranger's URL can force through the keyless path,
+# so it is raised only as far as a measurement asks.
+_BOMB_RATIOS = {".gz": 200, ".zip": 200, ".bz2": 500, ".xz": 500}
+_BOMB_RATIO_DEFAULT = 200  # an unlisted suffix is refused by _probe_size anyway
 _BOMB_FLOOR = 10 * 1024 * 1024
 _BOMB_PROBE_CHUNK = 1024 * 1024
 
@@ -115,32 +137,58 @@ def _bomb_check(p: Path, suffix: str) -> None:
     """Refuse decompression bombs before the expansion can hurt, for every
     compressed format the reader accepts.
 
-    A bomb clears both the 10MB floor and the 200:1 ratio, so big legitimate
-    archives pass and a 20KB file promising 20MB of zeros does not. A declared
-    size (gz, zip) is used only when it already condemns the file, which costs
-    metadata alone; otherwise the expansion is MEASURED by _probe_size,
-    because concatenation, trailing padding and an edited trailer each make a
-    declaration a lie, and the first two are ordinary files rather than
-    forgeries.
+    A bomb clears both the 10MB floor and its format's ratio, so big
+    legitimate archives pass and a 20KB file promising 20MB of zeros does not.
+    A declared size (gz, zip) is used only when it already condemns the file,
+    which costs metadata alone; otherwise the expansion is MEASURED by
+    _probe_size, because concatenation, trailing padding and an edited trailer
+    each make a declaration a lie, and the first two are ordinary files rather
+    than forgeries.
 
-    The ratio was calibrated on gzip. bz2 and xz compress repeated categorical
-    data an order of magnitude harder, so a legitimate archive in those
-    formats reaches the ceiling sooner than a gzip of the same bytes would.
-    Retuning that is a threshold decision with data behind it, not a fix."""
+    The ratio is per format (see _BOMB_RATIOS). bz2 and xz compress repeated
+    categorical data an order of magnitude harder than gzip does, so the gzip
+    number refused an ordinary .csv.xz export.
+
+    What this does NOT bound: an archive under its format's ratio still
+    expands as far as its compressed size times that ratio, with no absolute
+    cap. A 1MB xz that expands to 3GB is refused; one that expands to 1.9GB is
+    not. Only the ratio is checked above the floor, in every format, and
+    raising a ratio raises that ceiling with it.
+
+    The refusal never quotes a measurement. The probe stops at the ceiling, so
+    it knows the file is at least that big and not how big, and a declared
+    size is the container's own word. The message says which of the two it is
+    holding."""
     compressed = p.stat().st_size
     if not compressed:
         return
     # the two conditions in one number: above this, expanded is past the floor
     # AND past the ratio, so the probe can stop as soon as it is exceeded
-    ceiling = max(_BOMB_FLOOR, _BOMB_RATIO * compressed)
-    expanded = _declared_size(p, suffix)
-    if expanded is None or expanded <= ceiling:
+    ceiling = max(
+        _BOMB_FLOOR, _BOMB_RATIOS.get(suffix, _BOMB_RATIO_DEFAULT) * compressed
+    )
+    declared = _declared_size(p, suffix)
+    if declared is not None and declared > ceiling:
+        expanded, probed = declared, False
+    else:
         expanded = _probe_size(p, suffix, ceiling)
+        probed = True
     if expanded > ceiling:
+        # "at least" is the honest word for a probe that stopped early; a
+        # declaration is the container's claim and is quoted as one
+        size = (
+            f"at least {expanded:,} bytes"
+            if probed
+            else f"a declared {expanded:,} bytes"
+        )
+        ratio = (
+            f"at least {expanded // compressed}:1"
+            if probed
+            else f"{expanded // compressed}:1"
+        )
         raise ValueError(
-            f"{p.name}: refusing to decompress — at least {expanded:,} bytes "
-            f"from {compressed:,} on disk ({expanded // compressed}:1) looks "
-            "like a decompression bomb"
+            f"{p.name}: refusing to decompress: {size} from {compressed:,} "
+            f"on disk ({ratio}) looks like a decompression bomb"
         )
 
 

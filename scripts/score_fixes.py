@@ -25,11 +25,25 @@ RAHA_ROOT = Path(__file__).resolve().parents[1] / "data" / "raha"
 # comparison makes NaN == NaN true and NaN != anything-else true.
 _MISSING = "\x00NA\x00"
 
+# Marks a key whose cell was a float64 rather than a written literal. Same NUL
+# trick: no real value carries it, and `_same` reads it to decide whether
+# representation noise is in play.
+_FLOAT = "\x00float\x00"
+
+# What a float64 carries faithfully (15). Past it, `_same` demands an exact
+# round-trip instead of rounding.
+_FLOAT64_DIGITS = sys.float_info.dig
+
 
 # A plain number, so "12.0", "12" and "1.2e+1" score as the same value. Leading
 # zeros are excluded on purpose: losing them is disease 22, so "02115" must not
 # equal 2115.
 _PLAIN_NUMBER = re.compile(r"^[-+]?(0|[1-9]\d*)(\.\d+)?([eE][-+]?\d+)?$")
+
+# The shape `_canonical_number` emits: a mantissa with no trailing zero and an
+# explicit exponent, or plain "0". A key that does not match this one is a
+# literal, not a number, and no tolerance applies to it.
+_CANONICAL = re.compile(r"0|-?[1-9]\d*e-?\d+")
 
 
 def _canonical_number(s: str) -> str | None:
@@ -70,13 +84,14 @@ def _norm(value: object) -> str:
     and numbers to an exact canonical form so formatting never masks value
     equality (and, being exact, never masks a difference either).
 
-    Exactness applies to a written literal, whose digits are what somebody
-    wrote. A float cell is not that: it is a float64, and its last digits are
-    representation noise from arithmetic, so it is first rendered at the
-    precision a float64 faithfully carries. Without that, a mean-imputed 3.3
-    arriving as 3.3000000000000003 scores as a wrong repair of a truth reading
-    "3.3", which under-counts real repairs over noise nobody wrote. Only
-    .parquet input reaches this branch; a CSV is read all-strings.
+    Every key is exact, floats included: a float64 is keyed from its shortest
+    round-trip repr, the one decimal string that reads back as this exact
+    float and no other. What a float cell also carries, and a written literal
+    does not, is representation noise from arithmetic, so its key is tagged
+    and `_same` handles the noise at comparison time, on both sides at once.
+    The earlier design rounded the float here instead, which rounded one side
+    of a comparison and not the other. Only .parquet input reaches this
+    branch; a CSV is read all-strings.
 
     Applied to every cell of all three frames, so both sides of every comparison
     in `score` are keyed the same way.
@@ -84,14 +99,77 @@ def _norm(value: object) -> str:
     if pd.isna(value):
         return _MISSING
     if isinstance(value, float):  # float64, and np.float64 which subclasses it
-        s = f"{value:.{sys.float_info.dig}g}"
-    else:
-        s = str(value).strip()
+        # float() first: numpy 2 reprs an np.float64 as "np.float64(3.3)"
+        return _FLOAT + _key(repr(float(value)))
+    return _key(str(value).strip())
+
+
+def _key(s: str) -> str:
+    """One cell's exact comparison key: a plain number canonicalized, anything
+    else its own literal, an empty literal the missing sentinel."""
     if _PLAIN_NUMBER.match(s):
         canonical = _canonical_number(s)
         if canonical is not None:
             return canonical
     return s or _MISSING
+
+
+def _significant(canonical: str) -> int:
+    """How many digits a canonical key spends on its mantissa."""
+    return len(canonical.partition("e")[0].lstrip("-"))
+
+
+def _same(a: str, b: str) -> bool:
+    """Do two keys name the same value?
+
+    Keys are exact, so this is `==` plus one exception: a float64 cell, tagged
+    by `_norm`. Exactness is tried first and settles most of it, the tag aside
+    - a float that is the shortest round-trip of the truth literal keys
+    identically to it. What the tag then allows for is the rest: a float's
+    last digits can be noise from arithmetic rather than digits anybody wrote,
+    so a comparison involving one rounds BOTH sides to the 15 significant
+    digits a float64 carries faithfully. Both, because rounding only the float
+    side is what scored an exact 16-digit round-trip as a wrong repair: the
+    float was rounded away from a literal that was not.
+
+    Where the tolerance stops is the deliberate refusal in here, and it turns
+    on WHICH side is long rather than on how many are.
+
+    - A side past 15 digits that is NOT a float is a written literal whose
+      digits somebody typed, and float64 cannot be trusted to carry it. So
+      nothing short of an exact round-trip counts against it. That refusal
+      covers the lost id (12345678901234567 arriving as a float is lost, not
+      rounded) AND the destroyed one: a cleaner writing 4111111111111110.0
+      over a truth of "4111111111111111" is not a rounding, because float64
+      holds that literal exactly. Asking whether BOTH sides were long let the
+      second case through, since the damaged float is one digit SHORTER.
+    - When neither side runs past 15 digits, both are inside what a float64
+      carries exactly, so there is no noise to absorb and any difference
+      between them is a real difference.
+
+    Which leaves the one case the tolerance is for: a long float beside a
+    short literal, where the float's extra digits are arithmetic noise.
+
+    Not transitive, as no tolerance is. It is only ever asked about one pair.
+    """
+    if a == b:
+        return True
+    a_float, b_float = a.startswith(_FLOAT), b.startswith(_FLOAT)
+    if not (a_float or b_float):
+        return False
+    a, b = a.removeprefix(_FLOAT), b.removeprefix(_FLOAT)
+    if a == b:
+        return True  # the float IS the exact shortest round-trip of the literal
+    if not (_CANONICAL.fullmatch(a) and _CANONICAL.fullmatch(b)):
+        return False
+    a_long = _significant(a) > _FLOAT64_DIGITS
+    b_long = _significant(b) > _FLOAT64_DIGITS
+    if (a_long and not a_float) or (b_long and not b_float):
+        return False  # a written literal past what a float64 carries faithfully
+    if not (a_long or b_long):
+        return False  # both exact at float64 precision: the difference is real
+    rounded = f".{_FLOAT64_DIGITS - 1}e"
+    return format(Decimal(a), rounded) == format(Decimal(b), rounded)
 
 
 def _cells(df: pd.DataFrame, cols: list[str], n_rows: int) -> list[list[str]]:
@@ -119,11 +197,11 @@ def score(dirty: pd.DataFrame, cleaned: pd.DataFrame, truth: pd.DataFrame) -> di
     n_changed = n_should = n_correct = 0
     for d_row, c_row, t_row in zip(d, c, t, strict=True):
         for dv, cv, tv in zip(d_row, c_row, t_row, strict=True):
-            if dv != tv:
+            if not _same(dv, tv):
                 n_should += 1
-            if dv != cv:
+            if not _same(dv, cv):
                 n_changed += 1
-                if cv == tv:
+                if _same(cv, tv):
                     n_correct += 1
 
     precision = n_correct / n_changed if n_changed else 0.0

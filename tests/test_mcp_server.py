@@ -435,6 +435,63 @@ def test_file_tools_refuse_paths_outside_the_configured_root(
     assert fake.datasets == [], "no refused path may reach a kernel"
 
 
+def test_a_symlinked_home_does_not_defeat_the_home_root_refusal(
+    tmp_path, monkeypatch
+) -> None:
+    """The guard compared a RESOLVED root against an UNRESOLVED Path.home(),
+    so the two spellings of one directory never matched and the whole home
+    directory was served with no warning at all. A symlinked HOME is ordinary,
+    not exotic: a relocated or encrypted home, or an operator who sets
+    CRIVO_MCP_ROOT to the link instead of the target. Both spellings must be
+    refused, and refusing is all this closes: a root one level under home is
+    still served, by design."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    real_home = tmp_path / "real_home"
+    real_home.mkdir()
+    linked_home = tmp_path / "linked_home"
+    linked_home.symlink_to(real_home)
+    monkeypatch.setenv("HOME", str(linked_home))
+
+    for spelling in (real_home, linked_home):
+        monkeypatch.setenv("CRIVO_MCP_ROOT", str(spelling))
+        denied = json.loads(mcp_server._diagnose_file("notes.csv"))["error"]
+        assert "no usable root" in denied, spelling
+        assert "CRIVO_MCP_ROOT" in denied, spelling
+
+    # a directory under the home is a real root and stays served
+    served = real_home / "datasets"
+    served.mkdir()
+    pd.DataFrame({"a": [1, 2]}).to_csv(served / "ok.csv", index=False)
+    monkeypatch.setenv("CRIVO_MCP_ROOT", str(served))
+    assert "findings" in json.loads(mcp_server._diagnose_file("ok.csv"))
+
+
+def test_a_relative_client_path_resolves_against_the_root_not_the_cwd(
+    tmp_path, monkeypatch
+) -> None:
+    """A client is told the root and is never told the server's cwd, so a
+    relative path it sends means "under the root". Resolving it against the
+    process cwd refused every relative path whenever the server was launched
+    outside its own root, which is the ordinary MCP stdio deployment: the
+    client picks the cwd, the operator picks CRIVO_MCP_ROOT."""
+    root = tmp_path / "served"
+    (root / "sub").mkdir(parents=True)
+    inside = root / "sub" / "ok.csv"
+    pd.DataFrame({"a": [1, 2]}).to_csv(inside, index=False)
+    elsewhere = tmp_path / "launched_here"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("CRIVO_MCP_ROOT", str(root))
+
+    target, denied = mcp_server._client_path("sub/ok.csv")
+
+    assert denied is None, denied
+    assert target == str(inside.resolve())
+    assert "findings" in json.loads(mcp_server._diagnose_file("sub/ok.csv"))
+    # relative does not mean unchecked: the containment test still runs after
+    assert "outside" in mcp_server._client_path("../secret.csv")[1]
+
+
 def test_the_sandbox_choice_is_explicit_and_warns_when_it_is_off(
     monkeypatch, capsys
 ) -> None:
@@ -462,6 +519,60 @@ def test_the_sandbox_choice_is_explicit_and_warns_when_it_is_off(
     mcp_server._make_session()
     assert seen[1]["docker"] is True
     assert "UNSANDBOXED" not in capsys.readouterr().err.upper()
+
+
+def test_the_path_check_states_the_symlink_race_it_does_not_close() -> None:
+    """_client_path's docstring narrated the TOCTOU race as won: it named the
+    257-wins-in-8-seconds flipper and stopped there. Passing the resolved path
+    downstream closes crivo's own second resolve, not the gap between this
+    check and the reader's open: the resolved path is still a name, and a
+    writer inside the root can swap the final component or re-point a parent
+    in that gap. A reader checking the code against the comment would have
+    concluded the race was over. The residual has to be in the words."""
+    doc = mcp_server._client_path.__doc__
+
+    assert "REMAINS OPEN" in doc.upper(), "the residual has to be stated"
+    assert "O_NOFOLLOW" in doc, "and what closing it would actually take"
+
+
+def test_the_sandbox_mount_and_the_confinement_root_are_one_directory(
+    tmp_path, monkeypatch
+) -> None:
+    """The two P0 security fixes cancelled each other. _make_session passed
+    docker=True but never data_dir, so Session kept the default ./data mount
+    while the root check confined paths to CRIVO_MCP_ROOT, and every path
+    that cleared the check then died in Session._kernel_path, which maps the
+    file into the container by making it relative to data_dir. Sandboxing and
+    path confinement could not both be on. They are the same directory now."""
+    import crivo.loop
+
+    kernel_path = crivo.loop.Session._kernel_path  # before the class is swapped
+    root = tmp_path / "served"
+    (root / "sub").mkdir(parents=True)
+    inside = root / "sub" / "ok.csv"
+    pd.DataFrame({"a": [1, 2]}).to_csv(inside, index=False)
+    monkeypatch.setenv("CRIVO_MCP_ROOT", str(root))
+    monkeypatch.setenv("CRIVO_MCP_SANDBOX", "docker")
+    seen: list[dict] = []
+
+    class Recorder:
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+
+    monkeypatch.setattr(crivo.loop, "Session", Recorder)
+
+    mcp_server._make_session()
+
+    assert seen[0]["docker"] is True
+    assert seen[0]["data_dir"] == str(root.resolve())
+    # the point of them being one directory: a path the root check cleared has
+    # to MAP into the container, not raise on the way in
+    from types import SimpleNamespace
+
+    session = SimpleNamespace(docker=True, data_dir=pathlib.Path(seen[0]["data_dir"]))
+    target, denied = mcp_server._client_path(str(inside))
+    assert denied is None, denied
+    assert kernel_path(session, pathlib.Path(target)) == "/data/sub/ok.csv"
 
 
 def test_no_tool_docstring_promises_a_sandbox_the_server_may_not_have() -> None:
@@ -601,3 +712,97 @@ def test_no_tool_docstring_still_sells_policy_all_as_human_consent() -> None:
     assert "human consent relayed by you" not in clean
     assert "no value of policy changes that" in clean
     assert "model-authored code" in tools["ask"].description
+
+
+def test_the_docker_mount_does_not_widen_to_the_launch_directory(
+    tmp_path, monkeypatch
+) -> None:
+    """Making the mount and the root one directory closed the mutual
+    exclusion, and with no CRIVO_MCP_ROOT set _root() falls back to the launch
+    directory - which three tool docstrings advertise as the default. So the
+    read-only mount grew from <cwd>/data to <cwd>, and a .env sitting beside
+    the project was suddenly inside the container that runs model-authored
+    code un-gated. The mount widens only where an operator has named a root."""
+    import crivo.loop
+
+    project = tmp_path / "project"
+    (project / "data").mkdir(parents=True)
+    (project / ".env").write_text("DEEPSEEK_API_KEY=sk-secret\n")
+    monkeypatch.chdir(project)
+    monkeypatch.delenv("CRIVO_MCP_ROOT", raising=False)
+    monkeypatch.setenv("CRIVO_MCP_SANDBOX", "docker")
+    seen: list[dict] = []
+
+    class Recorder:
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+
+    monkeypatch.setattr(crivo.loop, "Session", Recorder)
+
+    mcp_server._make_session()
+
+    mounted = pathlib.Path(seen[0].get("data_dir", "data"))
+    if not mounted.is_absolute():
+        mounted = project / mounted
+    assert mounted.resolve() != project.resolve(), "the launch dir is mounted whole"
+    assert not (mounted / ".env").exists()
+
+
+def test_a_relative_path_under_a_nested_cwd_still_names_the_cwd_file(
+    tmp_path, monkeypatch
+) -> None:
+    """Item 13's defect was a cwd OUTSIDE the root, where every relative path
+    was refused. Resolving against the root unconditionally also changed the
+    case where the cwd sits INSIDE the root, which already worked: with root
+    /warehouse and cwd /warehouse/2024_q4, 'sales.csv' stopped naming the file
+    in the cwd. The client sends one string and gets a different dataset,
+    labelled with the path it sent, with no refusal in either direction."""
+    root = tmp_path / "warehouse"
+    nested = root / "2024_q4"
+    nested.mkdir(parents=True)
+    (nested / "sales.csv").write_text("b\n2\n")
+    monkeypatch.setenv("CRIVO_MCP_ROOT", str(root))
+    monkeypatch.chdir(nested)
+
+    target, denied = mcp_server._client_path("sales.csv")
+
+    assert denied is None, denied
+    assert target == str((nested / "sales.csv").resolve())
+
+
+def test_a_relative_path_that_names_two_files_is_refused_by_name(
+    tmp_path, monkeypatch
+) -> None:
+    """The other side of that preference. When a sales.csv sits in the nested
+    cwd AND in the root, "relative to what" is genuinely two readings naming
+    two real datasets, and there is nothing in the request that settles it.
+    Picking either silently is the failure, so the string is refused and both
+    readings are named. A refusal is a message; the wrong dataset is not."""
+    root = tmp_path / "warehouse"
+    nested = root / "2024_q4"
+    nested.mkdir(parents=True)
+    (root / "sales.csv").write_text("a\n1\n")
+    (nested / "sales.csv").write_text("b\n2\n")
+    monkeypatch.setenv("CRIVO_MCP_ROOT", str(root))
+    monkeypatch.chdir(nested)
+
+    target, denied = mcp_server._client_path("sales.csv")
+
+    assert target == ""
+    assert "two different files" in denied, denied
+    # naming it absolutely is never ambiguous, and still resolves
+    assert mcp_server._client_path(str(root / "sales.csv"))[1] is None
+
+
+def test_an_empty_client_path_is_refused_by_name(tmp_path, monkeypatch) -> None:
+    """ "" and "." became the root DIRECTORY once relative paths resolved
+    against the root, cleared containment, and reached the reader, so the tool
+    answered {"error": "IsADirectoryError: ..."} where it used to give a clear
+    refusal. A directory is not a dataset and the message should say so."""
+    monkeypatch.setenv("CRIVO_MCP_ROOT", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    for path in ("", ".", "  "):
+        _, denied = mcp_server._client_path(path)
+        assert denied, f"{path!r} was accepted"
+        assert "IsADirectory" not in denied

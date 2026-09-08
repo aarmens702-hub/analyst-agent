@@ -201,3 +201,40 @@ def test_100k_object_rows_fingerprint_well_under_a_second() -> None:
     start = time.perf_counter()
     frame_fingerprint(big)
     assert time.perf_counter() - start < 1.0
+
+
+def test_frames_pandas_calls_equal_can_fingerprint_differently() -> None:
+    """`frame_fingerprint` said "different digests mean different content",
+    which is not true of it and never was. It is deliberately finer than
+    .equals(): the loop asks whether a fix changed state, and .equals() is
+    documented to ignore an axis whose values compare equal at a different
+    type. Two frames it calls equal fingerprint apart here, so the sentence
+    had to be corrected rather than the code."""
+    int_index = pd.DataFrame({"x": [1, 2]}, index=pd.Index([0, 1], dtype="int64"))
+    float_index = pd.DataFrame({"x": [1, 2]}, index=pd.Index([0.0, 1.0], dtype="f8"))
+    assert int_index.equals(float_index)
+    assert frame_fingerprint(int_index) != frame_fingerprint(float_index)
+
+    positive = pd.DataFrame({"x": [0.0]})
+    negative = pd.DataFrame({"x": [-0.0]})
+    assert positive.equals(negative)
+    assert frame_fingerprint(positive) != frame_fingerprint(negative)
+
+    doc = frame_fingerprint.__doc__ or ""
+    assert "different digests mean different content" not in doc
+    assert ".equals()" in doc, "the direction it is finer in has to be named"
+
+
+def test_the_type_pass_no_longer_claims_a_cost_advantage_it_lacks() -> None:
+    """The module docstring justified dropping bench/truth.py's to_csv digest
+    partly on serialization cost. The per-cell type pass added later spends
+    that saving back: on an all-object frame it walks every cell in Python and
+    the whole fingerprint lands about where the CSV digest does (measured at
+    8 object columns x 100k rows: 0.072s against 0.072s). The dtype reason
+    still stands on its own; the cost claim does not, and this pins the
+    correction."""
+    from crivo import fingerprint
+
+    module_doc = fingerprint.__doc__ or ""
+    assert "pays serialization cost at width" not in module_doc
+    assert "object" in module_doc.lower()

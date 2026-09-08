@@ -488,6 +488,81 @@ def test_a_lossless_whole_frame_reorder_still_verifies():
     _verify_after(lambda f: _repair(f).sort_values("site", ascending=False))
 
 
+def test_a_reorder_that_also_resets_the_index_still_verifies():
+    """Pairing each value with its index label put the index inside the guard,
+    and `sort_values(...).reset_index(drop=True)` is one idiom, not two: the
+    frame moves as a unit and every label is rewritten. The pairs then all
+    change and the untouched guard refused a fix that lost nothing, which is
+    over-refusal - a repair the model wrote correctly, reverted and counted
+    against it."""
+    _verify_after(
+        lambda f: _repair(f).sort_values("site", ascending=False).reset_index(drop=True)
+    )
+
+
+def test_an_index_reset_does_not_excuse_a_column_torn_loose():
+    """The other half, and the one that must not be traded away for the test
+    above: a fix that rewrites the index AND tears one untouched column loose
+    from its rows has to keep failing. Corruption is silent and a refusal is
+    not."""
+    import pytest
+
+    def reorder_then_tear(frame: pd.DataFrame) -> pd.DataFrame:
+        out = _repair(frame).sort_values("site", ascending=False)
+        out = out.reset_index(drop=True)
+        out["note"] = list(out["note"])[::-1]
+        return out
+
+    with pytest.raises(AssertionError, match="was not a fix target"):
+        _verify_after(reorder_then_tear)
+
+
+def test_the_whole_untouched_block_sliding_together_is_refused():
+    """DELIBERATELY INVERTED. This was pinned as the documented price of the
+    reorder exemption, on the reading that "once the index labels are gone"
+    nothing can say whether the target column rode along. The labels are not
+    gone here: this fix never touches the index, and the exemption's real
+    precondition was only that the live index is a positional range - which
+    every default-index frame satisfies, so the residual applied to almost
+    every frame crivo reads rather than to reordered ones.
+
+    Something CAN say whether the target rode along: the target column itself.
+    A genuine reorder differs from the permuted baseline only on the cells the
+    repair changed; a slid block leaves the target sitting still and disagrees
+    with the permutation nearly everywhere. `rode_along` asks it, so this now
+    refuses, and the guard is back to what the P2 index-pairing bought.
+
+    The test above (`..._reorder_that_also_resets_the_index_still_verifies`)
+    pins the recovery this must not cost."""
+    import pytest
+
+    def slide_the_block(frame: pd.DataFrame) -> pd.DataFrame:
+        out = _repair(frame)
+        rotated = list(range(1, len(out))) + [0]
+        out[["site", "note"]] = out[["site", "note"]].iloc[rotated].to_numpy()
+        return out
+
+    with pytest.raises(AssertionError, match="was not a fix target"):
+        _verify_after(slide_the_block)
+
+
+def test_an_index_rewrite_with_one_untouched_column_is_refused():
+    """The documented residual, pinned so it is not loosened by accident. With
+    a single untouched column there is nothing left to pair it against: once
+    the index labels are gone, "the frame moved as a unit" and "this column
+    was permuted against the rest of the frame" are the same picture. The
+    ambiguous case takes the refusal."""
+    import pytest
+
+    frame = _guard_frame()[["flow", "note"]]
+
+    def reorder(f: pd.DataFrame) -> pd.DataFrame:
+        return _repair(f).sort_values("note", ascending=False).reset_index(drop=True)
+
+    with pytest.raises(AssertionError, match="was not a fix target"):
+        _verify_frame(frame, reorder, ["flow", "note"])
+
+
 def test_a_fix_that_wipes_a_name_shadowed_column_fails_verification():
     """The baseline kept ONE digest per NAME, and it keyed by str(name), so of
     two columns whose names str() alike only the survivor of the dict write
@@ -517,3 +592,64 @@ def test_a_frame_with_duplicate_column_names_can_still_verify_an_honest_fix():
     frame = _guard_frame().rename(columns={"site": "note"})
 
     _verify_frame(frame, _repair, ["flow", "note"])
+
+
+def test_a_constant_untouched_column_does_not_excuse_a_torn_neighbour():
+    """The reorder exemption fires when EVERY untouched name is torn, and the
+    packet treated that as the safety property: tearing a proper subset leaves
+    the others' digests intact, so not every name is torn. A CONSTANT column
+    refutes it. Its (index, value) digest is torn by the index rewrite like
+    every other, and it adds nothing that distinguishes one row from another,
+    so the whole-row multiset is blind to a neighbour torn loose beside it.
+
+    crivo has an entire disease for constant columns (d19), so this is not an
+    exotic frame in crivo's own model of dirty data. Every record's city ends
+    up attached to the wrong price."""
+    import pytest
+
+    frame = pd.DataFrame(
+        {
+            "flow": ["N/A", "N/A"] + [str(v) for v in range(8)],
+            "city": [f"city-{v}" for v in range(10)],
+            "country": ["US"] * 10,
+        },
+        index=[f"r{v}" for v in range(10)],
+    )
+
+    def tear_past_the_constant(f: pd.DataFrame) -> pd.DataFrame:
+        out = _repair(f)
+        out["city"] = list(out["city"])[::-1]
+        return out.reset_index(drop=True)
+
+    with pytest.raises(AssertionError, match="was not a fix target"):
+        _verify_frame(frame, tear_past_the_constant, ["flow", "city", "country"])
+
+
+def test_a_target_a_header_repair_renamed_is_not_treated_as_untouched():
+    """The other half of the cross-packet item 16 fix, and without it the
+    detect half is inert. detect_one now resolves a frozen target onto the
+    column an already-verified d18 repair renamed it to, but verify_cell still
+    built its untouched list from the FROZEN name. The loop re-snapshots the
+    baseline after every verified fix, so the baseline carries the NEW name,
+    the frozen name matches nothing, and the renamed column lands in
+    `untouched` - the one column the fix is licensed to change. The detector
+    cleared and the untouched guard then tore the honest repair up.
+
+    Resolved the same way detect_one resolves it, so the two halves cannot
+    drift apart."""
+    frame = pd.DataFrame(
+        {
+            "active": ["Y", "N", "yes", "no", "TRUE", "FALSE", "1", "0"] * 5,
+            "n": range(40),
+        }
+    )
+    finding = _finding(23, "boolean-chaos", columns=("  active ",))
+
+    namespace = {"df": frame.copy()}
+    exec(compile(baseline_cell("df"), "<r-baseline>", "exec"), namespace)  # noqa: S102
+    namespace["df"] = namespace["df"].assign(
+        active=namespace["df"]["active"].str.lower().isin(["y", "yes", "true", "1"])
+    )
+    code = verify_cell("df", finding, ["active", "n"])
+
+    exec(compile(code, "<r-verify>", "exec"), namespace)  # noqa: S102

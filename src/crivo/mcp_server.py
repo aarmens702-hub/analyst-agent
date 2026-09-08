@@ -43,38 +43,99 @@ def _root():
     return Path(os.environ.get(ROOT_ENV) or Path.cwd()).expanduser().resolve()
 
 
+def _root_error(root) -> str | None:
+    """Why this root cannot be served at all, or None when it can.
+
+    A root of "/" or of the user's home is refused outright rather than
+    served: MCP stdio clients commonly launch a server with cwd="/", and a
+    root that holds everything is the same as no root at all. Both sides are
+    resolved, because _root() resolves and a symlinked HOME (a relocated or
+    encrypted home, or a root spelled as the link) writes the same directory
+    two ways, so comparing against an unresolved Path.home() matches neither
+    and serves the home silently.
+
+    The refusal names ROOT_ENV but never its value: a stranger's tool call
+    should not come back carrying the server's directory layout.
+    """
+    from pathlib import Path
+
+    if root.parent == root or root == Path.home().expanduser().resolve():
+        return (
+            "this server has no usable root: it would serve the whole "
+            f"filesystem or the whole home directory. Set {ROOT_ENV} to the "
+            "directory that holds the data."
+        )
+    return None
+
+
 def _client_path(path: str) -> tuple[str, str | None]:
     """The path the caller should actually use, and why it is refused.
 
     Returns the FULLY RESOLVED path, and every tool passes that one
-    downstream: re-resolving the client's original string leaves a window in
-    which a symlink that pointed inside the root when it was checked points
-    outside it by the time pandas opens it. That race was won 257 times in 8
-    seconds against a local symlink flipper.
+    downstream. That closes crivo's own second resolve: re-resolving the
+    client's original string left a window in which a symlink that pointed
+    inside the root when it was checked pointed outside it by the time pandas
+    opened it, and that race was won 257 times in 8 seconds against a local
+    symlink flipper.
+
+    WHAT REMAINS OPEN: the resolved path is still a name, not an open file.
+    Nothing here holds the file across the gap between this check and the
+    reader's open, so anything that can write inside the root can still swap
+    the final component, or re-point a parent directory, in that gap. Closing
+    that needs an fd opened O_NOFOLLOW here and read from downstream, which
+    the pandas and pyarrow path readers do not accept. What is closed is the
+    much wider window of resolving the same string twice; the narrow one is
+    open, and the root is only as trustworthy as the accounts that can write
+    into it.
 
     Both sides are resolved before the containment test, so a symlink under
     the root pointing out of it is caught rather than followed, and `~` is
     expanded because the readers downstream expand it too.
 
-    A root of "/" or of the user's home is refused outright rather than
-    served: MCP stdio clients commonly launch a server with cwd="/", and a
-    root that holds everything is the same as no root at all. The refusal
-    names ROOT_ENV but never its value — a stranger's tool call should not
-    come back carrying the server's directory layout.
+    A RELATIVE path has two readings, and neither is wrong: "under the process
+    cwd", which is what every deployment launched inside its own root has
+    always meant, and "under the root", which is the only reading available to
+    a client that is told the root and never told the cwd. Resolving against
+    the cwd alone refused every relative path when the server was launched
+    outside its root; resolving against the root alone silently changed which
+    file a working deployment got whenever the cwd was NESTED inside the root,
+    with no refusal in either direction. So the cwd reading is preferred where
+    it lands inside the root and names something that is there, the root
+    reading is the fallback that recovers the launched-outside case, and where
+    both readings name different existing files the string is genuinely
+    ambiguous and is refused rather than resolved.
     """
     from pathlib import Path
 
     root = _root()
-    if root.parent == root or root == Path.home():
-        return "", (
-            "this server has no usable root: it would serve the whole "
-            f"filesystem or the whole home directory. Set {ROOT_ENV} to the "
-            "directory that holds the data."
-        )
+    unusable = _root_error(root)
+    if unusable:
+        return "", unusable
+    if not path.strip():
+        return "", "no path given: name a file under the directory this server reads."
     try:
-        target = Path(path).expanduser().resolve()
+        target = Path(path).expanduser()
+        if not target.is_absolute():
+            by_cwd = (Path.cwd() / target).resolve()
+            by_root = (root / target).resolve()
+            cwd_ok = by_cwd.is_relative_to(root) and by_cwd.exists()
+            root_ok = by_root.is_relative_to(root) and by_root.exists()
+            if cwd_ok and root_ok and by_cwd != by_root:
+                return "", (
+                    f"relative path {path!r} names two different files here, one "
+                    "under this server's working directory and one under its "
+                    f"root. Send an absolute path, or set {ROOT_ENV} to the "
+                    "directory you mean."
+                )
+            target = by_cwd if cwd_ok else by_root
+        else:
+            target = target.resolve()
     except (OSError, ValueError) as exc:  # NUL bytes, loops, unreadable parents
         return "", f"cannot resolve path {path!r}: {type(exc).__name__}"
+    if target.is_dir():
+        return "", (
+            f"path {path!r} is a directory, not a dataset. Name the file inside it."
+        )
     if not target.is_relative_to(root):
         return "", (
             f"path {path!r} is outside the directory this server may read. "
@@ -148,6 +209,27 @@ def _make_session():
     the default because it is what every v1 deployment already runs, so it is
     warned about loudly instead of hard-failing on a missing daemon. Whether
     docker should be required is the owner's call, not this function's.
+
+    data_dir is the confinement root, so the docker mount and the directory
+    client paths may name are ONE directory. They used to be two: this passed
+    docker=True and no data_dir, leaving Session on its default ./data mount
+    while _client_path confined paths to ROOT_ENV, so every path that cleared
+    the root check then died in Session._kernel_path and the two P0 fixes
+    cancelled each other.
+
+    Only when ROOT_ENV is actually SET, which is the case the mutual exclusion
+    was reported for and the only one where an operator has said which
+    directory they mean. Passing _root() unconditionally widened the mount in
+    the DEFAULT deployment instead of fixing anything there: _root() falls back
+    to the launch directory, so the read-only mount grew from <cwd>/data to
+    <cwd>, and the .env sitting beside the project became readable from the
+    container that runs model-authored code un-gated. Nothing was broken in
+    that deployment - a path under ./data cleared the root check and mapped
+    into the mount already - so it keeps Session's narrower default.
+
+    Where the root IS named, the container sees the whole of it, which is
+    exactly the set of files the tools may hand it, and that is why an
+    unusable root is refused here as well as in _client_path.
     """
     import os
 
@@ -160,6 +242,14 @@ def _make_session():
             'it to "docker", or unset it to accept the host subprocess.'
         )
     docker = choice == "docker"
+    root = _root()
+    unusable = _root_error(root)
+    if unusable:
+        raise ValueError(
+            f"{unusable} It is both the directory client paths may name and, "
+            f"under {SANDBOX_ENV}=docker, the directory mounted into the "
+            "container."
+        )
     if not docker:
         print(
             "WARNING: crivo MCP is about to run model-authored code UNSANDBOXED, "
@@ -167,9 +257,11 @@ def _make_session():
             f"{SANDBOX_ENV}=docker to run cells in the docker kernel instead.",
             file=sys.stderr,
         )
+    named_root = {"data_dir": str(root)} if os.environ.get(ROOT_ENV) else {}
     return Session(
         workspace=os.environ.get("CRIVO_WORKSPACE", "workspace"),
         docker=docker,
+        **named_root,
         preview=False,  # headless: nobody reads a gate preview here (R7)
         # explicit, not inherited: the MCP clean surface keeps today's gated
         # behavior instead of flipping to the autonomous constructor default

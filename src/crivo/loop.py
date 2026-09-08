@@ -12,7 +12,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from crivo import llm, policy, prompts, router, skills, snapshot, verify
@@ -133,10 +133,25 @@ class Session:
         # R3: gates show consequence computed on a sampled scratch copy;
         # drivers that auto-approve can turn it off, since nobody reads it
         self.preview = preview
-        # The autonomy posture (autonomy-default build packets, packet 3).
-        # "autonomous" is the default and applies AUTO findings that carry a
-        # registered deterministic fixer without showing a gate; "careful"
-        # gates them; "report-only" diagnoses and stops.
+        # The autonomy posture for the CLEAN flows (autonomy-default build
+        # packets, packet 3). "autonomous" is the default and applies AUTO
+        # findings that carry a registered deterministic fixer without showing
+        # a gate; "careful" gates them; "report-only" applies nothing.
+        #
+        # Its reach is /clean and the family harmonize, the two flows that read
+        # self.autonomy, plus one exception it does not reach: a proven library
+        # skill fixes an AUTO finding with no gate at autonomous and at careful
+        # alike (library.unattended), and only report-only stops it, by never
+        # getting as far as the library. A QUERY turn reads self.autonomy
+        # nowhere: run_turn gates every cell and runs what the gate approved,
+        # so a model-authored cell that rewrites a frame executes at
+        # report-only like anywhere else. This is a posture over cleaning, not
+        # over the session, and the --autonomy help says so.
+        #
+        # Screening QUERY cells for mutation is not the missing half of it:
+        # which cells mutate is not decidable from the source here, a partial
+        # screen would advertise a guarantee with a hole in it, and refusing
+        # every cell would leave report-only unable to answer a question.
         #
         # This is a silence decision, not a widening of what may be decided.
         # policy.evaluate reads the grade before it reads any policy, so no
@@ -151,6 +166,11 @@ class Session:
         # T1.4 hunk D: standing approval policies (bench-only in M1; the
         # interactive arming UX is M2's coherent-unit work)
         self.policies = list(policies or [])
+        # Which records this session seeded for itself, as distinct from the
+        # ones a caller armed. An in-session plan approval may be preferred
+        # over the SEED, which is a default; it may not be preferred over an
+        # operator posture handed in by the caller.
+        self._seeded_policy_ids: set[str] = set()
         if self.autonomy == "autonomous" and not self.policies:
             # the standing ENFORCE policy the autonomous default arms, seeded
             # only when the caller passed none of their own — explicit policies
@@ -161,6 +181,7 @@ class Session:
             self.policies = policy.default_autonomous_policies(
                 set(SLUGS), autoclean.FIXERS
             )
+            self._seeded_policy_ids = {p.id for p in self.policies}
         # R8: verified fixes survive a kernel death via namespace snapshots
         self.snapshots = snapshots
         self.workspace_root = Path(workspace)
@@ -373,6 +394,9 @@ class Session:
             iters += 1
             frames = [e["name"] for e in self._registry if e.get("type") == "DataFrame"]
             pv = yield from self._preview(frames, body)
+            # self.autonomy is deliberately not consulted here: it is a posture
+            # over the clean flows, and a QUERY cell runs when this gate
+            # approves it, at report-only like anywhere else (see __init__).
             decision = yield GateRequest(body, iters, preview=pv)
             # every gate site in this file coerces the same way. A driver that
             # sends None (plain iteration over the generator) or a duck-typed
@@ -610,6 +634,12 @@ class Session:
                     "the plan was not approved, so no fix was attempted — "
                     "a person has to approve a plan, whatever the policy says",
                 )
+                # Same reason as the report-only branch above, and the same
+                # repair: with an empty records list the artifact read "0 fixed
+                # · 0 skipped · 0 failed · 0 not attempted · 0 flagged" over
+                # the dirty frame the plan had just listed, and the headless
+                # summary is built from this file.
+                state["records"] = [self._aborted(f) for f in fixable]
                 yield from self._save_report(state)
                 return
         for i, finding in enumerate(fixable, 1):
@@ -788,9 +818,10 @@ class Session:
         """A finding we never got to. Distinct from `failed`, which means the
         model tried and the verification refused it.
 
-        Two callers, one meaning: the kernel died before this finding's turn,
-        or report-only declined to take a turn at all. Nothing was attempted
-        either way, which is what the report renders it as."""
+        Three callers, one meaning: the kernel died before this finding's
+        turn, report-only declined to take a turn at all, or a person declined
+        the plan that covered it. Nothing was attempted in any of the three,
+        which is what the report renders it as."""
         return {
             "finding": finding,
             "status": "aborted",
@@ -909,7 +940,13 @@ class Session:
         # be the method's last statement with no guard, so a death in the
         # diagnosis or the harmonize turn lost skill_hits entirely — the one
         # number this phase exists to produce.
-        run = {"harmonized": False, "drift": [], "hits": {}, "cleaned": []}
+        run = {
+            "harmonized": False,
+            "drift": [],
+            "hits": {},
+            "cleaned": [],
+            "reported": [],
+        }
         try:
             yield from self._family_body(name, meta, run)
         finally:
@@ -919,11 +956,23 @@ class Session:
             # the exit this finally was added to survive
             path, summary = self._write_family(name, pattern, meta, run)
         replayed = sum(run["hits"].values())
+        if self.autonomy == "report-only":
+            # a report-only slice ran its clean to completion and applied
+            # nothing, which is not the same word. Counting it as cleaned
+            # printed "N/M slices cleaned" for a run whose whole point was that
+            # nothing was cleaned, and filed the slice names under the summary
+            # key documented as what was actually cleaned.
+            done = (
+                f"{len(run['reported'])}/{len(meta)} slices reported, nothing cleaned"
+            )
+            rows = summary["reported_rows"]
+        else:
+            done = f"{len(run['cleaned'])}/{len(meta)} slices cleaned"
+            rows = summary["rows"]
         yield StreamText(
             "stdout",
-            f"\nfamily {name}: {len(run['cleaned'])}/{len(meta)} slices cleaned, "
-            f"{summary['rows']:,} rows · {replayed} fix(es) served by "
-            f"{len(run['hits'])} skill(s) · {path}\n",
+            f"\nfamily {name}: {done}, {rows:,} rows · {replayed} fix(es) "
+            f"served by {len(run['hits'])} skill(s) · {path}\n",
         )
 
     def _family_body(self, name: str, meta: list, run: dict):
@@ -980,7 +1029,12 @@ class Session:
             before = dict(self._skill_uses())
             completed = yield from self.clean(var)
             if completed:
-                run["cleaned"].append(entry["slice"])
+                # clean() returns True for a clean that ran to completion, and
+                # at report-only running to completion means diagnosing and
+                # applying nothing. Two lists, so neither word covers for the
+                # other in the summary.
+                key = "reported" if self.autonomy == "report-only" else "cleaned"
+                run[key].append(entry["slice"])
             for skill_name, count in self._skill_uses().items():
                 gained = count - before.get(skill_name, 0)
                 if gained:
@@ -988,14 +1042,25 @@ class Session:
 
     def _write_family(self, name: str, pattern: str, meta: list, run: dict):
         """Persist the family summary. Never yields: it runs inside a finally,
-        where a yield during GeneratorExit is a RuntimeError."""
-        cleaned, hits = run["cleaned"], run["hits"]
+        where a yield during GeneratorExit is a RuntimeError.
+
+        "slices" and "rows" count the slices whose clean RAN TO COMPLETION,
+        and "reported"/"reported_rows" split out the report-only ones, which
+        ran to completion having applied nothing. Only report-only is split
+        out, so the count is not a count of slices that changed: at --autonomy
+        careful with a person who skips every gate, every slice completes,
+        applies nothing, and still lands under "slices". Saying it plainly
+        rather than widening the claim - separating those would mean asking
+        clean() whether any fix was applied, which it does not report."""
+        cleaned, reported, hits = run["cleaned"], run["reported"], run["hits"]
         summary = {
             "family": name,
             "pattern": pattern,
-            "slices": cleaned,  # what was actually cleaned, not what was found
+            "slices": cleaned,  # ran to completion; see the docstring
+            "reported": reported,  # diagnosed and left alone (report-only)
             "found": [m["slice"] for m in meta],
             "rows": sum(m["rows"] for m in meta if m["slice"] in cleaned),
+            "reported_rows": sum(m["rows"] for m in meta if m["slice"] in reported),
             "harmonized": run["harmonized"],
             "drift_findings": len(run["drift"]),
             # the number the whole phase exists to produce: one skill, many files
@@ -1025,6 +1090,12 @@ class Session:
         verify cell is not a substitute: it checks that one schema came out
         and no populated cell was lost, not that `amt` and `amount` were the
         same thing.
+
+        The ledger hears only about mappings that ran: a rejection at this
+        gate is scored not at all, because a person declining is evidence
+        about the person, not about the skill. The same is not yet true of the
+        per-finding skill gate in _skill_attempt, which still records a
+        rejection as a failure.
         """
         for entry in self.library.candidates(20):
             try:
@@ -1053,10 +1124,12 @@ class Session:
                 # not want this one may still want that one
                 return False
             if decision.action == "reject":
-                self.library.record(
-                    entry["name"], success=False, dataset=name, events=[]
-                )
-                self.library.save()
+                # No ledger write. The ledger records what a skill did to data,
+                # and this candidate never ran: scoring a rejection as a
+                # verification failure retired a proven mapping after two
+                # people declined it, under the reason "failed verification
+                # twice in a row", which the skill had not done once. The next
+                # candidate still gets its own gate.
                 continue
             # the baseline is taken only once something is going to run
             yield from self._exec_events(verify.family_baseline_cell(name), quiet=True)
@@ -1451,7 +1524,17 @@ class Session:
         plan's AUTO+autoclean disease ids, so those steps then run silently
         through M1's batched path; GATE and HUMAN steps still gate per finding.
         The plan is emitted to stdout and recorded in the transcript, so /why
-        can cite it. Returns (Plan, proceed: bool)."""
+        can cite it. Returns (Plan, proceed: bool). Where a gate is SHOWN,
+        proceed is True for the one answer that approves: "run". No gate is
+        shown at all when the plan has no batchable step, and that case
+        proceeds too, on the reading that there is nothing to approve and
+        every finding still meets its own gate.
+
+        Only the plan's own AUTO+autoclean ids are armed, so this gate decides
+        the batching and nothing else. It cannot approve a GATE or HUMAN step
+        in advance: policy.evaluate reads the grade before it reads any policy,
+        so those steps still stop at their own gate however this one is
+        answered."""
         built = plan_mod.build_plan(fixable)
         yield StreamText("stdout", "\n" + _plan_table(built) + "\n")
         self.transcript.append("plan", version=built.version, plan=built.to_dict())
@@ -1474,19 +1557,55 @@ class Session:
         if decision.action == "run":
             from crivo.detect import SLUGS
 
-            expires = (datetime.now().astimezone().date()).isoformat()
-            self.policies = [
-                *self.policies,
-                policy.PolicyRecord(
-                    id=f"plan-v{built.version}",
-                    disease_ids=tuple(auto_ids),
-                    approver="plan-approval",
-                    expires=expires,
-                    mode="ENFORCE",
-                    valid_disease_ids=set(SLUGS),
-                ),
-            ]
-        return built, decision.action != "skip"
+            # UTC, because policy.evaluate compares expiry against
+            # datetime.now(tz=UTC).date() and applies that filter BEFORE it
+            # looks at anything else. Minted from the LOCAL date, the record
+            # was born expired in every timezone behind UTC after about 17:00
+            # local: the approval evaporated, list position stopped mattering,
+            # and the person was told crivo had changed their data without
+            # asking about the plan they had just approved. At --autonomy
+            # careful the same skew re-gated every step of an approved batch.
+            expires = datetime.now(tz=UTC).date().isoformat()
+            # Ahead of the SEED, behind anything the caller armed. evaluate
+            # takes the first live record naming the disease, and both the
+            # transcript gate note and the first-run notice quote the winner's
+            # id, so behind the seeded autonomy-auto record the approval a
+            # person had just given was invisible and the batch was credited
+            # to the standing policy.
+            #
+            # Moving it to the front of the whole list went too far the other
+            # way: a caller-armed LOG_ONLY posture, whose entire purpose is
+            # that nothing applies unattended, was then overridden by one
+            # in-session answer. The seed is a default this session chose; a
+            # caller's record is an operator decision about reach, and a plan
+            # approval is not a licence to widen it.
+            plan_record = policy.PolicyRecord(
+                id=f"plan-v{built.version}",
+                disease_ids=tuple(auto_ids),
+                approver="plan-approval",
+                expires=expires,
+                mode="ENFORCE",
+                valid_disease_ids=set(SLUGS),
+            )
+            armed = [p for p in self.policies if p.id not in self._seeded_policy_ids]
+            seeded = [p for p in self.policies if p.id in self._seeded_policy_ids]
+            self.policies = [*armed, plan_record, *seeded]
+        # Only "run" proceeds. Rejecting used to return proceed=True, which was
+        # harmless while declining a plan meant every step fell back to its own
+        # gate, and became an inversion once the autonomy default seeded a
+        # standing ENFORCE policy at construction: the AUTO half of the plan a
+        # person had just rejected then applied with no gate shown at all.
+        # Reject and skip are not distinguished here because this gate has no
+        # revision loop to hand a rejection back to; both mean the plan does
+        # not run, and _clean writes the findings down as not attempted. The
+        # narrower reading of a rejection, "not as one batch, ask me per
+        # finding", is deliberately not what this returns: it is a different
+        # flow, and crivo has no way to reach it today. --autonomy careful is
+        # NOT that way out, plan-first being gated on CRIVO_PLAN_FIRST rather
+        # than on the level: at careful the same PLAN gate appears and the same
+        # rejection aborts. Offering per-finding gates after a rejected plan is
+        # unbuilt work, not a flag.
+        return built, decision.action == "run"
 
     def _autoclean_attempt(
         self, var: str, finding: dict, i: int, n: int, baseline_cols: list[str]

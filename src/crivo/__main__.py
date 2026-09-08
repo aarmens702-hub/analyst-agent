@@ -72,12 +72,17 @@ def main() -> int:
         "--autonomy",
         choices=list(AUTONOMY_LEVELS),
         default="autonomous",
-        help="how much crivo decides on its own. 'autonomous' (the default) "
-        "applies AUTO-grade findings that have a registered deterministic "
-        "fixer without asking, re-checking each one and reverting it if the "
-        "check fails; 'careful' asks before every fix; 'report-only' "
-        "diagnoses and changes nothing. A judgement call waits for a person "
-        "at every level, and no level admits a skill.",
+        help="how much crivo decides on its own while cleaning. 'autonomous' "
+        "(the default) applies AUTO-grade findings that have a registered "
+        "deterministic fixer without asking, re-checking each one and "
+        "reverting it if the check fails; 'careful' asks before those and "
+        "before every model-authored fix; 'report-only' diagnoses and applies "
+        "nothing. One exception at the first two levels: a proven library "
+        "skill fixes an AUTO finding with no gate shown, and only report-only "
+        "stops it. A judgement call waits for a person at every level, and no "
+        "level admits a skill. The level governs the clean flows, /clean and "
+        "the family harmonize; a QUERY turn still runs the cell you approve "
+        "at its gate, whatever that cell does.",
     )
     if sys.argv[1:2] == ["diagnose"]:
         sys.argv = [sys.argv[0], "--diagnose", *sys.argv[2:]]

@@ -22,7 +22,19 @@ BANNER = (
     "/clean-family <glob> <name> · /skills · /why · ask a question · /quit"
 )
 PROMPT = "❯ "
-GATE_PROMPT = "[r]un / [j]eject / [s]kip: "
+# reject shares its first letter with run, so the gate binds "j". But this
+# rendered it "[j]eject" until 2026-09-07, which spells a word that is not the
+# word, and an operator who typed what they were shown spent a try on it
+GATE_PROMPT = "[r]un / re[j]ect / [s]kip: "
+
+
+class _GateUnanswered(Exception):
+    """No gate answer this driver understood, and the bounds ran out.
+
+    Raised by _gate_decision and handled by _drive, which skips the rest of
+    the run rather than abandoning the generator: fixes already applied are
+    already applied, and the report and lineage that record them still have
+    to be written."""
 
 
 # the last multi-line error, recallable via /trace; one driver by design
@@ -142,8 +154,21 @@ def run_repl(session, auto_run: bool = False, input_fn=input, print_fn=print) ->
         session.close()
 
 
+GAVE_UP_NOTE = "no gate answer this driver understood"
+
+
 def _drive(gen, auto_run: bool, input_fn, print_fn) -> None:
-    """Drive one event generator (run_turn or clean): render, answer via send()."""
+    """Drive one event generator (run_turn or clean): render, answer via send().
+
+    A gate nobody can answer skips the rest of the run rather than abandoning
+    the generator. It used to raise EOFError straight out of the session, and
+    a half-finished clean was dropped where it stood: the fixes already
+    applied stayed applied, and the report, lineage and cleaned parquet that
+    record them were never written. Skipping is the answer a person walking
+    away gives, the loop already knows how to record it, and the generator
+    reaches its own end. The driver still leaves once it has, because a stdin
+    that could not answer the gate cannot answer the prompt either."""
+    gave_up = False
     try:
         event = next(gen)
         while True:
@@ -154,11 +179,21 @@ def _drive(gen, auto_run: bool, input_fn, print_fn) -> None:
                 _print_code_box(event.code, event.iteration, print_fn)
                 if event.preview:
                     print_fn(event.preview)
-                answer = (
-                    GateDecision("run")
-                    if auto_run
-                    else _gate_decision(input_fn, print_fn)
-                )
+                if gave_up:
+                    answer = GateDecision("skip", GAVE_UP_NOTE)
+                elif auto_run:
+                    answer = GateDecision("run")
+                else:
+                    try:
+                        answer = _gate_decision(input_fn, print_fn)
+                    except _GateUnanswered:
+                        gave_up = True
+                        answer = GateDecision("skip", GAVE_UP_NOTE)
+                        print_fn(
+                            "· nobody is answering this gate: skipping the rest "
+                            "of the run and leaving. What already ran is still "
+                            "recorded."
+                        )
             elif isinstance(event, StreamText):
                 print_fn(event.text, end="")
             elif isinstance(event, ArtifactSaved):
@@ -177,13 +212,18 @@ def _drive(gen, auto_run: bool, input_fn, print_fn) -> None:
                 print_fn(f"· {event.kind}: {text}")
             elif isinstance(event, CardReady):
                 print_fn(event.card.to_markdown())
-                return
+                break
             event = gen.send(answer)
     except StopIteration:
-        return
+        pass
+    if gave_up:
+        # run_repl reads this as the operator leaving, which is what happened;
+        # the generator above has already finished and written its record
+        raise EOFError(GAVE_UP_NOTE)
 
 
-GATE_TRIES = 5  # unrecognized answers before the gate gives up and leaves
+GATE_TRIES = 5  # unrecognized answers before the gate gives up
+BLANK_TRIES = 50  # bare Enters before it does the same
 
 
 def _gate_decision(input_fn, print_fn) -> GateDecision:
@@ -193,11 +233,19 @@ def _gate_decision(input_fn, print_fn) -> GateDecision:
     default to run: an answer nobody understood is not consent, and the
     operator most likely to be misread is the one who types "skip" at "[s]kip".
 
-    Running out of tries is not a default to run either. It raises EOFError,
-    which run_repl treats as the operator leaving, so nothing executes. The
-    bound exists because an unbounded re-prompt over a stdin that never blocks
-    and never ends (`yes | crivo`) spins at full CPU writing complaints:
-    measured at 4.6GB of them in about two minutes.
+    A bare Enter is no answer rather than a wrong one (it is what an operator
+    taps to see the prompt and the code box again), so it re-prompts without
+    spending one of the five. It still has a bound of its own, because a stdin
+    that returns empty forever is the same spin as one that returns "y"
+    forever, and the spin is what the bounds exist for: an unbounded
+    re-prompt over `yes | crivo` ran at full CPU and wrote 4.6GB of
+    complaints in about two minutes, measured.
+
+    Running out of either bound is not a default to run. It raises
+    _GateUnanswered, and _drive turns that into a skip of this gate and of
+    every gate after it, so the generator still finishes and still writes the
+    report and lineage for whatever already ran. Until 2026-09-07 this raised
+    EOFError straight out of the session, which dropped that work.
 
     Ctrl-D leaves immediately. Ctrl-C takes two: the first is caught by
     _TurnInterrupts to cancel the model request, and only the second exits.
@@ -207,20 +255,34 @@ def _gate_decision(input_fn, print_fn) -> GateDecision:
         "run": "run",
         "j": "reject",
         "reject": "reject",
+        # what the prompt spelled until 2026-09-07, when it rendered reject as
+        # "[j]eject": an operator who typed what they were shown burned a try
+        "jeject": "reject",
         "s": "skip",
         "skip": "skip",
     }
-    for _try in range(GATE_TRIES):
-        action = answers.get(input_fn(GATE_PROMPT).strip().lower())
+    tries = blanks = 0
+    while tries < GATE_TRIES and blanks < BLANK_TRIES:
+        typed = input_fn(GATE_PROMPT).strip().lower()
+        if not typed:
+            blanks += 1
+            continue
+        action = answers.get(typed)
         if action == "reject":
             return GateDecision("reject", input_fn("note: ").strip())
         if action is not None:
             return GateDecision(action)
+        tries += 1
+        # derived from the prompt, so the words it offers and the words this
+        # says it offers cannot drift apart again
         print_fn(
-            "· not one of [r]un / [j]eject / [s]kip, or the words themselves: "
+            f"· not one of {GATE_PROMPT.rstrip(': ')}, or the words themselves: "
             "nothing ran. Ctrl-D leaves."
         )
-    raise EOFError(f"no gate answer this driver understood in {GATE_TRIES} tries")
+    raise _GateUnanswered(
+        f"no gate answer this driver understood in {tries} tries and "
+        f"{blanks} blank lines"
+    )
 
 
 def _print_code_box(code: str, iteration: int, print_fn) -> None:

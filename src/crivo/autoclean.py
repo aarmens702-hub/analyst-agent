@@ -66,13 +66,66 @@ INNER_HYPHEN = re.compile(r"(?<=\w)-(?=\w)")
 # contract it reads the trailing minus of "1200-" as a unit and strips the
 # sign off every value in the column.
 FIXABLE_RESIDUE = re.compile(r"^[%a-zA-Z°µ²³/.\s]*$")
-# Suffixes that multiply the number instead of naming it. Stripping the 'M'
-# off "1.5M" states 1.5 where the value was 1,500,000, and no trace of the
-# scale survives in the numeric column. A unit is a name for the number, a
-# scale is part of it. 'm' is refused with the rest: metres and millions are
-# the same token and one column cannot tell them apart, so the honest answer
-# is a person, not a guess.
-SCALE_SUFFIXES = frozenset({"k", "m", "b", "bn", "mn", "tn"})
+# Suffixes the fixer will not strip, because they may multiply the number
+# rather than name it. Stripping the 'M' off "1.5M" states 1.5 where the value
+# was 1,500,000, and no trace of the scale survives in the numeric column. A
+# unit is a name for the number, a scale is part of it.
+#
+# Every spelling is listed on purpose, the doubled and single-letter ones
+# included, because omitting one by accident is exactly how "1.5MM" became 1.5:
+#   k       thousands; also kelvin
+#   m       millions; also metres, also molar, and thousands in the older
+#           accounting convention that spells millions "MM"
+#   mm      millions on a US finance desk; also millimetres
+#   b       billions; also bytes, also bits
+#   t       trillions; also tonnes
+#   bn mn tn    magnitudes and nothing else
+#   thousand million mil billion trillion    the word spellings, which carry
+#           no unit collision at all: nothing is measured in millions
+# The ambiguous ones are refused rather than guessed, and crivo picks no side
+# on "mm": read as millimetres the strip is right, read as millions it is a
+# million-fold error that nothing downstream can see. A wrong magnitude is
+# silent; a refusal is a line in needs_review that a person reads. The cost is
+# real and is paid knowingly - a genuine millimetres column goes to review.
+SCALE_SUFFIXES = frozenset(
+    {
+        "k",
+        "m",
+        "mm",
+        "b",
+        "t",
+        "bn",
+        "mn",
+        "tn",
+        "thousand",
+        "million",
+        "mil",
+        "billion",
+        "trillion",
+    }
+)
+# The residue shapes a magnitude can still be wearing, read whole rather than
+# by its first letter run. Letters, spacing, a full stop and a rate SLASH are
+# all in here, because a magnitude wears every one of them: "4.5M/yr" is a run
+# rate on any finance desk, and so is "1.5MM/yr". Only a character a magnitude
+# is never written with lets the residue out of the gate below - a degree
+# sign, a micro sign, a superscript exponent, a per-cent sign - because
+# nothing is spelled "1.5M²".
+#
+# The slash was briefly treated as proof of a unit, on the reading that "12
+# m/s" is metres per second. It is, and "4.5M/yr" is millions per year, and
+# the two are the same shape: that reading stripped the scale off every rate a
+# magnitude wears and recorded it verified. So the slash proves nothing and
+# the collision refuses, which is the same answer "mm" gets above and for the
+# same reason.
+#
+# What that costs, stated rather than hidden: a genuine "12 m/s" or "40 b/s"
+# column goes to review, and so does "1.5 MM USD" beside "120 mm Hg". Every
+# input this gate refuses is one whose first letter run IS a magnitude token,
+# so every one of them is ambiguous by construction. The recoverable half of
+# that finding is the exponent/degree/micro escape above, which is real and is
+# not ambiguous.
+MAGNITUDE_SHAPE = re.compile(r"^[a-z\s./]*$")
 
 
 def _fix_numbers(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
@@ -81,11 +134,20 @@ def _fix_numbers(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
 
     Refuses when the parse would drop a value that was really there, when any
     source string carries characters past the number that are not a unit or
-    currency suffix, and when the suffix is a magnitude token. LEADING_NUMBER
-    is anchored only at the start, so without those gates "approx 12" becomes
-    NaN, the range "12-15" becomes 12.0, the trailing-minus negative "1200-"
-    becomes +1200 and "1.5M" becomes 1.5 - all of them invisible to d01 once
-    the column is numeric.
+    currency suffix, and when the residue could be read as a magnitude, which
+    is when it is a bare word whose first letter run is in SCALE_SUFFIXES.
+    LEADING_NUMBER is anchored only at the start, so without those gates
+    "approx 12" becomes NaN, the range "12-15" becomes 12.0, the trailing-minus
+    negative "1200-" becomes +1200 and "1.5M" becomes 1.5 - all of them
+    invisible to d01 once the column is numeric.
+
+    The magnitude gate reads the whole residue, not just its first letter run,
+    and what reading it whole buys is one escape: a residue carrying a degree
+    sign, a micro sign, a superscript or a per-cent sign is a unit, because no
+    magnitude is ever written that way. A rate slash is NOT such a character -
+    "4.5M/yr" and "12 m/s" wear the same shape - so the gate holds across it
+    and both refuse. Nor does it tell a magnitude followed by a word from a
+    two-word unit ("1.5 MM USD" against "120 mm Hg"); both refuse there too.
     """
     out = frame.copy()
     for c in cols:
@@ -108,9 +170,14 @@ def _fix_numbers(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
         )
         if not bool(residue.str.match(FIXABLE_RESIDUE).to_numpy()[real].all()):
             continue  # a sign or other arithmetic the extraction did not consume
-        token = residue.str.lower().str.extract(UNIT_LETTERS, expand=False)
-        if bool(token[real].isin(SCALE_SUFFIXES).any()):
-            continue  # the suffix multiplies the number, it does not name it
+        lowered = residue.str.lower()
+        token = lowered.str.extract(UNIT_LETTERS, expand=False)
+        scaled = (
+            lowered.str.match(MAGNITUDE_SHAPE).to_numpy()
+            & token.isin(SCALE_SUFFIXES).to_numpy()
+        )
+        if bool(scaled[real].any()):
+            continue  # the suffix may multiply the number, not name it
         out[c] = parsed
     return out
 
@@ -121,7 +188,7 @@ _SLOT_SEPARATORS = {"slash": "/", "dash": "-", "dot": "."}
 # inferred format can silently swap the two. One strftime string does not
 # cover them ("5 Jan 2020" and "05 January 2020" are the same family), so they
 # are parsed without a format and held to the same null gate as the rest.
-_UNSWAPPABLE_FAMILIES = frozenset({"iso-zoned", "day-month-name", "month-name-day"})
+_UNSWAPPABLE_FAMILIES = frozenset({"day-month-name", "month-name-day"})
 # A time of day carries no date, and pd.to_datetime supplies the missing one
 # from the clock: "08:00:00" becomes today at 08:00. Nothing is deleted, so
 # the loss gate stays quiet, and the column is datetime64 afterwards, so d02
@@ -133,6 +200,14 @@ _UNSWAPPABLE_FAMILIES = frozenset({"iso-zoned", "day-month-name", "month-name-da
 # epoch match and d02 skips any column with more than one family.
 _UNPARSEABLE_FAMILIES = frozenset({"time", "epoch"})
 _INFER = "infer"  # _date_format's "no format needed, and none can be built"
+# iso-zoned is unswappable too, but it cannot go through the bare parse: a
+# column mixing "+01:00" with "Z" makes pd.to_datetime RAISE rather than
+# return, errors="coerce" and all, so the null gate below never ran and the
+# fixer died where it meant to either repair or refuse. utc=True is what makes
+# the parse return, and it is a real (small) loss stated plainly: datetime64
+# holds one offset for a whole column, so the instants survive exactly and the
+# per-row offset does not.
+_INFER_UTC = "infer-utc"
 # How much evidence settles day-first vs month-first. A slot above 12 can only
 # be a day, but ONE such value is an outlier, not a convention: on a column of
 # month-first dates whose day slot never exceeds 12, a single stray "25/06"
@@ -140,13 +215,32 @@ _INFER = "infer"  # _date_format's "no format needed, and none can be built"
 # NaT to show for it. A genuinely day-first column puts ~61% of its days above
 # 12, so a fifth of the column is a floor that reads the real thing and
 # refuses the outlier.
+#
+# This was briefly a flat count of two, on the reading that the other slot
+# never exceeding 12 is the corroboration that carries the weight and a second
+# value agreeing separates a convention from a typo. It does not, and the
+# counter-example is the shape the floor exists for: a MONTH-first column
+# whose day slot happens never to exceed 12, plus two transposed rows. Both
+# readings then leave the second slot clean, exactly one order parses without
+# a NaT, and the flat count derived %d/%m and silently transposed 12 of 18,
+# 40 of 58 and 132 of 198 rows at n=20/60/200. A count with no relation to
+# column size says the same thing about two values in twenty as about two in
+# two hundred, and those are not the same evidence.
+#
+# So the ambiguity is named rather than resolved: below the floor, "a
+# convention this column follows" and "a handful of transposed typos" are the
+# same picture, and crivo takes the refusal. The cost is real and is the
+# unclosed half of the over-refusal this floor was reported for - a column
+# where one order alone parses can still go to review, because a typo makes
+# the other order fail to parse too, and nothing here separates the two.
 _ORDER_SUPPORT = 0.2
 
 
 def _date_format(values) -> str | None:
-    """The one format the column's date family implies, `_INFER` when the
-    family cannot confuse day with month, or None when the column has no
-    single readable format and must be left alone."""
+    """The one format the column's date family implies, `_INFER` (or
+    `_INFER_UTC` for the zoned family) when the family cannot confuse day with
+    month, or None when the column has no single readable format and must be
+    left alone."""
     families = [f for f, share in _date_families(values).items() if share >= 0.05]
     if len(families) != 1:
         return None
@@ -157,6 +251,8 @@ def _date_format(values) -> str | None:
         return "ISO8601"
     if family == "compact":
         return "%Y%m%d"
+    if family == "iso-zoned":
+        return _INFER_UTC
     if family in _UNSWAPPABLE_FAMILIES:
         return _INFER
     if family not in _SLOT_SEPARATORS:
@@ -173,8 +269,8 @@ def _date_format(values) -> str | None:
     # Slots above 12 settle the order, but only with corroboration: the
     # deciding side needs a real share of the column and the other side needs
     # none at all. Neither side exceeding 12 is _slot_ambiguity's case, both
-    # exceeding it means no order fits, and a lone dissenter means the column
-    # does not agree with itself.
+    # exceeding it means no order fits, and a handful of dissenters means the
+    # column does not agree with itself.
     slotted = int(left.notna().sum())
     floor = max(2, int(slotted * _ORDER_SUPPORT))
     left_high, right_high = int((left > 12).sum()), int((right > 12).sum())
@@ -196,6 +292,10 @@ def _fix_dates(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
     datetime64: pandas picks one format from the first value, so an unguarded
     coerce read "05-01-2020" as May 1 and turned half a day-first column
     into NaT while clean() recorded it verified.
+
+    A zoned column is normalised to UTC (`_INFER_UTC`): every instant is
+    preserved, the per-row offset is not, and that is the only shape a
+    datetime64 column has for a column whose offsets differ.
     """
     out = frame.copy()
     for c in cols:
@@ -207,11 +307,12 @@ def _fix_dates(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
         fmt = _date_format(text)
         if fmt is None:
             continue
-        parsed = (
-            pd.to_datetime(series, errors="coerce")
-            if fmt == _INFER
-            else pd.to_datetime(series, format=fmt, errors="coerce")
-        )
+        if fmt == _INFER_UTC:
+            parsed = pd.to_datetime(series, errors="coerce", utc=True)
+        elif fmt == _INFER:
+            parsed = pd.to_datetime(series, errors="coerce")
+        else:
+            parsed = pd.to_datetime(series, format=fmt, errors="coerce")
         if bool((_real(series) & parsed.isna().to_numpy()).any()):
             continue  # the parse would delete values
         out[c] = parsed
@@ -262,18 +363,33 @@ def _fix_case_variants(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
 def _drop_constant(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
     """Drop the constant columns a d19 finding named, positionally.
 
-    Refuses when a target name is not carried by exactly one column: dropping
-    by name on a frame with two columns called "x" takes the informative twin
-    with it, and the d19 re-check then finds no column of that name at all and
-    reads the loss as proof the fix worked.
+    Refuses - returns the frame - when a target name is carried by MORE than
+    one column: dropping by name on a frame with two columns called "x" takes
+    the informative twin with it, and the d19 re-check then finds no column of
+    that name at all and reads the loss as proof the fix worked.
+
+    Raises when a target name is carried by NO column. The refusal arm used to
+    cover that case too, and returning the frame there is indistinguishable
+    from a refusal that was considered: d19 is COLUMN_CHANGING, so detect_one
+    does not fail an absent target, the untouched frame clears the re-check,
+    and clean() records an informationless column as a verified d19 fix. A
+    raise reaches clean()'s fixer-error path and the loop's revert, which is
+    the honest answer - the fixer was asked for something it cannot do.
     """
     names = [str(c) for c in frame.columns]
     targets = {str(c) for c in cols}
-    if any(names.count(t) != 1 for t in targets):
+    missing = sorted(t for t in targets if names.count(t) == 0)
+    if missing:
+        raise KeyError(f"d19 target column(s) not in the frame: {missing}")
+    if any(names.count(t) > 1 for t in targets):
         return frame
     out = frame.iloc[:, [i for i, n in enumerate(names) if n not in targets]]
-    if len(frame.columns) - len(out.columns) != len(targets):
-        return frame
+    dropped = len(frame.columns) - len(out.columns)
+    if dropped != len(targets):
+        # unreachable while every target is carried exactly once, which the two
+        # arms above now guarantee. It raises rather than returning the frame
+        # because that is the same silent no-op this fixer was just fixed for.
+        raise RuntimeError(f"d19 dropped {dropped} columns for {len(targets)} targets")
     return out
 
 
@@ -303,27 +419,66 @@ def _header_key(value) -> str:
     return " ".join(str(value).split()).casefold()
 
 
-def _repeats_header(frame: pd.DataFrame, names: list) -> bool:
+def _echoes_name(frame: pd.DataFrame, pos: int, cell: str, name: str) -> bool:
+    """True when `cell` is a spelling of `name` that _d18 counted as a header
+    row, or one an earlier fixer could have written over the row _d18 counted.
+
+    _d18 compares verbatim, and _ORDER runs d18 last, so by the time the header
+    fixer looks, the echo row has been through d06 and d07. There are exactly
+    two ways they can have rewritten it, and both are checkable here:
+
+    - d06 tidied its whitespace, which gives `_ws_tidy(name)` and nothing else.
+    - d07 folded it onto the column's most frequent spelling of the same key,
+      which by definition is a spelling that occurs elsewhere in the column.
+
+    A cell that is neither is the cell _d18 itself read, verbatim, and did not
+    count as a header row. Refusing the rename over it declines a repair for a
+    row the finding never reported, which is what the case-folded match did.
+    """
+    if cell == name:
+        return True  # what _d18 counts
+    if _header_key(cell) != _header_key(name):
+        return False
+    if cell == _ws_tidy(pd.Series([name], dtype=object)).iloc[0]:
+        return True  # d06 could have written this
+    column = frame.iloc[:, pos].astype(str)
+    return int((column == cell).sum()) > 1  # d07 folded a group onto this cell
+
+
+def _repeats_header(frame: pd.DataFrame, names: list, widened: bool = True) -> bool:
     """True when a data row spells out `names`. Mirrors _d18's own scan, same
     200-row window, so the fixer refuses the frames the detector calls
-    header-damaged for that reason.
+    header-damaged for that reason. Renaming past a real echo row makes it stop
+    matching, so d18's residual finding carries no column names, the re-check's
+    name comparison never matches it, and clean() records the finding verified
+    with the junk row still in the table.
 
-    Matched on a normalised key, not verbatim like _d18, because by the time
-    this runs the row has been through four other fixers: _ORDER puts d18
-    last, so d06 has already tidied the echo's whitespace and d07 has already
-    recased it. Verbatim, such a row matches neither the damaged names nor the
-    repaired ones, the rename goes ahead, d18 re-runs clean, and the finding
-    is recorded verified with the junk row still in the table.
+    `widened` picks which comparison. Verbatim is _d18's own and is the whole
+    of the guard when the caller knows the finding counted NO header rows:
+    a row _d18 never counted cannot be hidden from the re-check by a rename,
+    because the re-check runs the same verbatim scan and cannot see it either
+    way. The widened comparison (`_echoes_name`) is for the caller that does
+    not know, and for the finding that did count one, where d06 and d07 have
+    since rewritten the echo row out of verbatim reach.
     """
-    wanted = [_header_key(n) for n in names]
     scan = frame.head(200)
-    return any(
-        [_header_key(v) for v in scan.iloc[pos].tolist()] == wanted
-        for pos in range(len(scan))
-    )
+    for pos in range(len(scan)):
+        row = [str(v) for v in scan.iloc[pos].tolist()]
+        pairs = list(zip(row, names, strict=True))
+        if widened:
+            if all(
+                _echoes_name(frame, i, cell, name)
+                for i, (cell, name) in enumerate(pairs)
+            ):
+                return True
+        elif all(cell == name for cell, name in pairs):
+            return True
+    return False
 
 
-def _fix_headers(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
+def _fix_headers(
+    frame: pd.DataFrame, cols: list, header_rows: int | None = None
+) -> pd.DataFrame:
     """Repair damaged column NAMES: strip BOM/zero-width residue, collapse
     padding, replace "Unnamed: N" placeholders, dedupe collisions. Renames
     only, never drops, and untargeted healthy names always keep their claim.
@@ -337,6 +492,21 @@ def _fix_headers(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
     finding verified while the junk row is still in the table. The proposed
     names are checked too, for the frame whose row starts matching only after
     the repair.
+
+    "Carrying one" is `_repeats_header`'s definition, and `header_rows` - the
+    count from the finding's own stats, when the caller has it - decides which
+    one. At 0 the detector counted no header row on this frame, so there is
+    nothing a rename could hide from the re-check and the comparison is
+    _d18's own verbatim one: the padding repair goes ahead over a banner row
+    that merely reads like the header, which is the case a case-folded match
+    and then a "the spelling repeats in its column" match each refused.
+
+    Above 0, and whenever the caller does not pass it at all, the widened
+    comparison is used instead, because d06 and d07 run before this fixer and
+    may have rewritten the counted echo row out of verbatim reach. The
+    unknown case takes the refusing side on purpose: loop.py's generated
+    `FIXERS[18](df, cols)` carries no stats, so the agent lane keeps the wider
+    guard and the narrower recovery is clean()'s alone.
     """
     targeted = {str(c) for c in cols}
     positions = [pos for pos, name in enumerate(frame.columns) if str(name) in targeted]
@@ -358,7 +528,10 @@ def _fix_headers(frame: pd.DataFrame, cols: list) -> pd.DataFrame:
             candidate = f"{text}_{k}"
         taken.add(candidate)
         new_names[pos] = candidate
-    if _repeats_header(frame, old_names) or _repeats_header(frame, new_names):
+    widened = header_rows is None or header_rows > 0
+    if _repeats_header(frame, old_names, widened) or _repeats_header(
+        frame, new_names, widened
+    ):
         return frame
     out = frame.copy()
     out.columns = new_names
@@ -597,8 +770,18 @@ def clean(df: pd.DataFrame, policy: str = "auto") -> tuple[pd.DataFrame, CleanSu
     auto = [f for f in findings if f["grade"] == "AUTO" and f["disease"] in FIXERS]
     for finding in sorted(auto, key=rank):
         disease, cols = finding["disease"], finding["columns"]
+        # d18 alone reads a second argument: the header-row count the detector
+        # actually recorded. Without it the header fixer has to guess whether a
+        # row that reads like the header is the one the finding reported, and
+        # guessing wide refused repairs over rows d18 never counted. The
+        # finding is right here, so it is passed rather than guessed at.
+        extra = (
+            {"header_rows": int(finding.get("stats", {}).get("header_rows", 0))}
+            if disease == 18
+            else {}
+        )
         try:
-            candidate = FIXERS[disease](working, cols)
+            candidate = FIXERS[disease](working, cols, **extra)
         except Exception as exc:  # noqa: BLE001 — a broken fix is reported, not raised
             needs_review.append(_slim(finding, reason=f"fixer error: {exc}"))
             continue

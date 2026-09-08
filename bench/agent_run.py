@@ -33,6 +33,12 @@ from crivo.policy import PolicyRecord
 KEY_VARS = ("DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY")
 RESULTS_DIR = Path("bench/results/agent")
 
+# The cap defaults, named once: `main` gives them to the parser and
+# `_arm_suffix` compares against them to decide whether an arm is the default
+# one. Two copies of a default is how an arm silently stops being named.
+DEFAULT_MAX_EVENTS = 8000
+DEFAULT_WALL_CAP = 300.0
+
 
 class CaseAborted(Exception):
     """A cap fired; the case is recorded and the run moves on (R4)."""
@@ -116,9 +122,11 @@ _TOKEN_ATTRS = (
     ("cache_hit_tokens", "crivo.cache.hit_tokens"),
     ("cache_miss_tokens", "crivo.cache.miss_tokens"),
 )
-# the terms new_work_tokens ADDS. A call that reported neither reported no
-# cost basis: cache counters alone cannot say what new work a call did, and
-# subtracting a hit count from nothing would publish a negative token count.
+# the terms new_work_tokens ADDS, and a call has to report ALL of them to be
+# priced. One of them is not half a reading: the missing term contributes a
+# silent 0. Cache counters alone say nothing either, since they cannot report
+# what new work a call did and subtracting a hit count from nothing would
+# publish a negative token count.
 _NEW_WORK_ATTRS = ("gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens")
 
 
@@ -126,25 +134,40 @@ def _call_stats(path: Path) -> dict:
     """Sum a case's gen_ai.client.call spans into the T1.5 columns: calls,
     model wait, token usage, and new_work_tokens (input minus cache hits
     plus output, the cost basis that excludes cache reads). A missing file,
-    junk line, or absent field degrades to zeros/absent keys, never raises:
+    junk line, or absent field degrades to None/absent keys, never raises:
     telemetry must not be able to fail a case.
 
     new_work_tokens separates three states rather than two, because 0 and
     None each mean something and the wrong one flatters a cost column:
       - no readable telemetry -> None. We do not know whether a call was made.
+        `count` and `model_wait_s` are None for that same case and for that
+        same reason: they used to read 0 here, which is not ignorance but the
+        positive claim that no call was made and no time was spent, published
+        beside an unknown cost that said the opposite.
       - readable, no call span -> 0. The deterministic path solved the case;
         no call was made, so nothing was spent. Calling this unknown drops
         real, free cases out of the mean and leaves it several times high.
-      - a call span that reported no usage -> None for the whole case. The
-        span is emitted from telemetry.span's `finally` while llm.generate
-        maps usage only after the stream finishes, so a cancelled or failed
-        call leaves one behind. Summing the rest would publish a total that
-        is knowably short as if it were complete.
+      - a call span that did not report BOTH terms the sum adds -> None for
+        the whole case. Reporting one of them is not half a reading: the sum
+        would silently contribute 0 for the other and publish a total that is
+        knowably short as if it were complete. The span is emitted from
+        telemetry.span's `finally` while llm.generate maps usage only after
+        the stream finishes, so a cancelled or failed call leaves one behind.
+
+    What that last state cannot distinguish, and this is the live limitation:
+    crivo.llm maps usage from `prompt_tokens`/`completion_tokens`, the OpenAI
+    and DeepSeek spelling. Anthropic spells them `input_tokens`/
+    `output_tokens` and llm.py does not map those, so on the Claude provider
+    NO span carries either additive term, every case reads unknown, and the
+    whole cost column is silent rather than wrong. A reader seeing `unknown`
+    should check the provider before concluding a call was cancelled. Fixing
+    it means mapping the Anthropic names in crivo/llm.py; nothing in this
+    module can make the numbers appear.
     """
     try:
         lines = path.read_text().splitlines()
     except OSError:
-        return {"count": 0, "model_wait_s": 0.0, "new_work_tokens": None}
+        return {"count": None, "model_wait_s": None, "new_work_tokens": None}
     count = 0
     unpriced = 0
     wait = 0.0
@@ -161,7 +184,7 @@ def _call_stats(path: Path) -> dict:
         if isinstance(dur, (int, float)):
             wait += dur
         attrs = span.get("attrs") or {}
-        if not any(isinstance(attrs.get(a), (int, float)) for a in _NEW_WORK_ATTRS):
+        if not all(isinstance(attrs.get(a), (int, float)) for a in _NEW_WORK_ATTRS):
             unpriced += 1
         for key, attr in _TOKEN_ATTRS:
             value = attrs.get(attr)
@@ -196,6 +219,16 @@ def _arm_gates(args: argparse.Namespace) -> str:
     return gates
 
 
+def _cap_text(value) -> str:
+    """A cap rendered so two different caps can never render alike: every
+    digit, no exponent, and a whole number written as one. "%g" was the
+    collision - it switches to exponential and rounds past six significant
+    figures, so 1000000 and 1000001 shared a filename."""
+    if isinstance(value, int) or float(value).is_integer():
+        return str(int(value))
+    return format(float(value), "f").rstrip("0").rstrip(".")
+
+
 def _arm_suffix(args: argparse.Namespace) -> str:
     """The filename tag naming this arm, for both the result and the telemetry
     file. Every knob that changes what an arm measures has to appear here: the
@@ -206,7 +239,27 @@ def _arm_suffix(args: argparse.Namespace) -> str:
     addressable. Reads knobs defensively, since callers build the namespace by
     hand. Names the gate policy that will actually be driven, not the one that
     was asked for, so the filename never claims a ceiling arm the run refused
-    to be."""
+    to be.
+
+    `--docker` and the two caps are in here because they change what an arm
+    measures as surely as the gate policy does: the sandbox moves the run off
+    the host kernel, and a cap decides how much of a case gets to finish. They
+    were left out, so a sandboxed run resumed the host-kernel run's file and
+    republished its row as its own. A knob at its default adds nothing to the
+    name, which is what keeps the results already on disk addressable.
+
+    A cap is rendered digit for digit (`_cap_text`) rather than with "%g",
+    which goes exponential and rounds past six significant figures: 1000000
+    and 1000001 both came out ".max-events-1e+06", so two arms shared one file
+    and the second resumed the first - the very collision this suffix exists
+    to prevent, reintroduced by the fix for it.
+
+    What is still NOT in here, said rather than implied: the model PROVIDER. A
+    DeepSeek run and a Claude run of the same case share a name, so one can
+    resume the other's row, and _call_stats' own note says the provider decides
+    whether the cost column exists at all. Adding it would orphan every results
+    file already on disk, so it is a migration rather than a rename and it is
+    left open deliberately."""
     parts = []
     if _arm_gates(args) == "approve":
         parts.append("ceiling")
@@ -216,6 +269,14 @@ def _arm_suffix(args: argparse.Namespace) -> str:
     autonomy = getattr(args, "autonomy", None)
     if autonomy:
         parts.append(autonomy)
+    if getattr(args, "docker", False):
+        parts.append("docker")
+    wall_cap = getattr(args, "wall_cap", DEFAULT_WALL_CAP)
+    if wall_cap != DEFAULT_WALL_CAP:
+        parts.append(f"wall-cap-{_cap_text(wall_cap)}")
+    max_events = getattr(args, "max_events", DEFAULT_MAX_EVENTS)
+    if max_events != DEFAULT_MAX_EVENTS:
+        parts.append(f"max-events-{_cap_text(max_events)}")
     return "".join(f".{part}" for part in parts)
 
 
@@ -310,9 +371,9 @@ def _mean(values: list) -> float | None:
 
 
 def _tokens_text(value: float | None) -> str:
-    """Render a token count for the terminal. None is `unknown`, never 0: no
-    span reported usage, so what the case cost is not known, and a 0 in the
-    cost column would read as free."""
+    """Render a telemetry number for the terminal. None is `unknown`, never 0:
+    nothing was read, so what the case cost is not known, and a 0 in the cost
+    or call column would read as a free run rather than an unmeasured one."""
     return "unknown" if value is None else str(value)
 
 
@@ -323,8 +384,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--full", action="store_true", help="seeds-expanded corpus")
     parser.add_argument("--force", action="store_true", help="rerun finished cases")
     parser.add_argument("--docker", action="store_true", help="sandbox kernel")
-    parser.add_argument("--max-events", type=int, default=8000)
-    parser.add_argument("--wall-cap", type=float, default=300.0, help="secs/case")
+    parser.add_argument("--max-events", type=int, default=DEFAULT_MAX_EVENTS)
+    parser.add_argument(
+        "--wall-cap", type=float, default=DEFAULT_WALL_CAP, help="secs/case"
+    )
     parser.add_argument(
         "--human-gates",
         choices=("skip", "approve"),
@@ -418,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{row['name']}{tag}: {row['status']}"
                 f" | repair F1 {repair.get('f1')}"
                 f" | {row['wall_secs']}s | {row.get('events', 0)} events"
-                f" | {calls.get('count', 0)} calls"
+                f" | {_tokens_text(calls.get('count'))} calls"
                 f" | {_tokens_text(calls.get('new_work_tokens'))} new-work tok"
             )
             rows.append(row)

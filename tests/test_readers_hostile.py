@@ -175,7 +175,12 @@ def test_bomb_guard_covers_bz2_and_xz_not_just_gz(tmp_path):
     guard's docstring claimed otherwise. Both must now be refused with the
     archive named, and an ordinary compressed CSV in either format must still
     read sentinel-safely. The payload is valid CSV on purpose: before the fix
-    these read all the way through, they did not fail on a bad parse."""
+    these read all the way through, they did not fail on a bad parse.
+
+    Neither format declares a size, so the number in the refusal comes from a
+    probe that stopped at the ceiling: it is a lower bound and has to be
+    printed as one, ratio included. It used to print "(6553:1)", which reads
+    as a measurement of a file nothing measured."""
     import bz2
     import lzma
 
@@ -185,14 +190,50 @@ def test_bomb_guard_covers_bz2_and_xz_not_just_gz(tmp_path):
         bomb = tmp_path / f"bomb.csv{ext}"
         with opener(bomb, "wb") as fh:
             fh.write(payload)
-        with pytest.raises(ValueError, match=f"bomb.csv{ext}"):
+        with pytest.raises(ValueError, match=f"bomb.csv{ext}") as caught:
             read_file(bomb)
+        assert "at least" in str(caught.value).split("on disk (")[1], (
+            f"the ratio is a bound, not a measurement: {caught.value}"
+        )
 
         normal = tmp_path / f"normal.csv{ext}"
         with opener(normal, "wb") as fh:
             fh.write(b"id,note\n1,ok\n2,N/A\n")
         df = read_file(normal)
         assert df["note"].tolist() == ["ok", "N/A"], ext
+
+
+def test_an_ordinary_boilerplate_heavy_csv_xz_is_not_a_bomb(tmp_path):
+    """The 200:1 ratio was calibrated on gzip, and xz clears it on an honest
+    export: 12MB of rows whose columns are mostly constant, the shape an ERP
+    or CRM dump has, compresses about 355:1, so the free keyless diagnose
+    refused a real file. bz2 and xz need their own ratio. The bomb payload in
+    the test above stays refused, which is what keeps this from being a
+    loosening: it reaches 6,553:1 in xz and 17,403:1 in bz2."""
+    import lzma
+
+    header = ",".join(["id", "region", "status"] + [f"c{i}" for i in range(20)])
+    boilerplate = (
+        "ACME_CORP_2026,USD,N/A,standard,,0,false,US,v3.1.4,unspecified,"
+        "0.00,none,active,2026-01-01,system,,,,,"
+    )  # the 20 columns that never vary, which is why xz clears 200:1
+    export = tmp_path / "export.csv.xz"
+    with lzma.open(export, "wb") as fh:
+        fh.write((header + "\n").encode())
+        fh.write(
+            "".join(
+                f"{i},North America,completed,{boilerplate}\n" for i in range(90_000)
+            ).encode()
+        )
+    assert export.stat().st_size * 200 < 10 * 1024 * 1024, (
+        "the fixture only tests the fix if the gzip ratio would have refused it"
+    )
+
+    df = read_file(export)
+
+    assert len(df) == 90_000
+    assert df["region"].tolist()[:1] == ["North America"]
+    assert df["c2"].tolist()[:1] == ["N/A"], "sentinel-safe on the way through"
 
 
 def test_a_gz_bomb_its_own_trailer_hides_is_still_refused(tmp_path):
@@ -266,3 +307,33 @@ def test_an_unguarded_compression_format_is_refused_not_read(tmp_path):
     unguarded.write_bytes(b"not really zstd, the guard refuses before reading")
     with pytest.raises(ValueError, match="no decompression-bomb guard"):
         _bomb_check(unguarded, ".zst")
+
+
+def test_a_bz2_far_past_any_honest_ratio_is_still_refused(tmp_path):
+    """bz2 was lifted to 2000:1 on evidence gathered from xz. The two are not
+    comparable: bz2 compresses in independent 900KB blocks, so its ratio is
+    flat with file size, while xz's grows with the window. Measured on
+    boilerplate-heavy CSV at 11MB, 45MB and 225MB, honest bz2 sits at 101:1
+    and does not move; the packet's own fixture measured 122:1. Nothing
+    honest was found anywhere near 2000, so the lift opened a band from a few
+    hundred to 2000 that is neither honest nor previously allowed - and the
+    ratio has no absolute cap behind it, so the same construction at 48MB
+    compressed is 63GB expanded and still accepted.
+
+    The file below expands 1300:1, which no measurement of an honest export
+    has ever approached."""
+    import bz2
+    import os
+
+    from crivo.readers.files import _bomb_check
+
+    # tuned to land INSIDE the band the lift opened rather than far above it,
+    # so this test fails on the ratio rather than on being an obvious bomb
+    payload = b"0" * (64 * 1024 * 1024) + os.urandom(50_000)
+    bomb = tmp_path / "bomb.csv.bz2"
+    bomb.write_bytes(bz2.compress(payload))
+    ratio = len(payload) // bomb.stat().st_size
+    assert 1000 < ratio < 2000, f"the fixture has to sit in the opened band: {ratio}"
+
+    with pytest.raises(ValueError, match="decompression bomb"):
+        _bomb_check(bomb, ".bz2")

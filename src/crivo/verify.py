@@ -32,10 +32,17 @@ CASE_HEALTHY_ROWS = 50  # ... plus untouched ones, so a fix must not harm them
 # cells rely on: both freeze rows by index label.
 #
 # Sorted, because the pair already carries the row's identity: a fix that
-# sorts or samples the whole frame moves every column together and loses
-# nothing, and an order-dependent digest refused it. Sorting is what makes
-# that lossless move pass while a single column torn loose from its index
-# still fails.
+# sorts the whole frame moves every column together and loses nothing, and an
+# order-dependent digest refused it. Sorting is what makes that lossless move
+# pass while a single column torn loose from its index still fails.
+#
+# That covers a sort that KEEPS its index labels, and only that. It does not
+# cover `sort_values(...).reset_index(drop=True)`, which rewrites every label
+# and so moves every pair, nor sampling, which changes the row count and
+# cannot match a whole-column digest at all. Both used to be claimed here.
+# The first is admitted by `rode_along` below, on evidence and under the
+# conditions its docstring lists; the second is a row-count question the row
+# invariant answers.
 #
 # Cost is one pass plus a sort over 8 bytes per row.
 COLUMN_DIGEST = (
@@ -55,6 +62,104 @@ _clean_hashes = {{}}
 for _i in range(len({var}.columns)):
     _clean_hashes.setdefault(str({var}.columns[_i]), []).append({digest})
 _json.dumps(sorted(_clean_hashes))
+"""
+
+
+def rode_along(live, backup, untouched: list[str], baseline_rows: int) -> bool:
+    """Did the untouched block move as part of a whole-frame REORDER, rather
+    than get torn loose from the rest of the frame?
+
+    The question exists because `sort_values(...).reset_index(drop=True)` is
+    one idiom, not two: the reset rewrites every index label, so every
+    (index, value) pair moves and every untouched column reads torn on a fix
+    that lost nothing. Called only once the digests already disagree.
+
+    Three things have to hold, and the third is what decides it.
+
+    1. The block is a permutation of itself: same row count, same untouched
+       width, and the same multiset of WHOLE untouched rows. That proves no
+       untouched column was torn against ANOTHER untouched column.
+    2. That permutation is unique, so there is one candidate to test: the
+       untouched rows have to be pairwise distinct. Duplicate rows leave the
+       permutation ambiguous, and the ambiguous case is refused.
+    3. The FIX TARGETS have to agree that the frame moved. Condition 1 alone
+       does not settle it, and a CONSTANT untouched column is the plain
+       counter-example: its digest is torn by the index rewrite like every
+       other name, and it distinguishes no row, so tearing one real column
+       beside it preserves the whole-row multiset exactly. The targets are the
+       only witness left, so they are asked - are they at least as consistent
+       with the rows having moved by that permutation as with their having
+       stayed put? A genuine reorder differs from the permuted baseline only
+       on the cells the repair changed. A torn column leaves the targets
+       sitting still, and the permuted comparison then disagrees with them
+       almost everywhere.
+
+    Evidence, not proof, and here is the gap said plainly: step 3 compares two
+    readings and takes the better-supported one rather than deriving the
+    answer, because once the index labels are gone nothing in the frame can
+    testify directly. It is refused outright wherever there is no witness to
+    ask - fewer than two untouched names, no target column carried over from
+    the baseline, or a target width that changed - so a fix that renames or
+    drops a target never reaches the comparison at all.
+    """
+    import pandas as pd
+
+    keep = set(untouched)
+    before = [i for i in range(len(backup.columns)) if str(backup.columns[i]) in keep]
+    after = [i for i in range(len(live.columns)) if str(live.columns[i]) in keep]
+    if len(untouched) < 2 or len(before) < 2 or len(before) != len(after):
+        return False
+    if len(live) != baseline_rows or not live.index.equals(pd.RangeIndex(len(live))):
+        return False
+    was = pd.util.hash_pandas_object(backup.iloc[:, before], index=False).tolist()
+    now = pd.util.hash_pandas_object(live.iloc[:, after], index=False).tolist()
+    if len(set(was)) != len(was) or sorted(was) != sorted(now):
+        return False
+    at = {h: i for i, h in enumerate(was)}
+    perm = [at[h] for h in now]
+    t_was = [
+        i for i in range(len(backup.columns)) if str(backup.columns[i]) not in keep
+    ]
+    t_now = [i for i in range(len(live.columns)) if str(live.columns[i]) not in keep]
+    if not t_was or len(t_was) != len(t_now):
+        return False
+    tb = backup.iloc[:, t_was].astype(str).to_numpy()
+    ta = live.iloc[:, t_now].astype(str).to_numpy()
+    moved = int((tb[perm] != ta).any(axis=1).sum())
+    stayed = int((tb != ta).any(axis=1).sum())
+    return moved <= stayed
+
+
+# The untouched-column guard. Each baseline digest has to be found again among
+# the digests the live frame produces under the same name; a name whose digests
+# do not all come back is torn, and the assert names it.
+#
+# The second arm is the reorder exemption, and `rode_along` above is the whole
+# of it. See verify_cell for what it does and does not prove.
+UNTOUCHED_TEMPLATE = """\
+from crivo.verify import rode_along as _rode_along
+_keep = set(_untouched)
+_pool = {{}}
+for _i in range(len({var}.columns)):
+    _n = str({var}.columns[_i])
+    if _n in _keep:
+        _pool.setdefault(_n, []).append({digest})
+_torn = []
+for _c in _untouched:
+    _left = list(_pool.get(_c, []))
+    for _h in _clean_hashes[_c]:
+        if _h in _left:
+            _left.remove(_h)
+        else:
+            _torn.append(_c)
+            break
+if _torn:
+    assert len(_torn) == len(_untouched) and _rode_along(
+        {var}, _clean_backup, _untouched, _clean_rows
+    ), (
+        f'column {{_torn[0]!r}} changed (values or row identity) but was '
+        'not a fix target'
+    )
 """
 
 
@@ -415,9 +520,63 @@ def verify_cell(var: str, finding: dict, baseline_columns: list[str]) -> str:
     the diff, because the fixes for header damage (d18) rename their targets
     by construction and a new column loses nothing. Reordering columns passes;
     the fix's own target columns are exempt from all of it, since d18 renames
-    them and d19 drops them on purpose."""
+    them and d19 drops them on purpose.
+
+    The reorder exemption, and exactly what it costs. Pairing each value with
+    its index label put row identity inside the digest, and it also refused
+    `sort_values(...).reset_index(drop=True)`: the reset rewrites every label,
+    so every pair moves and every untouched column reads torn, on a fix that
+    lost nothing. A repair the model wrote correctly was reverted and counted
+    against it. So when EVERY untouched name is torn at once, the guard asks a
+    second question: taken as whole rows, is the untouched block the same
+    multiset it was? If it is, the untouched columns rode along together and
+    the fix is let through.
+
+    What that keeps catching is what the pairing was added for: a column torn
+    loose from the rest of the frame. Tearing a proper subset of the untouched
+    columns leaves the others' digests intact, so not every name is torn and
+    the exemption never opens. Tearing one column beside a CONSTANT one does
+    tear every name - the index rewrite tears the constant column too, and it
+    distinguishes no row, so the whole-row multiset is blind to it - and that
+    is why `rode_along` also asks the fix's own target columns whether the
+    frame moved. It is refused outright when there is nothing to ask: fewer
+    than two untouched names, duplicate rows inside the untouched block, no
+    target column carried over from the baseline, a target width that changed,
+    a moved row count, or a live index that is not a plain positional range.
+
+    What it does NOT do, stated plainly rather than left for a reader to
+    discover: the target-column question is EVIDENCE, not proof. It compares
+    the permuted reading against the stayed-put reading and takes the
+    better-supported one, because once the index labels are gone nothing in
+    the frame can testify directly. A fix that permutes the untouched block
+    AND moves the targets by the same permutation is a whole-frame reorder by
+    every test available here, which is the correct reading of it. One
+    limitation runs the safe way and so is a refusal rather than a hole: a row
+    reorder combined with a COLUMN reorder is declined, because the row hashes
+    are taken in column order.
+
+    The target names are resolved through detect._resolve_renames first, the
+    same call detect_one makes, so the two halves of the guard cannot drift.
+    A finding freezes its target's name when it is raised; an already-verified
+    d18 repair then renames that column, and the loop re-snapshots the baseline
+    after every verified fix, so the baseline carries the NEW name while the
+    finding still carries the old one. Without the resolution the renamed
+    column fell into `untouched` - the one column this fix is licensed to
+    change - and the untouched guard reverted the honest repair after the
+    detector had already cleared it. It only fires for a frozen name the
+    baseline no longer carries, so it widens nothing anywhere else."""
+    import pandas as pd
+
+    from crivo.detect import _resolve_renames
+
     targets = set(finding.get("columns", []))
+    targets |= set(
+        _resolve_renames(
+            pd.DataFrame(columns=list(baseline_columns)), sorted(targets)
+        ).values()
+    )
     untouched = [c for c in baseline_columns if c not in targets]
+    digest = COLUMN_DIGEST.format(series=f"{var}.iloc[:, _i]")
     reference = ""
     if int(finding.get("disease", 0)) == 6:
         reference = (
@@ -456,21 +615,7 @@ def verify_cell(var: str, finding: dict, baseline_columns: list[str]) -> str:
         "assert _v is None, f\"signal still fires: {_v['evidence']}\"\n"
         f"{reference}"
         f"{_row_invariant(var, finding)}\n"
-        "_keep = set(_untouched)\n"
-        "_pool = {}\n"
-        f"for _i in range(len({var}.columns)):\n"
-        f"    _n = str({var}.columns[_i])\n"
-        "    if _n in _keep:\n"
-        f"        _pool.setdefault(_n, []).append("
-        f"{COLUMN_DIGEST.format(series=f'{var}.iloc[:, _i]')})\n"
-        "for _c in _untouched:\n"
-        "    _left = list(_pool.get(_c, []))\n"
-        "    for _h in _clean_hashes[_c]:\n"
-        "        assert _h in _left, (\n"
-        "            f'column {_c!r} changed (values or row identity) but was "
-        "not a fix target'\n"
-        "        )\n"
-        "        _left.remove(_h)\n"
+        f"{UNTOUCHED_TEMPLATE.format(var=var, digest=digest)}"
         '"verified"'
     )
 

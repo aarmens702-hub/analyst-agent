@@ -290,8 +290,13 @@ def test_run_case_points_telemetry_at_a_fresh_per_case_file_and_restores_env(
         on_init=lambda: seen.update(env=os.environ.get("CRIVO_TELEMETRY")),
     )
     monkeypatch.setenv("CRIVO_TELEMETRY", "sentinel-before")
+    # the caps sit at their defaults so the filename under test carries only
+    # the arm; a non-default cap is its own arm and names itself
     args = argparse.Namespace(
-        docker=False, max_events=10, wall_cap=5.0, human_gates="skip"
+        docker=False,
+        max_events=agent_run.DEFAULT_MAX_EVENTS,
+        wall_cap=agent_run.DEFAULT_WALL_CAP,
+        human_gates="skip",
     )
 
     row = agent_run._run_case({"name": "tele_case", "diseases": [1]}, args)
@@ -299,8 +304,13 @@ def test_run_case_points_telemetry_at_a_fresh_per_case_file_and_restores_env(
     assert os.environ["CRIVO_TELEMETRY"] == "sentinel-before"
     assert not expected.exists(), "stale telemetry must be removed before the run"
     # new_work_tokens was pinned at 0 here, which is the bug: a case whose
-    # telemetry reported nothing does not know what it cost
-    assert row["calls"] == {"count": 0, "model_wait_s": 0.0, "new_work_tokens": None}
+    # telemetry reported nothing does not know what it cost, and the count and
+    # the wait do not know either
+    assert row["calls"] == {
+        "count": None,
+        "model_wait_s": None,
+        "new_work_tokens": None,
+    }
 
 
 def test_run_case_ceiling_arm_gets_its_own_telemetry_file_and_unsets_cleanly(
@@ -319,7 +329,10 @@ def test_run_case_ceiling_arm_gets_its_own_telemetry_file_and_unsets_cleanly(
     )
     monkeypatch.delenv("CRIVO_TELEMETRY", raising=False)
     args = argparse.Namespace(
-        docker=False, max_events=10, wall_cap=5.0, human_gates="approve"
+        docker=False,
+        max_events=agent_run.DEFAULT_MAX_EVENTS,
+        wall_cap=agent_run.DEFAULT_WALL_CAP,
+        human_gates="approve",
     )
 
     agent_run._run_case({"name": "tele_case", "diseases": [1]}, args)
@@ -370,10 +383,12 @@ def test_call_stats_sums_client_call_spans_and_tolerates_gaps(tmp_path):
         "cache_miss_tokens": 40,
         "new_work_tokens": None,
     }
+    # no file, so nothing is known about this case: not the cost, and not the
+    # calls or the wait either. Those two read 0 until the row said "unknown
+    # cost, 0 calls" in one breath.
     assert agent_run._call_stats(tmp_path / "absent.jsonl") == {
-        "count": 0,
-        "model_wait_s": 0.0,
-        # no file, so no token data: unknown, not zero
+        "count": None,
+        "model_wait_s": None,
         "new_work_tokens": None,
     }
 
@@ -465,11 +480,81 @@ def test_call_stats_needs_the_terms_the_arithmetic_actually_adds(tmp_path):
 
     assert _stats("miss", {"crivo.cache.miss_tokens": 117})["new_work_tokens"] is None
     assert _stats("hit", {"crivo.cache.hit_tokens": 5120})["new_work_tokens"] is None
-    # an additive term present is a real reading, cache hits subtracted from it
+    # BOTH additive terms present is a real reading, cache hits subtracted
     both = _stats(
-        "both", {"gen_ai.usage.input_tokens": 900, "crivo.cache.hit_tokens": 512}
+        "both",
+        {
+            "gen_ai.usage.input_tokens": 900,
+            "gen_ai.usage.output_tokens": 200,
+            "crivo.cache.hit_tokens": 512,
+        },
     )
-    assert both["new_work_tokens"] == 388
+    assert both["new_work_tokens"] == 588
+
+
+def test_one_additive_term_alone_is_not_a_cost_basis(tmp_path):
+    """The priced check was an `any` over the two terms the sum adds, so a
+    span reporting input and no output was declared priced and its output
+    contributed 0. That is the same knowably-short total the whole-case rule
+    below refuses, one level down, and it reads as a cheap call rather than
+    as an unknown one."""
+    import json
+
+    def _stats(name: str, attrs: dict) -> dict:
+        tele = tmp_path / f"{name}.jsonl"
+        tele.write_text(
+            json.dumps({"name": "gen_ai.client.call", "attrs": attrs}) + "\n"
+        )
+        return agent_run._call_stats(tele)
+
+    assert _stats("in", {"gen_ai.usage.input_tokens": 900})["new_work_tokens"] is None
+    assert _stats("out", {"gen_ai.usage.output_tokens": 200})["new_work_tokens"] is None
+    # the readings themselves are still kept, they just do not make a total
+    assert _stats("in2", {"gen_ai.usage.input_tokens": 900})["input_tokens"] == 900
+
+
+def test_the_cost_column_admits_which_providers_it_can_price(tmp_path):
+    """crivo.llm maps usage from `prompt_tokens`/`completion_tokens`, the
+    OpenAI and DeepSeek spelling. Anthropic's usage object spells them
+    `input_tokens`/`output_tokens`, so on the Claude provider no span carries
+    either additive term, every case reads unknown, and the whole cost column
+    is silent. Nothing in the code says so, and a reader of the docstring's
+    three states would read that silence as cancelled calls."""
+    import json
+
+    tele = tmp_path / "claude.jsonl"
+    tele.write_text(
+        json.dumps(
+            {
+                "name": "gen_ai.client.call",
+                "dur_s": 4.0,
+                "attrs": {
+                    "gen_ai.system": "claude",
+                    "gen_ai.request.model": "claude-sonnet-4-6",
+                },
+            }
+        )
+        + "\n"
+    )
+
+    stats = agent_run._call_stats(tele)
+    assert stats["count"] == 1, "the call happened and was billed"
+    assert stats["new_work_tokens"] is None
+
+    doc = agent_run._call_stats.__doc__ or ""
+    assert "claude" in doc.lower(), "the provider gap has to be named, not implied"
+
+
+def test_absent_telemetry_publishes_an_unknown_count_not_a_zero_one(tmp_path):
+    """The same return said two things: new_work_tokens None ("we do not know
+    whether a call was made") beside count 0 ("no call was made"). The count
+    is the more legible of the two and it is the one that was wrong, so a
+    reader of the row concluded the case ran free."""
+    stats = agent_run._call_stats(tmp_path / "never-written.jsonl")
+
+    assert stats["new_work_tokens"] is None
+    assert stats["count"] is None, "an unreadable file cannot certify zero calls"
+    assert stats["model_wait_s"] is None, "nor zero seconds of model wait"
 
 
 def test_call_stats_will_not_publish_a_partial_sum_as_the_whole_case(tmp_path):
@@ -617,6 +702,38 @@ def test_arm_suffix_names_every_knob_that_changes_the_arm():
     # a namespace that predates a knob (the older test fixtures) still names
     # the default arm rather than raising
     assert agent_run._arm_suffix(argparse.Namespace(human_gates="skip")) == ""
+
+
+def test_the_sandbox_and_the_caps_are_knobs_that_change_the_arm():
+    """`--docker` moves the run off the host kernel and `--wall-cap` /
+    `--max-events` decide how much of a case gets to finish, so all three
+    change what an arm measures. None of them reached the filename, so a
+    sandboxed run resumed the host-kernel run's result file and republished
+    its row as its own - the exact failure the docstring above says the
+    suffix prevents."""
+    import argparse
+
+    def suffix(**kwargs):
+        base = {
+            "human_gates": "skip",
+            "policies": "none",
+            "autonomy": None,
+            "docker": False,
+            "wall_cap": agent_run.DEFAULT_WALL_CAP,
+            "max_events": agent_run.DEFAULT_MAX_EVENTS,
+        }
+        return agent_run._arm_suffix(argparse.Namespace(**{**base, **kwargs}))
+
+    assert suffix() == "", "the default arm keeps the empty suffix"
+    assert suffix(docker=True) == ".docker"
+    assert suffix(wall_cap=60.0) == ".wall-cap-60"
+    assert suffix(max_events=500) == ".max-events-500"
+    assert suffix(docker=True, wall_cap=60.0, max_events=500) == (
+        ".docker.wall-cap-60.max-events-500"
+    )
+    # the resume key is the whole point: these arms must not collide
+    assert suffix(docker=True) != suffix(docker=False)
+    assert suffix(wall_cap=60.0) != suffix(wall_cap=120.0)
 
 
 @pytest.mark.parametrize(
@@ -783,8 +900,8 @@ def test_run_case_autonomy_arm_gets_its_own_telemetry_file(tmp_path, monkeypatch
     monkeypatch.delenv("CRIVO_TELEMETRY", raising=False)
     args = argparse.Namespace(
         docker=False,
-        max_events=10,
-        wall_cap=5.0,
+        max_events=agent_run.DEFAULT_MAX_EVENTS,
+        wall_cap=agent_run.DEFAULT_WALL_CAP,
         human_gates="skip",
         policies="none",
         autonomy="careful",
@@ -847,8 +964,8 @@ def test_a_hand_built_namespace_cannot_drive_an_autonomy_arm_with_approve(
     )
     args = argparse.Namespace(
         docker=False,
-        max_events=10,
-        wall_cap=5.0,
+        max_events=agent_run.DEFAULT_MAX_EVENTS,
+        wall_cap=agent_run.DEFAULT_WALL_CAP,
         human_gates="approve",
         policies="none",
         autonomy="autonomous",
@@ -870,3 +987,28 @@ def test_the_ceiling_arm_still_drives_approve_without_an_autonomy_arm():
     args = argparse.Namespace(human_gates="approve", policies="none", autonomy=None)
     assert agent_run._arm_gates(args) == "approve"
     assert agent_run._arm_suffix(args) == ".ceiling"
+
+
+def test_two_different_cap_values_do_not_share_an_arm_name() -> None:
+    """The item 24 fix put the caps in the filename with "%g", which goes
+    exponential past six significant figures and rounds. So --max-events
+    1000000 and 1000001 both render ".max-events-1e+06", two different arms
+    share one results file, and the second run resumes and republishes the
+    first's row - which is the exact failure the new docstring says the
+    suffix prevents."""
+    from argparse import Namespace
+
+    def arm(**knobs):
+        return agent_run._arm_suffix(
+            Namespace(human_gates="skip", autonomy=None, docker=False, **knobs)
+        )
+
+    assert arm(max_events=1_000_000, wall_cap=agent_run.DEFAULT_WALL_CAP) != arm(
+        max_events=1_000_001, wall_cap=agent_run.DEFAULT_WALL_CAP
+    )
+    assert arm(max_events=123_456_789, wall_cap=agent_run.DEFAULT_WALL_CAP) != arm(
+        max_events=123_456_700, wall_cap=agent_run.DEFAULT_WALL_CAP
+    )
+    assert arm(wall_cap=1_200_000.0, max_events=agent_run.DEFAULT_MAX_EVENTS) != arm(
+        wall_cap=1_200_001.0, max_events=agent_run.DEFAULT_MAX_EVENTS
+    )

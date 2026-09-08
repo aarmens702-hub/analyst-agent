@@ -109,19 +109,32 @@ def test_plan_first_on_approves_once_then_autoclean_runs_silent(session, monkeyp
     assert session.policies and session.policies[-1].id == "plan-v1"
 
 
-def test_plan_first_skip_declines_the_whole_plan(session, monkeypatch):
+@pytest.mark.parametrize("answer", [GateDecision("skip"), GateDecision("reject", "no")])
+def test_plan_first_declines_the_whole_plan(session, monkeypatch, answer):
+    """Anything but "run" declines it. Reject used to return proceed=True,
+    which the autonomy packet's seeded policy turned into a silent apply
+    (wave 1.5 triage 1); this gate has no revision loop, so the two answers
+    mean the same thing here.
+
+    The report assertion changed with wave 1.5 triage 3: it used to read
+    `rep["fixes"] == []`, which is how an unapproved plan came to file "0
+    fixed · 0 skipped · 0 failed · 0 not attempted" over a frame it had just
+    listed findings for. Declining still attempts nothing, which is now
+    asserted on the statuses rather than on an empty list."""
     monkeypatch.setenv("CRIVO_PLAN_FIRST", "on")
     monkeypatch.setattr(llm, "generate", gen([FIX_A]))
     FakeClient.script = [
         diag([finding()]),
         baseline(),
-        # plan gate is skipped -> no fixes attempted, report still written
+        # the plan is declined -> no fixes attempted, report still written
     ]
-    events = drive(session.clean("df"), decisions=[GateDecision("skip")])
+    events = drive(session.clean("df"), decisions=[answer])
 
     rep = report_of(session)
-    assert rep["fixes"] == []  # declining the plan attempts nothing
-    assert not session.policies  # a skipped plan arms no policy
+    assert [f["status"] for f in rep["fixes"]] == ["aborted"]
+    assert [f["fix_source"] for f in rep["fixes"]] == [None]
+    assert len(FakeClient.executed) == 2  # diag + baseline, no fix cell
+    assert not session.policies  # a declined plan arms no policy
     assert sum(isinstance(e, GateRequest) for e in events) == 1
 
 
